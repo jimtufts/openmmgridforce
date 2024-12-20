@@ -1,5 +1,0 @@
-/home/jim/src/p310/openmmgridforce_pypi/_skbuild/linux-x86_64-3.11/cmake-install/openmmgridforce/lib/libOpenMMGridForce.so
-/home/jim/src/p310/openmmgridforce_pypi/_skbuild/linux-x86_64-3.11/cmake-install/openmmgridforce/include/internal/GridForceImpl.h
-/home/jim/src/p310/openmmgridforce_pypi/_skbuild/linux-x86_64-3.11/cmake-install/openmmgridforce/include/internal/windowsExportGridForce.h
-/home/jim/src/p310/openmmgridforce_pypi/_skbuild/linux-x86_64-3.11/cmake-install/openmmgridforce/openmmgridforce/_gridforceplugin.so
-/home/jim/src/p310/openmmgridforce_pypi/_skbuild/linux-x86_64-3.11/cmake-install/openmmgridforce/openmmgridforce/gridforceplugin.py
