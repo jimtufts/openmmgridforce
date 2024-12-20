@@ -1,26 +1,106 @@
-GridForce plugin for OpenMM
-===========================
+# OpenMM GridForce Plugin
 
-`openmmgridforce` is a plugin for the `OpenMM` toolkit for molecular simulations using a potential energy on grid points. 
-Currently, the `openmmgridforce` plugin is available within the "reference implementation" of the `OpenMM` toolkit.
+[![License](https://img.shields.io/badge/License-BSD_2_Clause-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+[![OpenMM](https://img.shields.io/badge/openmm-7.0+-blue.svg)](http://openmm.org)
 
-## How to install from source
+A plugin for OpenMM that implements grid-based forces.
 
-### Requirements (Note: openmm used SWIG 3 for all builds)
-* conda create -n omm3
-* conda activate omm3
-* conda install -c conda-forge openmm cmake netcdf4
-* conda install -c conda-forge swig=3.0.12
+## Prerequisites
 
-#### on macOS-64
-* conda install -c conda-forge clang_osx-64 clangxx_osx-64
+Before installing the plugin, ensure you have the following:
 
-#### on linux-64
-* conda install -c conda-forge gcc_linux-64 gxx_linux-64
+- Python 3.7 or later
+- OpenMM 7.0 or later
+- C++ compiler:
+  - Linux: GCC
+  - macOS: Clang
+- SWIG 3.0.12 (specifically this version for OpenMM compatibility)
+- CMake 3.16 or later
+- Ninja build system
+- scikit-build (for pip installation)
 
+## Installation
 
-### (Compile and install C++ codes) ###
-* pip install .
-* Now you can testify the Test*py.
+### 1. Create a Conda Environment
 
-python TestReferenceGridForce.py
+First, create and activate a new conda environment:
+
+```bash
+conda create -n gridforce python
+conda activate gridforce
+```
+
+### 2. Install Dependencies
+
+Install OpenMM and build dependencies:
+
+```bash
+# Core dependencies
+conda install -c conda-forge openmm cmake ninja
+conda install -c conda-forge "swig=3.0.12"
+
+# Build dependencies
+pip install scikit-build
+
+# Additional dependencies for testing
+conda install -c conda-forge netcdf4
+```
+
+### 3. Install Platform-Specific Compiler
+
+On Linux:
+```bash
+conda install -c conda-forge gcc_linux-64 gxx_linux-64
+```
+
+On macOS:
+```bash
+conda install -c conda-forge clang_osx-64 clangxx_osx-64
+```
+
+### 4. Install the Plugin
+
+```bash
+pip install .
+```
+
+## Verification
+
+To verify the installation:
+
+```python
+import openmm
+import openmmgridforce
+print("Installation successful!")
+```
+
+Run the tests:
+```bash
+python python/TestReferenceGridForce.py
+```
+
+## Troubleshooting
+
+If you encounter issues during installation:
+
+1. Verify you're in the correct conda environment:
+   ```bash
+   conda activate gridforce
+   ```
+
+2. Check that required packages are installed:
+   ```bash
+   conda list openmm  # Should show OpenMM 7.0 or later
+   swig -version      # Should show version 3.0.12
+   cmake --version    # Should show version 3.16 or later
+   ```
+
+3. Verify compiler installation:
+   - Linux: `gcc --version`
+   - macOS: `clang --version`
+
+## License
+
+This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICENSE) file for details.
+
