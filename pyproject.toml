@@ -15,7 +15,7 @@ version = "1.0.0"
 description = "OpenMM GridForce Plugin"
 readme = "README.md"
 authors = [
-    {name = "Soohaeng Yoo Willow", email = ""},
+    {name = "Soohaeng Yoo Willow", email = "sy7willow@gmail.com"},
     {name = "Jim Tufts", email = "jtufts@iit.edu"}
 ]
 requires-python = ">=3.7"
