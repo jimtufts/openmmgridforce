@@ -1,0 +1,31 @@
+# Build directories
+_skbuild/
+openmmgridforce_build/
+build/
+dist/
+
+# Python package info
+*.egg-info/
+*.egg
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Compiled files
+*.so
+*.dylib
+*.dll
+*.o
