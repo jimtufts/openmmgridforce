@@ -1,0 +1,11 @@
+# ninja log v6
+1	270	1734722479309861104	CMakeFiles/OpenMMGridForce.dir/openmmapi/src/GridForceImpl.cpp.o	a1068801525942bc
+1	309	1734722479309861104	CMakeFiles/OpenMMGridForce.dir/openmmapi/src/GridForce.cpp.o	c29be11ad5eebfd1
+309	368	1734722479617864038	libOpenMMGridForce.so	e3bf574d69cd2415
+368	1710	1734722481013877323	python/CMakeFiles/gridforceplugin.dir/gridforcepluginPYTHON_wrap.cxx	e166d593cdab704f
+368	1710	1734722481013877323	python/gridforceplugin.py	e166d593cdab704f
+368	1710	1734722481013877323	/home/jim/src/p310/openmmgridforce_pypi/_skbuild/linux-x86_64-3.11/cmake-build/python/CMakeFiles/gridforceplugin.dir/gridforcepluginPYTHON_wrap.cxx	e166d593cdab704f
+368	1710	1734722481013877323	/home/jim/src/p310/openmmgridforce_pypi/_skbuild/linux-x86_64-3.11/cmake-build/python/gridforceplugin.py	e166d593cdab704f
+1711	10555	1734722481017877359	python/CMakeFiles/gridforceplugin.dir/CMakeFiles/gridforceplugin.dir/gridforcepluginPYTHON_wrap.cxx.o	b519b2bac70c1c37
+10556	10625	1734722489865961563	python/_gridforceplugin.so	7bd84fe6552de872
+10625	10635	1734722489933962212	CMakeFiles/install.util	aed8adb355162112

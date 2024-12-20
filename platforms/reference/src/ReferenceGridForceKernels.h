@@ -42,14 +42,13 @@
 namespace GridForcePlugin {
 
 /**
- * This kernel is invoked by OpenMMGridForce to calculate the force 
+ * This kernel is invoked by OpenMMGridForce to calculate the force
  */
 class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
    public:
-    ReferenceCalcGridForceKernel(std::string name,
-                                 const OpenMM::Platform &platform) 
-                                 : CalcGridForceKernel(name, platform) {
+    ReferenceCalcGridForceKernel(std::string name, const OpenMM::Platform &platform) : CalcGridForceKernel(name, platform) {
     }
+    ~ReferenceCalcGridForceKernel();
     /**
      * Initialize the kernel.
      * 

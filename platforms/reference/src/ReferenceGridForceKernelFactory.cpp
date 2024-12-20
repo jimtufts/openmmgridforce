@@ -29,17 +29,17 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.                                     *
  * -------------------------------------------------------------------------- */
 
-#include <iostream>
-
 #include "ReferenceGridForceKernelFactory.h"
 #include "ReferenceGridForceKernels.h"
-#include "openmm/OpenMMException.h"
-#include "openmm/internal/ContextImpl.h"
 #include "openmm/reference/ReferencePlatform.h"
+#include "openmm/internal/ContextImpl.h"
+#include "openmm/OpenMMException.h"
+#include <vector>
+#include <iostream>
 
+using namespace GridForcePlugin;
 using namespace OpenMM;
-
-namespace GridForcePlugin {
+using namespace std;
 
 extern "C" OPENMM_EXPORT void registerPlatforms() {
 }
@@ -48,13 +48,8 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
     for (int i = 0; i < Platform::getNumPlatforms(); i++) {
         Platform& platform = Platform::getPlatform(i);
         if (dynamic_cast<ReferencePlatform*>(&platform) != NULL) {
-            if (platform.getName() == "Reference") {
-                ReferenceGridForceKernelFactory* factory = 
-                            new ReferenceGridForceKernelFactory();
-                platform.registerKernelFactory(CalcGridForceKernel::Name(), 
-                                                factory);
-                
-            }
+            ReferenceGridForceKernelFactory* factory = new ReferenceGridForceKernelFactory();
+            platform.registerKernelFactory(CalcGridForceKernel::Name(), factory);
         }
     }
 }
@@ -67,8 +62,6 @@ KernelImpl* ReferenceGridForceKernelFactory::createKernelImpl(std::string name, 
     ReferencePlatform::PlatformData& data = *static_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
     if (name == CalcGridForceKernel::Name())
         return new ReferenceCalcGridForceKernel(name, platform);
-
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }
 
-}  // namespace GridForcePlugin

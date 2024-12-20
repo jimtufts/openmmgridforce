@@ -34,20 +34,17 @@
 
 #include "openmm/KernelFactory.h"
 
-using namespace OpenMM;
-
-namespace GridForcePlugin {
+namespace OpenMM {
 
 /**
- * This KernelFactory creates kernels for the reference implementation of the Example plugin.
+ * This KernelFactory creates kernels for the reference implementation of the GridForce plugin.
  */
 
 class ReferenceGridForceKernelFactory : public KernelFactory {
 public:
-    KernelImpl* createKernelImpl(std::string name, 
-                                const Platform& platform, ContextImpl& context) const;
+    KernelImpl* createKernelImpl(std::string name, const Platform& platform, ContextImpl& context) const;
 };
 
-} // namespace GridForcePlugin
+} // namespace OpenMM
 
-#endif /* OPENMM_REFERENCE_GRIDFORCE_KERNEL_FACTORY_H_*/
+#endif /*OPENMM_REFERENCE_GRIDFORCE_KERNEL_FACTORY_H_*/

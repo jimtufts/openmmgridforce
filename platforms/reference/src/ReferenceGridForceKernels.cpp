@@ -31,29 +31,33 @@
 
 #include "ReferenceGridForceKernels.h"
 #include "GridForce.h"
-
 #include "openmm/OpenMMException.h"
-#include "openmm/Vec3.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/reference/ReferencePlatform.h"
 
 #include <cmath>
+#include "openmm/Vec3.h"
 
+using namespace GridForcePlugin;
 using namespace OpenMM;
 using namespace std;
 
-namespace GridForcePlugin {
-
 // The length unit is nm
-static vector<Vec3> &extractPositions(ContextImpl &context) {
-    ReferencePlatform::PlatformData *data = reinterpret_cast<ReferencePlatform::PlatformData *>(context.getPlatformData());
-    return *((vector<Vec3> *)data->positions);
+static vector<Vec3>& extractPositions(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    return *data->positions;
 }
 
-static vector<Vec3> &extractForces(ContextImpl &context) {
-    ReferencePlatform::PlatformData *data = reinterpret_cast<ReferencePlatform::PlatformData *>(context.getPlatformData());
-    return *((vector<Vec3> *)data->forces);
+static vector<Vec3>& extractForces(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    return *data->forces;
 }
+
+static Vec3* extractBoxVectors(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    return data->periodicBoxVectors;
+}
+
 
 /*
     OpenMM Grid Force
@@ -170,6 +174,3 @@ void ReferenceCalcGridForceKernel::copyParametersToContext(ContextImpl &context,
     grid_force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
 }
 
-
-
-}  // namespace AlGDockPlugin

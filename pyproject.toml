@@ -1,0 +1,37 @@
+[build-system]
+requires = [
+    "setuptools>=42",
+    "wheel",
+    "cmake>=3.16",
+    "scikit-build>=0.13",
+    "ninja",
+    "openmm",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openmmgridforce"
+version = "0.1.0"
+description = "OpenMM GridForce Plugin"
+readme = "README.md"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+requires-python = ">=3.7"
+dependencies = [
+    "openmm>=7.0",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[tool.scikit-build]
+cmake.minimum-version = "3.16"
+cmake.build-type = "Release"
