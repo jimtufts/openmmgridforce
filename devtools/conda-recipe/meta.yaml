@@ -1,0 +1,55 @@
+{% set name = "openmm-gridforce" %}
+{% set version = "1.0.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: ../..
+
+build:
+  number: 0
+  skip: True  # [win]
+  missing_dso_whitelist:
+    - '*/libgcc_s.so.1'
+
+requirements:
+  build:
+    - {{ compiler('cxx') }}
+    - cmake
+    - swig =3.0.12
+    - make  # [unix]
+  host:
+    - python
+    - openmm >=8.0
+  run:
+    - python
+    - openmm >=8.0
+    - {{ pin_compatible('__glibc', max_pin='x.x') }}  # [linux]
+
+test:
+  requires:
+    - pytest
+  source_files:
+    - python/TestReferenceGridForce.py
+    - python/grids/direct_ele.nc
+    - python/grids/LJa.nc
+    - python/grids/LJr.nc
+    - python/prmtopcrd/*
+  imports:
+    - gridforce
+  commands:
+    - python python/TestReferenceGridForce.py
+
+about:
+  home: https://github.com/jimtufts/openmmgridforce
+  license: MIT
+  license_file: LICENSE
+  summary: OpenMM plugin for grid-based forces
+  description: |
+    GridForce plugin for OpenMM that enables grid-based force calculations.
+
+extra:
+  recipe-maintainers:
+    - jimtufts
