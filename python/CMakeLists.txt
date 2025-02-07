@@ -21,8 +21,16 @@ set(GRIDFORCEPLUGIN_HEADER_DIR "${CMAKE_SOURCE_DIR}/openmmapi/include")
 set(GRIDFORCEPLUGIN_LIBRARY_DIR "${CMAKE_BINARY_DIR}")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py ${CMAKE_CURRENT_BINARY_DIR}/setup.py)
 add_custom_command(TARGET PythonInstall
-    COMMAND "${PYTHON_EXECUTABLE}" setup.py build
-    COMMAND "${PYTHON_EXECUTABLE}" setup.py install
+    COMMAND "${PYTHON_EXECUTABLE}" -m pip install . 
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
+# Copy test files and data
+file(COPY ${CMAKE_SOURCE_DIR}/python/tests
+         ${CMAKE_SOURCE_DIR}/python/prmtopcrd
+         ${CMAKE_SOURCE_DIR}/python/grids
+     DESTINATION ${CMAKE_BINARY_DIR}/python)
+
+add_test(NAME TestPluginLoad
+         COMMAND ${PYTHON_EXECUTABLE} -m pytest
+         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/python/tests)

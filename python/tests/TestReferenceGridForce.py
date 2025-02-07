@@ -59,15 +59,15 @@ class TestCustomForce (unittest.TestCase):
     """This tests the Reference implementation of ReferenceAlGDockSphereForce."""
 
     def testGrid(self):
-        prmtop = app.AmberPrmtopFile('prmtopcrd/ligand.prmtop')
-        inpcrd = app.AmberInpcrdFile('prmtopcrd/ligand.trans.inpcrd')
+        prmtop = app.AmberPrmtopFile('../prmtopcrd/ligand.prmtop')
+        inpcrd = app.AmberInpcrdFile('../prmtopcrd/ligand.trans.inpcrd')
         system = prmtop.createSystem(nonbondedMethod=app.NoCutoff,
                                      constraints=app.HBonds,
                                      implicitSolvent=None)
 
         # val unit = kcal/mol/e --> kJ/mol/e
         unit_conversion = 4.184
-        force = getGridForce('grids/direct_ele.nc', unit_conversion)
+        force = getGridForce('../grids/direct_ele.nc', unit_conversion)
 
         for chg in prmtop._prmtop.getCharges():
             force.addScalingFactor(chg)
@@ -75,7 +75,7 @@ class TestCustomForce (unittest.TestCase):
 
         # val unit = sqrt(kcal/mol)/A^6 --> sqrt(kJ/mol)/nm^6
         unit_conversion = np.sqrt(4.184)*1.0e6
-        force = getGridForce('grids/LJr.nc', unit_conversion)
+        force = getGridForce('../grids/LJr.nc', unit_conversion)
 
         for rVdw, eps in prmtop._prmtop.getNonbondTerms():
             # rVdw : nm
@@ -86,7 +86,7 @@ class TestCustomForce (unittest.TestCase):
 
         # val unit = sqrt(kcal/mol)/A^3 --> sqrt(kJ/mol)/nm^3
         unit_conversion = np.sqrt(4.184)*1.0e3
-        force = getGridForce('grids/LJa.nc', unit_conversion)
+        force = getGridForce('../grids/LJa.nc', unit_conversion)
 
         for rVdw, eps in prmtop._prmtop.getNonbondTerms():
             # rVdw : nm

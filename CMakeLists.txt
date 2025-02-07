@@ -81,26 +81,6 @@ INSTALL (FILES ${API_ONLY_INCLUDE_FILES_OPENMM} DESTINATION include/internal)
 # Enable testing
 ENABLE_TESTING()
 
-# Basic plugin load test
-message("Python executable: ${PYTHON_EXECUTABLE}")
-set(PYTHON_CMD -c "import openmm as mm; import gridforceplugin")
-add_test(NAME TestPluginLoad
-        COMMAND ${PYTHON_EXECUTABLE} ${PYTHON_CMD})
-
-#ADD_TEST(NAME TestPluginLoad
-#         COMMAND ${PYTHON_EXECUTABLE} -c "import openmm as mm; import gridforceplugin")
-
-# Reference test
-#ADD_TEST(NAME TestReferenceGridForce
-#         COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_SOURCE_DIR}/python/TestReferenceGridForce.py")
-
-# Set environment for tests
-#SET_TESTS_PROPERTIES(TestPluginLoad TestReferenceGridForce
-#    PROPERTIES ENVIRONMENT "OPENMM_PLUGIN_DIR=$<TARGET_FILE_DIR:${SHARED_GRIDFORCE_TARGET}>")
-
-# Add target for check 
-ADD_CUSTOM_TARGET(check COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure)
-
 # Build the implementations for different platforms
 
 ADD_SUBDIRECTORY(platforms/reference)
