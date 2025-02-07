@@ -90,8 +90,8 @@ ADD_TEST(NAME TestPluginLoad
 #         COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_SOURCE_DIR}/python/TestReferenceGridForce.py")
 
 # Set environment for tests
-SET_TESTS_PROPERTIES(TestPluginLoad TestReferenceGridForce
-    PROPERTIES ENVIRONMENT "OPENMM_PLUGIN_DIR=$<TARGET_FILE_DIR:${SHARED_GRIDFORCE_TARGET}>")
+#SET_TESTS_PROPERTIES(TestPluginLoad TestReferenceGridForce
+#    PROPERTIES ENVIRONMENT "OPENMM_PLUGIN_DIR=$<TARGET_FILE_DIR:${SHARED_GRIDFORCE_TARGET}>")
 
 # Add target for check 
 ADD_CUSTOM_TARGET(check COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure)
