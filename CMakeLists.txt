@@ -84,7 +84,7 @@ ENABLE_TESTING()
 # Basic plugin load test
 set(TEST_COMMAND
     ${PYTHON_EXECUTABLE}
-    -c
+    "-c"
     "import openmm as mm; import gridforceplugin")
 add_test(NAME TestPluginLoad
          COMMAND_EXPAND_LISTS "${TEST_COMMAND}")
