@@ -82,8 +82,15 @@ INSTALL (FILES ${API_ONLY_INCLUDE_FILES_OPENMM} DESTINATION include/internal)
 ENABLE_TESTING()
 
 # Basic plugin load test
-ADD_TEST(NAME TestPluginLoad
-         COMMAND ${PYTHON_EXECUTABLE} -c "import openmm as mm; import gridforceplugin")
+set(TEST_COMMAND
+    ${PYTHON_EXECUTABLE}
+    -c
+    "import openmm as mm; import gridforceplugin")
+add_test(NAME TestPluginLoad
+         COMMAND_EXPAND_LISTS "${TEST_COMMAND}")
+
+#ADD_TEST(NAME TestPluginLoad
+#         COMMAND ${PYTHON_EXECUTABLE} -c "import openmm as mm; import gridforceplugin")
 
 # Reference test
 #ADD_TEST(NAME TestReferenceGridForce
