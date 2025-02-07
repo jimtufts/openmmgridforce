@@ -13,6 +13,14 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="numpy.ndarray size changed")
 
+def test_plugin_loading():
+    """Verify that the GridForce plugin is properly loaded"""
+    try:
+        force = gridforceplugin.GridForce()
+        assert hasattr(force, 'getGridCounts'), "GridForce plugin not properly loaded"
+    except Exception as e:
+        assert False, f"Failed to load GridForce plugin: {str(e)}"
+
 def grid_read(FN):
     """
     Reads a grid in a netcdf format
@@ -64,20 +72,16 @@ def test_grid_force_creation(simulation_setup):
     initial_forces = system.getNumForces()
     unit_conversion = 4.184
     force = getGridForce('../grids/direct_ele.nc', unit_conversion)
+    
+    # Verify the force object itself before adding to system
+    assert hasattr(force, 'getGridCounts'), "GridForce should have getGridCounts method"
+    assert hasattr(force, 'getGridSpacing'), "GridForce should have getGridSpacing method"
+    
     for chg in prmtop._prmtop.getCharges():
         force.addScalingFactor(chg)
     system.addForce(force)
     
     assert system.getNumForces() == initial_forces + 1
-    added_force = system.getForce(system.getNumForces()-1)
-    
-    # Verify force functionality instead of type
-    try:
-        added_force.getGridCounts()
-        added_force.getGridSpacing()
-        assert True
-    except AttributeError:
-        assert False, "Added force does not have expected GridForce methods"
 
 def test_lj_forces(simulation_setup):
     """Test the creation and addition of Lennard-Jones forces"""
@@ -86,37 +90,29 @@ def test_lj_forces(simulation_setup):
     
     # Test LJr force
     unit_conversion = np.sqrt(4.184)*1.0e6
-    force = getGridForce('../grids/LJr.nc', unit_conversion)
+    ljr_force = getGridForce('../grids/LJr.nc', unit_conversion)
+    
+    # Verify the force object before adding
+    assert hasattr(ljr_force, 'getGridCounts'), "LJr GridForce should have getGridCounts method"
+    
     for rVdw, eps in prmtop._prmtop.getNonbondTerms():
         ljr_scale = np.sqrt(eps)*(2.0*rVdw)**6
-        force.addScalingFactor(ljr_scale)
-    system.addForce(force)
-    
-    # Verify LJr force
+        ljr_force.addScalingFactor(ljr_scale)
+    system.addForce(ljr_force)
     assert system.getNumForces() == initial_forces + 1
-    ljr_force = system.getForce(system.getNumForces()-1)
-    try:
-        ljr_force.getGridCounts()
-        assert True
-    except AttributeError:
-        assert False, "LJr force does not have expected GridForce methods"
     
     # Test LJa force
     unit_conversion = np.sqrt(4.184)*1.0e3
-    force = getGridForce('../grids/LJa.nc', unit_conversion)
+    lja_force = getGridForce('../grids/LJa.nc', unit_conversion)
+    
+    # Verify the force object before adding
+    assert hasattr(lja_force, 'getGridCounts'), "LJa GridForce should have getGridCounts method"
+    
     for rVdw, eps in prmtop._prmtop.getNonbondTerms():
         lja_scale = np.sqrt(eps)*(2.0*rVdw)**3
-        force.addScalingFactor(lja_scale)
-    system.addForce(force)
-    
-    # Verify LJa force
+        lja_force.addScalingFactor(lja_scale)
+    system.addForce(lja_force)
     assert system.getNumForces() == initial_forces + 2
-    lja_force = system.getForce(system.getNumForces()-1)
-    try:
-        lja_force.getGridCounts()
-        assert True
-    except AttributeError:
-        assert False, "LJa force does not have expected GridForce methods"
 
 def test_full_simulation(simulation_setup):
     """Test the full simulation setup and energy calculation"""
@@ -132,6 +128,9 @@ def test_full_simulation(simulation_setup):
     
     for grid_file, unit_conv in forces_to_add:
         force = getGridForce(grid_file, unit_conv)
+        # Verify force before adding
+        assert hasattr(force, 'getGridCounts'), f"Force from {grid_file} should have getGridCounts method"
+        
         if 'direct_ele' in grid_file:
             for chg in prmtop._prmtop.getCharges():
                 force.addScalingFactor(chg)
@@ -141,8 +140,8 @@ def test_full_simulation(simulation_setup):
                 force.addScalingFactor(scale)
         system.addForce(force)
     
-    assert system.getNumForces() == initial_forces + 3
-    
+    assert system.getNumForces() == initial_forces + 3   
+
     # Set up integrator and platform
     integrator = omm.LangevinIntegrator(300.0*unit.kelvin,
                                        1.0/unit.picoseconds,
