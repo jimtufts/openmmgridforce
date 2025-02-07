@@ -81,6 +81,11 @@ INSTALL (FILES ${API_ONLY_INCLUDE_FILES_OPENMM} DESTINATION include/internal)
 # Enable testing
 ENABLE_TESTING()
 
+# Add make check target
+add_custom_target(check
+    COMMAND ${CMAKE_CTEST_COMMAND}
+    DEPENDS PythonInstall)
+
 # Build the implementations for different platforms
 
 ADD_SUBDIRECTORY(platforms/reference)
