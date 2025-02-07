@@ -93,6 +93,9 @@ ADD_TEST(NAME TestReferenceGridForce
 SET_TESTS_PROPERTIES(TestPluginLoad TestReferenceGridForce
     PROPERTIES ENVIRONMENT "OPENMM_PLUGIN_DIR=$<TARGET_FILE_DIR:${SHARED_GRIDFORCE_TARGET}>")
 
+# Add target for check 
+ADD_CUSTOM_TARGET(check COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure)
+
 # Build the implementations for different platforms
 
 ADD_SUBDIRECTORY(platforms/reference)
