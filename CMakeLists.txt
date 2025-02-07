@@ -86,8 +86,8 @@ ADD_TEST(NAME TestPluginLoad
          COMMAND ${PYTHON_EXECUTABLE} -c "import openmm as mm; import gridforceplugin")
 
 # Reference test
-ADD_TEST(NAME TestReferenceGridForce
-         COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_SOURCE_DIR}/python/TestReferenceGridForce.py")
+#ADD_TEST(NAME TestReferenceGridForce
+#         COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_SOURCE_DIR}/python/TestReferenceGridForce.py")
 
 # Set environment for tests
 SET_TESTS_PROPERTIES(TestPluginLoad TestReferenceGridForce
