@@ -31,6 +31,8 @@ file(COPY ${CMAKE_SOURCE_DIR}/python/tests
          ${CMAKE_SOURCE_DIR}/python/grids
      DESTINATION ${CMAKE_BINARY_DIR}/python)
 
+add_custom_target(CopyTestFiles ALL DEPENDS ${CMAKE_BINARY_DIR}/python/tests )
+
 add_test(NAME TestPluginLoad
          COMMAND ${PYTHON_EXECUTABLE} -m pytest
          WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/python/tests)
