@@ -15,11 +15,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     vector<double> g_scaling_factors;
     force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
     
-    // Create CUDA arrays and upload data
-    g_counts_cuda.initialize<int>(context, 3, "gridCounts");
-    g_spacing_cuda.initialize<float>(context, 3, "gridSpacing");
-    g_vals_cuda.initialize<float>(context, g_vals.size(), "gridValues");
-    g_scaling_factors_cuda.initialize<float>(context, g_scaling_factors.size(), "scalingFactors");
+    numAtoms = system.getNumParticles();
+    
+    // Initialize arrays
+    this->g_counts.initialize<int>(context, 3, "gridCounts");
+    this->g_spacing.initialize<float>(context, 3, "gridSpacing");
+    this->g_vals.initialize<float>(context, g_vals.size(), "gridValues");
+    this->g_scaling_factors.initialize<float>(context, g_scaling_factors.size(), "scalingFactors");
     
     // Copy data to GPU
     vector<int> countsVec = {g_counts[0], g_counts[1], g_counts[2]};
@@ -27,42 +29,41 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     vector<float> valsFloat(g_vals.begin(), g_vals.end());
     vector<float> scalingFloat(g_scaling_factors.begin(), g_scaling_factors.end());
     
-    g_counts_cuda.upload(countsVec);
-    g_spacing_cuda.upload(spacingVec);
-    g_vals_cuda.upload(valsFloat);
-    g_scaling_factors_cuda.upload(scalingFloat);
+    this->g_counts.upload(countsVec);
+    this->g_spacing.upload(spacingVec);
+    this->g_vals.upload(valsFloat);
+    this->g_scaling_factors.upload(scalingFloat);
     
-    // Define grid dimensions for optimal occupancy
-    numAtoms = g_scaling_factors.size();
+    // Create kernel
     map<string, string> defines;
     defines["GRID_SIZE_X"] = context.intToString(g_counts[0]);
     defines["GRID_SIZE_Y"] = context.intToString(g_counts[1]);
     defines["GRID_SIZE_Z"] = context.intToString(g_counts[2]);
     defines["NUM_ATOMS"] = context.intToString(numAtoms);
     
-    // Create CUDA program
-    CUmodule program = context.createModule(CudaGridForceKernelSources::gridForce, defines);
-    kernel = context.getKernel(program, "computeGridForce");
+    CUmodule module = context.createModule(CudaGridForceKernelSources::gridForce, defines);
+    kernel = context.getKernel(module, "computeGridForce");
+    
+    hasInitializedKernel = true;
 }
 
-double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces, bool includeEnergy) {
+double CudaCalcGridForceKernel::execute(ContextImpl& contextImpl, bool includeForces, bool includeEnergy) {
     if (!hasInitializedKernel) {
-        hasInitializedKernel = true;
-        initialize(context.getSystem(), dynamic_cast<const GridForce&>(context.getSystem().getForce(0)));
+        initialize(contextImpl.getSystem(), dynamic_cast<const GridForce&>(contextImpl.getSystem().getForce(0)));
     }
     
     void* args[] = {&context.getPosq().getDevicePointer(),
                     &context.getForce().getDevicePointer(),
-                    &g_counts_cuda.getDevicePointer(),
-                    &g_spacing_cuda.getDevicePointer(),
-                    &g_vals_cuda.getDevicePointer(),
-                    &g_scaling_factors_cuda.getDevicePointer(),
+                    &g_counts.getDevicePointer(),
+                    &g_spacing.getDevicePointer(),
+                    &g_vals.getDevicePointer(),
+                    &g_scaling_factors.getDevicePointer(),
                     &includeEnergy,
                     &context.getEnergyBuffer().getDevicePointer()};
                     
-    int gridSize = min(context.getNumAtoms(), 256);
-    int blockSize = (numAtoms + gridSize - 1)/gridSize;
-    context.executeKernel(kernel, args, gridSize, blockSize);
+    int threads = min(context.getNumAtoms(), 256);
+    int blocks = (numAtoms + threads - 1)/threads;
+    context.executeKernel(kernel, args, threads, blocks);
     
     // Return energy
     if (includeEnergy) {
@@ -73,10 +74,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     return 0.0;
 }
 
-void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& context, const GridForce& force) {
-    if (numAtoms != force.getNumParticles())
-        throw OpenMMException("updateParametersInContext: The number of particles has changed");
-        
+void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, const GridForce& force) {
     // Get updated parameters
     vector<int> g_counts;
     vector<double> g_spacing;
@@ -84,14 +82,17 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& context, cons
     vector<double> g_scaling_factors;
     force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
     
+    if (numAtoms != contextImpl.getSystem().getNumParticles())
+        throw OpenMMException("updateParametersInContext: The number of particles has changed");
+    
     // Update CUDA arrays
     vector<int> countsVec = {g_counts[0], g_counts[1], g_counts[2]};
     vector<float> spacingVec = {(float)g_spacing[0], (float)g_spacing[1], (float)g_spacing[2]};
     vector<float> valsFloat(g_vals.begin(), g_vals.end());
     vector<float> scalingFloat(g_scaling_factors.begin(), g_scaling_factors.end());
     
-    g_counts_cuda.upload(countsVec);
-    g_spacing_cuda.upload(spacingVec);
-    g_vals_cuda.upload(valsFloat);
-    g_scaling_factors_cuda.upload(scalingFloat);
+    this->g_counts.upload(countsVec);
+    this->g_spacing.upload(spacingVec);
+    this->g_vals.upload(valsFloat);
+    this->g_scaling_factors.upload(scalingFloat);
 }

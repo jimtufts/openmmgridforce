@@ -5,6 +5,7 @@
 #include "CommonGridForceKernels.h"
 #include "openmm/cuda/CudaPlatform.h"
 #include "openmm/cuda/CudaContext.h"
+#include "openmm/cuda/CudaArray.h"
 
 using namespace OpenMM;
 
@@ -13,39 +14,33 @@ namespace GridForcePlugin {
 class CudaCalcGridForceKernel : public CalcGridForceKernel {
 public:
     CudaCalcGridForceKernel(std::string name, const Platform& platform, CudaContext& cc) : 
-        CalcGridForceKernel(name, platform), hasInitializedKernel(false), context(cc) {
+        CalcGridForceKernel(name, platform), context(cc), hasInitializedKernel(false) {
     }
+    
     /**
      * Initialize the kernel.
-     * 
-     * @param system     the System this kernel will be applied to
-     * @param force      the GridForce this kernel will be used for
      */
-    void initialize(const OpenMM::System& system, const GridForce& force);
+    void initialize(const System& system, const GridForce& force);
+    
     /**
      * Execute the kernel to calculate the forces and/or energy.
-     *
-     * @param context        the context in which to execute this kernel
-     * @param includeForces  true if forces should be calculated
-     * @param includeEnergy  true if the energy should be calculated
-     * @return the potential energy due to the force
      */
-    double execute(OpenMM::ContextImpl& context, bool includeForces, bool includeEnergy);
+    double execute(ContextImpl& context, bool includeForces, bool includeEnergy);
+    
     /**
      * Copy changed parameters over to a context.
-     *
-     * @param context    the context to copy parameters to
-     * @param force      the GridForce to copy the parameters from
      */
-    void copyParametersToContext(OpenMM::ContextImpl& context, const GridForce& force);
+    void copyParametersToContext(ContextImpl& context, const GridForce& force);
 
 private:
-    bool hasInitializedKernel;
     CudaContext& context;
+    bool hasInitializedKernel;
     CudaArray g_counts;
     CudaArray g_spacing;
     CudaArray g_vals;
     CudaArray g_scaling_factors;
+    CUfunction kernel;
+    int numAtoms;
 };
 
 } // namespace GridForcePlugin

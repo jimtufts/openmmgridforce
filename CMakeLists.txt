@@ -7,7 +7,7 @@ PROJECT(OpenMMGridForcePlugin)
 
 # We need to know where OpenMM is installed so we can access the headers and libraries.
 #SET(OPENMM_DIR "/usr/local/openmm" CACHE PATH "Where OpenMM is installed")
-SET(OPENMM_DIR "/Users/willow/opt/miniconda3/envs/omm3" CACHE PATH "Where OpenMM is installed")
+SET(OPENMM_DIR "/home/jim/anaconda3/envs/openmmgridforce" CACHE PATH "Where OpenMM is installed")
 INCLUDE_DIRECTORIES("${OPENMM_DIR}/include")
 LINK_DIRECTORIES("${OPENMM_DIR}/lib" "${OPENMM_DIR}/lib/plugins")
 
@@ -88,14 +88,16 @@ add_custom_target(check
 
 # Build the implementations for different platforms
 
+# Build the implementations for different platforms
+ADD_SUBDIRECTORY(platforms/common)
 ADD_SUBDIRECTORY(platforms/reference)
 SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}")
 
 FIND_PACKAGE(CUDA QUIET)
 IF(CUDA_FOUND)
-    SET(ALGDOCK_BUILD_CUDA_LIB ON CACHE BOOL "Build implementation for CUDA")
+    SET(GRIDFORCE_BUILD_CUDA_LIB ON CACHE BOOL "Build implementation for CUDA")
 ELSE(CUDA_FOUND)
-    SET(ALGDOCK_BUILD_CUDA_LIB OFF CACHE BOOL "Build implementation for CUDA")
+    SET(GRIDFORCE_BUILD_CUDA_LIB OFF CACHE BOOL "Build implementation for CUDA")
 ENDIF(CUDA_FOUND)
 IF(GRIDFORCE_BUILD_CUDA_LIB)
     ADD_SUBDIRECTORY(platforms/cuda)
