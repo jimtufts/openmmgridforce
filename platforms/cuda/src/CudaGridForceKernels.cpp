@@ -61,7 +61,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& contextImpl, bool includeFo
                     &includeEnergy,
                     &context.getEnergyBuffer().getDevicePointer()};
                     
-    int threads = min(context.getNumAtoms(), 256);
+    int threads = min(numAtoms, 256);
     int blocks = (numAtoms + threads - 1)/threads;
     context.executeKernel(kernel, args, threads, blocks);
     

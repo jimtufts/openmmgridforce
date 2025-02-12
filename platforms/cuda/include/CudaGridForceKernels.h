@@ -2,7 +2,6 @@
 #define GRIDFORCE_CUDAKERNELS_H_
 
 #include "GridForceKernels.h"
-#include "CommonGridForceKernels.h"
 #include "openmm/cuda/CudaPlatform.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
@@ -17,20 +16,9 @@ public:
         CalcGridForceKernel(name, platform), context(cc), hasInitializedKernel(false) {
     }
     
-    /**
-     * Initialize the kernel.
-     */
-    void initialize(const System& system, const GridForce& force);
-    
-    /**
-     * Execute the kernel to calculate the forces and/or energy.
-     */
-    double execute(ContextImpl& context, bool includeForces, bool includeEnergy);
-    
-    /**
-     * Copy changed parameters over to a context.
-     */
-    void copyParametersToContext(ContextImpl& context, const GridForce& force);
+    virtual void initialize(const System& system, const GridForce& force);
+    virtual double execute(ContextImpl& context, bool includeForces, bool includeEnergy);
+    virtual void copyParametersToContext(ContextImpl& context, const GridForce& force);
 
 private:
     CudaContext& context;

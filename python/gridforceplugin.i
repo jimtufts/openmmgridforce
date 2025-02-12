@@ -26,9 +26,9 @@ namespace std {
   %template(seti) set<int>;
 }
 
-
 %{
 #include "GridForce.h"
+#include "GridForceKernels.h"
 #include "OpenMM.h"
 #include "OpenMMAmoeba.h"
 #include "OpenMMDrude.h"
@@ -38,7 +38,6 @@ namespace std {
 
 %feature("autodoc", "1");
 %nodefaultctor;
-
 
 using namespace OpenMM;
 
@@ -59,9 +58,12 @@ public:
     void updateParametersInContext(Context &context);
 };
 
+class CalcGridForceKernel : public OpenMM::KernelImpl {
+public:
+    static std::string Name() {return "CalcGridForce";}
+};
 
 } // namespace
-
 
 %pythoncode %{
   # when we import * from the python module, we only want to import the
@@ -70,5 +72,3 @@ public:
   # namespace
   __all__ = [k for k in locals().keys() if not (k.endswith('_swigregister') or k.startswith('_'))]
 %}
-
-
