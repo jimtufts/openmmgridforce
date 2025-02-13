@@ -4,9 +4,9 @@ import os
 import sys
 import platform
 
-openmm_dir = '/home/jim/anaconda3/envs/openmmgridforce'
-gridforceplugin_header_dir = '/home/jim/src/p311/openmmgridforce/openmmapi/include'
-gridforceplugin_library_dir = '/home/jim/src/p311/openmmgridforce/build'
+openmm_dir = '/home/jtufts/anaconda3/envs/openmmgridforce'
+gridforceplugin_header_dir = '/home/jtufts/src/p311/openmmgridforce/openmmapi/include'
+gridforceplugin_library_dir = '/home/jtufts/src/p311/openmmgridforce/build'
 
 # setup extra compile and link arguments on Mac
 extra_compile_args = ['-std=c++11']
