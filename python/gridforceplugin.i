@@ -51,7 +51,10 @@ public:
     void addGridSpacing (double dx, double dy, double dz);
     void addGridValue (double val);
     void addScalingFactor (double val);
-    
+
+    void setInvPower(double inv_power);
+    double getInvPower() const;
+
     void getGridParameters(std::vector<int>& counts, std::vector<double>& spacing, std::vector<double>& vals,
                            std::vector<double> &scaling_factors) const;
 
