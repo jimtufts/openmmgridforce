@@ -1,12 +1,14 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.16)
-PROJECT(OpenMMGridForcePlugin CUDA CXX)
+PROJECT(OpenMMGridForcePlugin CXX)
 
-# Find CUDA
-FIND_PACKAGE(CUDAToolkit REQUIRED)
+# Find CUDA (optional)
+FIND_PACKAGE(CUDAToolkit)
 IF(CUDAToolkit_FOUND)
     MESSAGE(STATUS "Found CUDA ${CUDAToolkit_VERSION} at ${CUDAToolkit_ROOT}")
+    ENABLE_LANGUAGE(CUDA)
     SET(GRIDFORCE_BUILD_CUDA_LIB ON CACHE BOOL "Build implementation for CUDA")
 ELSE()
+    MESSAGE(STATUS "CUDA not found - building without CUDA support")
     SET(GRIDFORCE_BUILD_CUDA_LIB OFF CACHE BOOL "Build implementation for CUDA")
 ENDIF()
 
