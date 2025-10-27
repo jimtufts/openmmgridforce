@@ -42,13 +42,14 @@ void CudaCalcGridForceKernel::initializeArrays(const vector<int>& counts,
 
 void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& force) {
     cout << "GridForceCUDA: Initializing CudaCalcGridForceKernel" << endl;
-    
+
     // Get grid parameters
     vector<int> g_counts;
     vector<double> g_spacing;
     vector<double> g_vals;
     vector<double> g_scaling_factors;
     force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
+    g_inv_power = force.getInvPower();
     
     numAtoms = system.getNumParticles();
     cout << "GridForceCUDA: System has " << numAtoms << " atoms" << endl;
@@ -145,12 +146,14 @@ double CudaCalcGridForceKernel::execute(ContextImpl& contextImpl, bool includeFo
         throw OpenMMException("One or more required CUDA arrays not properly initialized");
     }
     
+    float inv_power_float = (float)g_inv_power;
     void* args[] = {&posPtr,
                     &forcePtr,
                     &gridCountsPtr,
                     &gridSpacingPtr,
                     &gridValsPtr,
                     &scalingFactorsPtr,
+                    &inv_power_float,
                     &includeEnergy,
                     &energyPtr};
     
@@ -190,12 +193,13 @@ double CudaCalcGridForceKernel::execute(ContextImpl& contextImpl, bool includeFo
 
 void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, const GridForce& force) {
     cout << "GridForceCUDA: Copying parameters to context" << endl;
-    
+
     vector<int> g_counts;
     vector<double> g_spacing;
     vector<double> g_vals;
     vector<double> g_scaling_factors;
     force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
+    g_inv_power = force.getInvPower();
     
     if (numAtoms != contextImpl.getSystem().getNumParticles())
         throw OpenMMException("updateParametersInContext: The number of particles has changed");

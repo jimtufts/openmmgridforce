@@ -80,6 +80,7 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> g_spacing;
     std::vector<double> g_vals;
     std::vector<double> g_scaling_factors;
+    double g_inv_power;
 };
 
 

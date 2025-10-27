@@ -67,6 +67,25 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     void addGridValue(double val);
     void addScalingFactor(double val);
 
+    /**
+     * Set the inverse power parameter for grid value transformation.
+     * When inv_power > 0, the interpolated grid value is raised to this power
+     * before being multiplied by the scaling factor. This reverses the grid
+     * transformation where grid values were stored as G^(1/inv_power).
+     *
+     * For example, if grids were transformed as G^(1/4), set inv_power=4.0
+     * to compute: energy = scaling_factor * (interpolated)^4
+     *
+     * @param inv_power  exponent to apply to interpolated values (default: 0.0, meaning no transformation)
+     */
+    void setInvPower(double inv_power);
+
+    /**
+     * Get the current inverse power parameter.
+     * @return  the inv_power value
+     */
+    double getInvPower() const;
+
     void getGridParameters(std::vector<int> &g_counts,
                            std::vector<double> &g_spacing,
                            std::vector<double> &g_vals,
@@ -85,6 +104,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> m_spacing;  // the length unit is 'nm'
     std::vector<double> m_vals;
     std::vector<double> m_scaling_factors;
+    double m_inv_power;
 };
 
 }  // namespace GridForcePlugin

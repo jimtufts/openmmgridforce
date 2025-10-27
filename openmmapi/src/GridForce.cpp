@@ -44,7 +44,7 @@ using namespace std;
 
 namespace GridForcePlugin {
 
-GridForce::GridForce() {
+GridForce::GridForce() : m_inv_power(0.0) {
     //
 }
 
@@ -67,6 +67,14 @@ void GridForce::addGridValue(double val) {
 
 void GridForce::addScalingFactor(double val) {
     m_scaling_factors.push_back(val);
+}
+
+void GridForce::setInvPower(double inv_power) {
+    m_inv_power = inv_power;
+}
+
+double GridForce::getInvPower() const {
+    return m_inv_power;
 }
 
 void GridForce::getGridParameters(std::vector<int> &g_counts,

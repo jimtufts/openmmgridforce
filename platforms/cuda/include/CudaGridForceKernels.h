@@ -44,6 +44,7 @@ private:
     CudaArray* energyBuffer;
     CUfunction kernel;
     int numAtoms;
+    double g_inv_power;
 };
 
 } // namespace GridForcePlugin

@@ -18,6 +18,7 @@ extern "C" __global__ void computeGridForce(real4* __restrict__ posq,
                                           const float* __restrict__ gridSpacing,
                                           const float* __restrict__ gridValues,
                                           const float* __restrict__ scalingFactors,
+                                          const float invPower,
                                           const int includeEnergy,
                                           mixed* __restrict__ energyBuffer) {
     // Initialize energy for this thread
@@ -101,15 +102,34 @@ extern "C" __global__ void computeGridForce(real4* __restrict__ posq,
         
         float vm = oy * vmm + fy * vmp;
         float vp = oy * vpm + fy * vpp;
-        
-        threadEnergy = scalingFactor * (ox * vm + fx * vp);
-        
-        // Calculate forces
+
+        // Get interpolated value (still on transformed scale if inv_power was used)
+        float interpolated = ox * vm + fx * vp;
+
+        // Apply inverse power transformation if specified
+        // This reverses the grid transformation: (G^(1/n))^n = G
+        if (invPower > 0.0f) {
+            interpolated = powf(interpolated, invPower);
+        }
+
+        threadEnergy = scalingFactor * interpolated;
+
+        // Calculate forces (gradients)
         float dx = (vp - vm) / gridSpacing[0];
         float dy = (ox * (vmp - vmm) + fx * (vpp - vpm)) / gridSpacing[1];
         float dz = (ox * (oy * (vmmp - vmmm) + fy * (vmpp - vmpm)) +
                    fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm))) / gridSpacing[2];
-        
+
+        // Apply chain rule if inv_power is set
+        // d/dx(f^n) = n * f^(n-1) * df/dx
+        if (invPower > 0.0f) {
+            float baseInterpolated = ox * vm + fx * vp;  // Value before power transform
+            float powerFactor = invPower * powf(baseInterpolated, invPower - 1.0f);
+            dx *= powerFactor;
+            dy *= powerFactor;
+            dz *= powerFactor;
+        }
+
         atomForce.x = -scalingFactor * dx;
         atomForce.y = -scalingFactor * dy;
         atomForce.z = -scalingFactor * dz;

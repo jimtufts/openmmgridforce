@@ -62,6 +62,7 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
                                               const GridForce &grid_force) {
     // Initialize Nonbond parameters.
     grid_force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
+    g_inv_power = grid_force.getInvPower();
 }
 
 double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
@@ -131,7 +132,16 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
             double vm = ay * vmm + fy * vmp;
             double vp = ay * vpm + fy * vpp;
 
-	        double enr = g_scaling_factors[ia] * (ax * vm + fx * vp);
+            // Get interpolated value (still on transformed scale if inv_power was used)
+            double interpolated = ax * vm + fx * vp;
+
+            // Apply inverse power transformation if specified
+            // This reverses the grid transformation: (G^(1/n))^n = G
+            if (g_inv_power > 0.0) {
+                interpolated = pow(interpolated, g_inv_power);
+            }
+
+	        double enr = g_scaling_factors[ia] * interpolated;
 
             energy += enr;
 
@@ -143,6 +153,15 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
             double dvdz = ((-vmmm + vmmp) * ay + (-vmpm + vmpp) * fy) * ax +
                           ((-vpmm + vpmp) * ay + (-vppm + vppp) * fy) * fx;
             Vec3 grd(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
+
+            // Apply chain rule if inv_power is set
+            // d/dx(f^n) = n * f^(n-1) * df/dx
+            if (g_inv_power > 0.0) {
+                double base_interpolated = ax * vm + fx * vp;  // Value before power transform
+                double power_factor = g_inv_power * pow(base_interpolated, g_inv_power - 1.0);
+                grd = grd * power_factor;
+            }
+
             forceData[ia] -= g_scaling_factors[ia] * grd;
         } else {
             double kval = 10000.0;  // kJ/mol nm**2
@@ -168,6 +187,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
 void ReferenceCalcGridForceKernel::copyParametersToContext(ContextImpl &context,
                                                            const GridForce &grid_force) {
     grid_force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
+    g_inv_power = grid_force.getInvPower();
 }
 
 
