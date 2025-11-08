@@ -32,7 +32,7 @@ extension = Extension(name='_gridforceplugin',
                     )
 
 setup(name='gridforceplugin',
-      version='0.1',
+      version='0.3',
       py_modules=['gridforceplugin'],
       ext_modules=[extension],
       install_requires=[],
