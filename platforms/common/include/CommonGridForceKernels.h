@@ -46,6 +46,7 @@ protected:
     OpenMM::ComputeArray g_spacing;
     OpenMM::ComputeArray g_vals;
     OpenMM::ComputeArray g_scaling_factors;
+    OpenMM::ComputeKernel computeKernel;
     int numAtoms;
 };
 

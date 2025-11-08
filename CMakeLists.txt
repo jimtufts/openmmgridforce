@@ -103,6 +103,8 @@ ADD_CUSTOM_TARGET(check
 # Build the implementations for different platforms
 ADD_SUBDIRECTORY(platforms/common)
 ADD_SUBDIRECTORY(platforms/reference)
+ADD_SUBDIRECTORY(platforms/cpu)
+ADD_SUBDIRECTORY(platforms/opencl)
 
 IF(GRIDFORCE_BUILD_CUDA_LIB)
     ADD_SUBDIRECTORY(platforms/cuda)
