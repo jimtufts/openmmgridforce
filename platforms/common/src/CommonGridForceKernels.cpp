@@ -82,8 +82,23 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
         throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
     }
 
-    if (scaling_factors.size() != numAtoms) {
-        throw OpenMMException("GridForce: Number of scaling factors must match number of atoms");
+    // Check if we have the right number of scaling factors
+    if (scaling_factors.size() > numAtoms) {
+        throw OpenMMException("GridForce: Too many scaling factors provided");
+    }
+    // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
+    if (scaling_factors.size() < numAtoms) {
+        for (int i = scaling_factors.size(); i < numAtoms; i++) {
+            double mass = system.getParticleMass(i);
+            if (mass != 0.0 && !system.isVirtualSite(i)) {
+                throw OpenMMException("GridForce: Missing scaling factor for particle " +
+                                    std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+            }
+        }
+        // Pad with zeros for verified dummy/virtual particles
+        while (scaling_factors.size() < numAtoms) {
+            scaling_factors.push_back(0.0);
+        }
     }
 
     // Initialize arrays
@@ -161,8 +176,24 @@ void CommonCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl
     if (vals.size() != counts[0] * counts[1] * counts[2])
         throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
 
-    if (scaling_factors.size() != numAtoms)
-        throw OpenMMException("GridForce: Number of scaling factors must match number of atoms");
+    // Check if we have the right number of scaling factors
+    if (scaling_factors.size() > numAtoms)
+        throw OpenMMException("GridForce: Too many scaling factors provided");
+    // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
+    if (scaling_factors.size() < numAtoms) {
+        const System& system = contextImpl.getSystem();
+        for (int i = scaling_factors.size(); i < numAtoms; i++) {
+            double mass = system.getParticleMass(i);
+            if (mass != 0.0 && !system.isVirtualSite(i)) {
+                throw OpenMMException("GridForce: Missing scaling factor for particle " +
+                                    std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+            }
+        }
+        // Pad with zeros for verified dummy/virtual particles
+        while (scaling_factors.size() < numAtoms) {
+            scaling_factors.push_back(0.0);
+        }
+    }
 
     // Update arrays
     vector<int> countsVec = {counts[0], counts[1], counts[2]};
