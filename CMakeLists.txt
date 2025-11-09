@@ -12,6 +12,16 @@ ELSE()
     SET(GRIDFORCE_BUILD_CUDA_LIB OFF CACHE BOOL "Build implementation for CUDA")
 ENDIF()
 
+# Find OpenCL (optional)
+FIND_PACKAGE(OpenCL)
+IF(OpenCL_FOUND)
+    MESSAGE(STATUS "Found OpenCL")
+    SET(GRIDFORCE_BUILD_OPENCL_LIB ON CACHE BOOL "Build implementation for OpenCL")
+ELSE()
+    MESSAGE(STATUS "OpenCL not found - building without OpenCL support")
+    SET(GRIDFORCE_BUILD_OPENCL_LIB OFF CACHE BOOL "Build implementation for OpenCL")
+ENDIF()
+
 # Use CONDA_PREFIX environment variable to find OpenMM
 SET(OPENMM_DIR $ENV{CONDA_PREFIX} CACHE PATH "Where OpenMM is installed")
 MESSAGE(STATUS "Looking for OpenMM at ${OPENMM_DIR}")
@@ -104,7 +114,10 @@ ADD_CUSTOM_TARGET(check
 ADD_SUBDIRECTORY(platforms/common)
 ADD_SUBDIRECTORY(platforms/reference)
 ADD_SUBDIRECTORY(platforms/cpu)
-ADD_SUBDIRECTORY(platforms/opencl)
+
+IF(GRIDFORCE_BUILD_OPENCL_LIB)
+    ADD_SUBDIRECTORY(platforms/opencl)
+ENDIF(GRIDFORCE_BUILD_OPENCL_LIB)
 
 IF(GRIDFORCE_BUILD_CUDA_LIB)
     ADD_SUBDIRECTORY(platforms/cuda)
