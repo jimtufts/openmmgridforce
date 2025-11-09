@@ -43,7 +43,7 @@ using namespace OpenMM;
 
 namespace GridForcePlugin {
 
-class GridForce : public Force {
+class GridForce : public OpenMM::Force {
 public:
     GridForce();
 
