@@ -36,6 +36,7 @@
 #include "openmm/Vec3.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/reference/ReferencePlatform.h"
+#include "openmm/NonbondedForce.h"
 
 #include <cmath>
 
@@ -63,6 +64,53 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     // Initialize Nonbond parameters.
     grid_force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
     g_inv_power = grid_force.getInvPower();
+
+    // Auto-calculate scaling factors if enabled and not already provided
+    if (grid_force.getAutoCalculateScalingFactors() && g_scaling_factors.empty()) {
+        std::string scalingProperty = grid_force.getScalingProperty();
+        if (scalingProperty.empty()) {
+            throw OpenMMException("GridForce: Auto-calculate scaling factors enabled but no scaling property specified");
+        }
+
+        // Validate scaling property
+        if (scalingProperty != "charge" && scalingProperty != "ljr" && scalingProperty != "lja") {
+            throw OpenMMException("GridForce: Invalid scaling property '" + scalingProperty + "'. Must be 'charge', 'ljr', or 'lja'");
+        }
+
+        // Find NonbondedForce in the system
+        const NonbondedForce* nonbondedForce = nullptr;
+        for (int i = 0; i < system.getNumForces(); i++) {
+            if (dynamic_cast<const NonbondedForce*>(&system.getForce(i)) != nullptr) {
+                nonbondedForce = dynamic_cast<const NonbondedForce*>(&system.getForce(i));
+                break;
+            }
+        }
+
+        if (nonbondedForce == nullptr) {
+            throw OpenMMException("GridForce: Auto-calculate scaling factors requires a NonbondedForce in the system");
+        }
+
+        // Extract scaling factors based on property
+        int numAtoms = system.getNumParticles();
+        g_scaling_factors.resize(numAtoms);
+        for (int i = 0; i < numAtoms; i++) {
+            double charge, sigma, epsilon;
+            nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
+
+            if (scalingProperty == "charge") {
+                // For electrostatic grids: use charge directly
+                g_scaling_factors[i] = charge;
+            } else if (scalingProperty == "ljr") {
+                // For LJ repulsive: sqrt(epsilon) * (2*sigma)^6
+                double diameter = 2.0 * sigma;
+                g_scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 6.0);
+            } else if (scalingProperty == "lja") {
+                // For LJ attractive: sqrt(epsilon) * (2*sigma)^3
+                double diameter = 2.0 * sigma;
+                g_scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 3.0);
+            }
+        }
+    }
 }
 
 double ReferenceCalcGridForceKernel::execute(ContextImpl &context,

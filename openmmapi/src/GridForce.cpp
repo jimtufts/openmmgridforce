@@ -44,7 +44,7 @@ using namespace std;
 
 namespace GridForcePlugin {
 
-GridForce::GridForce() : m_inv_power(0.0) {
+GridForce::GridForce() : m_inv_power(0.0), m_autoCalculateScalingFactors(false), m_scalingProperty("") {
     //
 }
 
@@ -67,6 +67,10 @@ void GridForce::addGridValue(double val) {
 
 void GridForce::addScalingFactor(double val) {
     m_scaling_factors.push_back(val);
+}
+
+void GridForce::setScalingFactor(int index, double val) {
+    m_scaling_factors[index] = val;
 }
 
 void GridForce::setInvPower(double inv_power) {
@@ -93,6 +97,24 @@ ForceImpl *GridForce::createImpl() const {
 
 void GridForce::updateParametersInContext(Context &context) {
     dynamic_cast<GridForceImpl &>(getImplInContext(context)).updateParametersInContext(getContextImpl(context));
+}
+
+void GridForce::setAutoCalculateScalingFactors(bool enable) {
+    m_autoCalculateScalingFactors = enable;
+}
+
+bool GridForce::getAutoCalculateScalingFactors() const {
+    return m_autoCalculateScalingFactors;
+}
+
+void GridForce::setScalingProperty(const std::string& property) {
+    // Don't validate here - validation happens in kernel initialization where exceptions are properly handled
+    // This avoids SWIG exception translation issues
+    m_scalingProperty = property;
+}
+
+const std::string& GridForce::getScalingProperty() const {
+    return m_scalingProperty;
 }
 
 }  // namespace GridForcePlugin

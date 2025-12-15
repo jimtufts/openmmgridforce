@@ -33,6 +33,8 @@
 #include "GridForceKernels.h"
 #include "openmm/Platform.h"
 #include "openmm/internal/ContextImpl.h"
+#include "openmm/NonbondedForce.h"
+#include "openmm/OpenMMException.h"
 
 #include <cmath>
 #include <vector>

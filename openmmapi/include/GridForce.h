@@ -66,6 +66,44 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
 
     void addGridValue(double val);
     void addScalingFactor(double val);
+    void setScalingFactor(int index, double val);
+
+    /**
+     * Enable or disable automatic calculation of scaling factors from the System.
+     * When enabled, scaling factors will be extracted from the NonbondedForce
+     * in the System based on the scalingProperty setting. When disabled (default),
+     * scaling factors must be added manually using addScalingFactor().
+     *
+     * @param enable  if true, auto-calculate scaling factors; if false, use manual values
+     */
+    void setAutoCalculateScalingFactors(bool enable);
+
+    /**
+     * Get whether automatic scaling factor calculation is enabled.
+     *
+     * @return  true if auto-calculation is enabled, false otherwise
+     */
+    bool getAutoCalculateScalingFactors() const;
+
+    /**
+     * Set the property to use for automatic scaling factor calculation.
+     * This is only used when autoCalculateScalingFactors is enabled.
+     *
+     * Supported values:
+     * - "charge": Use particle charges (for electrostatic grids)
+     * - "ljr": Use sqrt(epsilon) * (2*sigma)^6 (for LJ repulsive grids)
+     * - "lja": Use sqrt(epsilon) * (2*sigma)^3 (for LJ attractive grids)
+     *
+     * @param property  the scaling property to use
+     */
+    void setScalingProperty(const std::string& property);
+
+    /**
+     * Get the current scaling property setting.
+     *
+     * @return  the scaling property name
+     */
+    const std::string& getScalingProperty() const;
 
     /**
      * Set the inverse power parameter for grid value transformation.
@@ -105,6 +143,8 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> m_vals;
     std::vector<double> m_scaling_factors;
     double m_inv_power;
+    bool m_autoCalculateScalingFactors;
+    std::string m_scalingProperty;
 };
 
 }  // namespace GridForcePlugin

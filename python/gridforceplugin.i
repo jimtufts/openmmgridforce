@@ -51,6 +51,12 @@ public:
     void addGridSpacing (double dx, double dy, double dz);
     void addGridValue (double val);
     void addScalingFactor (double val);
+    void setScalingFactor (int index, double val);
+
+    void setAutoCalculateScalingFactors(bool enable);
+    bool getAutoCalculateScalingFactors() const;
+    void setScalingProperty(const std::string& property);
+    const std::string& getScalingProperty() const;
 
     void setInvPower(double inv_power);
     double getInvPower() const;
