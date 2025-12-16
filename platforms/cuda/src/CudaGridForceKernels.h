@@ -4,6 +4,7 @@
 #include "GridForceKernels.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
+#include "openmm/NonbondedForce.h"
 
 namespace GridForcePlugin {
 
@@ -40,6 +41,17 @@ public:
      */
     void copyParametersToContext(OpenMM::ContextImpl& context, const GridForce& force);
 private:
+    /**
+     * Generate grid values from receptor atoms and NonbondedForce parameters.
+     */
+    void generateGrid(const OpenMM::System& system,
+                     const OpenMM::NonbondedForce* nonbondedForce,
+                     const std::string& gridType,
+                     const std::vector<int>& receptorAtoms,
+                     const std::vector<OpenMM::Vec3>& receptorPositions,
+                     double originX, double originY, double originZ,
+                     std::vector<double>& vals);
+
     bool hasInitializedKernel;
     int numAtoms;
     float invPower;
@@ -49,6 +61,8 @@ private:
     OpenMM::CudaArray g_vals;
     OpenMM::CudaArray g_scaling_factors;
     CUfunction kernel;
+    std::vector<int> counts;
+    std::vector<double> spacing;
 };
 
 } // namespace GridForcePlugin
