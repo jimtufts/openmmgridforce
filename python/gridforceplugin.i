@@ -61,8 +61,59 @@ public:
     void setInvPower(double inv_power);
     double getInvPower() const;
 
+    void setAutoGenerateGrid(bool enable);
+    bool getAutoGenerateGrid() const;
+    void setGridType(const std::string& type);
+    const std::string& getGridType() const;
+
+    void setGridOrigin(double x, double y, double z);
+    void getGridOrigin(double& OUTPUT, double& OUTPUT, double& OUTPUT) const;
+
+    void setReceptorAtoms(const std::vector<int>& atomIndices);
+    const std::vector<int>& getReceptorAtoms() const;
+    void setLigandAtoms(const std::vector<int>& atomIndices);
+    const std::vector<int>& getLigandAtoms() const;
+
+    void setReceptorPositions(const std::vector<OpenMM::Vec3>& positions);
+    void setReceptorPositionsFromArrays(const std::vector<double>& x,
+                                        const std::vector<double>& y,
+                                        const std::vector<double>& z);
+    const std::vector<OpenMM::Vec3>& getReceptorPositions() const;
+
+    %pythoncode %{
+    def setReceptorPositionsFromLists(self, positions_list):
+        """
+        Set receptor positions from a list of 3-tuples or array-like positions.
+
+        Args:
+            positions_list: List of (x,y,z) tuples/lists in nanometers, or array with shape (N,3)
+        """
+        import numpy as np
+        # Convert to numpy array for easy manipulation
+        pos_array = np.asarray(positions_list, dtype=np.float64)
+        if pos_array.ndim != 2 or pos_array.shape[1] != 3:
+            raise ValueError("positions_list must be an Nx3 array or list of (x,y,z) tuples")
+
+        # Extract x, y, z columns and call C++ method
+        x = pos_array[:, 0].tolist()
+        y = pos_array[:, 1].tolist()
+        z = pos_array[:, 2].tolist()
+        self.setReceptorPositionsFromArrays(x, y, z)
+    %}
+
+    void loadFromFile(const std::string& filename);
+    void saveToFile(const std::string& filename) const;
+
+    %apply std::vector<int> & OUTPUT { std::vector<int> & counts };
+    %apply std::vector<double> & OUTPUT { std::vector<double> & spacing };
+    %apply std::vector<double> & OUTPUT { std::vector<double> & vals };
+    %apply std::vector<double> & OUTPUT { std::vector<double> & scaling_factors };
     void getGridParameters(std::vector<int>& counts, std::vector<double>& spacing, std::vector<double>& vals,
                            std::vector<double> &scaling_factors) const;
+    %clear std::vector<int> & counts;
+    %clear std::vector<double> & spacing;
+    %clear std::vector<double> & vals;
+    %clear std::vector<double> & scaling_factors;
 
     void updateParametersInContext(Context &context);
 };

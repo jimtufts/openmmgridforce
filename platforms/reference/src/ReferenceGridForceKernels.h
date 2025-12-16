@@ -39,6 +39,10 @@
 #include "openmm/Vec3.h"
 #include <vector>
 
+namespace OpenMM {
+    class NonbondedForce;
+}
+
 namespace GridForcePlugin {
 
 /**
@@ -76,6 +80,25 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
                                 const GridForce &force);
 
    private:
+    /**
+     * Generate grid from receptor atoms and NonbondedForce parameters.
+     *
+     * @param system             the System containing the force
+     * @param nonbondedForce     the NonbondedForce to extract parameters from
+     * @param gridType           type of grid ("charge", "ljr", "lja")
+     * @param receptorAtoms      indices of receptor atoms
+     * @param receptorPositions  positions of receptor atoms (nm)
+     * @param originX            grid origin x-coordinate (nm)
+     * @param originY            grid origin y-coordinate (nm)
+     * @param originZ            grid origin z-coordinate (nm)
+     */
+    void generateGrid(const OpenMM::System& system,
+                     const OpenMM::NonbondedForce* nonbondedForce,
+                     const std::string& gridType,
+                     const std::vector<int>& receptorAtoms,
+                     const std::vector<OpenMM::Vec3>& receptorPositions,
+                     double originX, double originY, double originZ);
+
     std::vector<int> g_counts;
     std::vector<double> g_spacing;
     std::vector<double> g_vals;

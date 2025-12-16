@@ -124,6 +124,133 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      */
     double getInvPower() const;
 
+    /**
+     * Enable or disable automatic grid generation from the System.
+     * When enabled, the grid will be generated from NonbondedForce parameters
+     * and receptor positions during kernel initialization.
+     *
+     * @param enable  if true, auto-generate grid; if false, use manual values
+     */
+    void setAutoGenerateGrid(bool enable);
+
+    /**
+     * Get whether automatic grid generation is enabled.
+     *
+     * @return  true if auto-generation is enabled, false otherwise
+     */
+    bool getAutoGenerateGrid() const;
+
+    /**
+     * Set the type of grid to generate.
+     * Only used when autoGenerateGrid is enabled.
+     *
+     * Supported values:
+     * - "charge": Electrostatic potential grid (kJ/(mol·e))
+     * - "ljr": Lennard-Jones repulsive grid (kJ/mol)^(1/2)
+     * - "lja": Lennard-Jones attractive grid (kJ/mol)^(1/2)
+     *
+     * @param type  the grid type to generate
+     */
+    void setGridType(const std::string& type);
+
+    /**
+     * Get the current grid type setting.
+     *
+     * @return  the grid type name
+     */
+    const std::string& getGridType() const;
+
+    /**
+     * Set the grid origin (default: 0,0,0).
+     * The grid extends from the origin in positive directions.
+     *
+     * @param x  x-coordinate of grid origin (nm)
+     * @param y  y-coordinate of grid origin (nm)
+     * @param z  z-coordinate of grid origin (nm)
+     */
+    void setGridOrigin(double x, double y, double z);
+
+    /**
+     * Get the grid origin.
+     *
+     * @param x  output x-coordinate of grid origin (nm)
+     * @param y  output y-coordinate of grid origin (nm)
+     * @param z  output z-coordinate of grid origin (nm)
+     */
+    void getGridOrigin(double& x, double& y, double& z) const;
+
+    /**
+     * Set which atoms to include in grid calculation (receptor atoms).
+     * If not set, all atoms except ligand atoms will be included.
+     *
+     * @param atomIndices  vector of atom indices to include
+     */
+    void setReceptorAtoms(const std::vector<int>& atomIndices);
+
+    /**
+     * Get the receptor atom indices.
+     *
+     * @return  vector of receptor atom indices
+     */
+    const std::vector<int>& getReceptorAtoms() const;
+
+    /**
+     * Set which atoms to exclude from grid calculation (ligand atoms).
+     * If receptorAtoms is not set, the grid will include all atoms except these.
+     *
+     * @param atomIndices  vector of atom indices to exclude
+     */
+    void setLigandAtoms(const std::vector<int>& atomIndices);
+
+    /**
+     * Get the ligand atom indices.
+     *
+     * @return  vector of ligand atom indices
+     */
+    const std::vector<int>& getLigandAtoms() const;
+
+    /**
+     * Set the positions of receptor atoms for grid generation.
+     * These positions should be in nanometers (OpenMM default units).
+     * This must be called before adding the force to a System if auto-generation is enabled.
+     *
+     * @param positions  vector of Vec3 positions (nm)
+     */
+    void setReceptorPositions(const std::vector<Vec3>& positions);
+
+    /**
+     * Set the positions of receptor atoms from flat coordinate arrays.
+     * Convenience method for Python - takes x, y, z as separate arrays.
+     *
+     * @param x  vector of x coordinates (nm)
+     * @param y  vector of y coordinates (nm)
+     * @param z  vector of z coordinates (nm)
+     */
+    void setReceptorPositionsFromArrays(const std::vector<double>& x,
+                                        const std::vector<double>& y,
+                                        const std::vector<double>& z);
+
+    /**
+     * Get the receptor positions.
+     *
+     * @return  vector of receptor positions (nm)
+     */
+    const std::vector<Vec3>& getReceptorPositions() const;
+
+    /**
+     * Load grid from a binary file.
+     *
+     * @param filename  path to grid file
+     */
+    void loadFromFile(const std::string& filename);
+
+    /**
+     * Save grid to a binary file.
+     *
+     * @param filename  path to output file
+     */
+    void saveToFile(const std::string& filename) const;
+
     void getGridParameters(std::vector<int> &g_counts,
                            std::vector<double> &g_spacing,
                            std::vector<double> &g_vals,
@@ -145,6 +272,14 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double m_inv_power;
     bool m_autoCalculateScalingFactors;
     std::string m_scalingProperty;
+
+    // Auto-generation parameters
+    bool m_autoGenerateGrid;
+    std::string m_gridType;              // "charge", "ljr", "lja"
+    std::vector<double> m_gridOrigin;    // 3 elements: x, y, z (nm)
+    std::vector<int> m_receptorAtoms;    // Indices of atoms to include
+    std::vector<int> m_ligandAtoms;      // Indices of atoms to exclude
+    std::vector<Vec3> m_receptorPositions; // Positions for grid generation (nm)
 };
 
 }  // namespace GridForcePlugin
