@@ -103,7 +103,27 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> g_spacing;
     std::vector<double> g_vals;
     std::vector<double> g_scaling_factors;
+    std::vector<int> g_ligand_atoms;    // Particle indices for ligand atoms (corresponds to scaling factors)
     double g_inv_power;
+    double g_gridCap;
+    double g_outOfBoundsRestraint;
+    int g_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
+    double g_origin_x, g_origin_y, g_origin_z;
+    std::vector<double> g_derivatives;  // 27 derivatives per grid point for triquintic [27, nx, ny, nz]
+    bool g_computeDerivatives;          // Whether to compute derivatives during grid generation
+
+    /**
+     * Compute all 27 derivatives at a grid point using finite differences.
+     * Returns a vector of 27 values in the order specified in TRIQUINTIC_GRID_FORMAT.md.
+     *
+     * @param rawGrid       raw grid values [nx, ny, nz] before capping
+     * @param ix, iy, iz    grid point indices
+     * @param dx, dy, dz    grid spacing
+     */
+    std::vector<double> computeDerivativesAtPoint(
+        const std::vector<double>& rawGrid,
+        int ix, int iy, int iz,
+        double dx, double dy, double dz) const;
 };
 
 

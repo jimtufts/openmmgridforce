@@ -9,6 +9,7 @@
 #include "openmm/NonbondedForce.h"
 #include <map>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <cmath>
 #include <algorithm>
@@ -29,12 +30,25 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     vector<double> scaling_factors;
     force.getGridParameters(counts_local, spacing_local, vals, scaling_factors);
     double inv_power = force.getInvPower();
+    double outOfBounds_k = force.getOutOfBoundsRestraint();
+    double grid_cap = force.getGridCap();
+    int interp_method = force.getInterpolationMethod();
 
     numAtoms = system.getNumParticles();
 
     // Store counts and spacing as member variables for generateGrid
     counts = counts_local;
     spacing = spacing_local;
+    std::cout << "CudaCalcGridForceKernel::initialize() received counts: ["
+              << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
+              << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
+
+    // Store grid cap BEFORE generateGrid() is called (it needs this->gridCap)
+    gridCap = (float)grid_cap;
+
+    // Store ligand atoms and derivative computation flag
+    ligandAtoms = force.getLigandAtoms();
+    computeDerivatives = force.getComputeDerivatives();
 
     // Auto-calculate scaling factors if enabled and not already provided
     if (force.getAutoCalculateScalingFactors() && scaling_factors.empty()) {
@@ -80,6 +94,9 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 3.0);
             }
         }
+
+        // Copy calculated scaling factors back to GridForce object
+        const_cast<GridForce&>(force).setScalingFactors(scaling_factors);
     }
 
     // Auto-generate grid if enabled and grid values are empty
@@ -137,9 +154,16 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         double ox, oy, oz;
         force.getGridOrigin(ox, oy, oz);
 
-        // Generate grid
+        // Generate grid and derivatives (if enabled)
+        std::vector<double> derivatives;
         generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
-                     ox, oy, oz, vals);
+                     ox, oy, oz, vals, derivatives);
+
+        // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
+        const_cast<GridForce&>(force).setGridValues(vals);
+        if (!derivatives.empty()) {
+            const_cast<GridForce&>(force).setDerivatives(derivatives);
+        }
     }
 
     if (spacing.size() != 3 || counts.size() != 3) {
@@ -150,20 +174,29 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
     }
 
-    // Check if we have the right number of scaling factors
-    if (scaling_factors.size() > numAtoms) {
-        throw OpenMMException("GridForce: Too many scaling factors provided");
-    }
-    // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
-    if (scaling_factors.size() < numAtoms) {
-        for (int i = scaling_factors.size(); i < numAtoms; i++) {
-            double mass = system.getParticleMass(i);
-            if (mass != 0.0 && !system.isVirtualSite(i)) {
-                throw OpenMMException("GridForce: Missing scaling factor for particle " +
-                                    std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+    // Skip scaling factor validation during auto-grid generation (no ligand atoms in system yet)
+    // Only validate when using grids with actual ligand particles
+    if (!force.getAutoGenerateGrid()) {
+        // Check if we have the right number of scaling factors
+        if (scaling_factors.size() > numAtoms) {
+            throw OpenMMException("GridForce: Too many scaling factors provided");
+        }
+        // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
+        if (scaling_factors.size() < numAtoms) {
+            for (int i = scaling_factors.size(); i < numAtoms; i++) {
+                double mass = system.getParticleMass(i);
+                if (mass != 0.0 && !system.isVirtualSite(i)) {
+                    throw OpenMMException("GridForce: Missing scaling factor for particle " +
+                                        std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+                }
+            }
+            // Pad with zeros for verified dummy/virtual particles
+            while (scaling_factors.size() < numAtoms) {
+                scaling_factors.push_back(0.0);
             }
         }
-        // Pad with zeros for verified dummy/virtual particles
+    } else {
+        // Auto-grid generation: pad scaling factors with zeros (no ligand atoms to scale)
         while (scaling_factors.size() < numAtoms) {
             scaling_factors.push_back(0.0);
         }
@@ -186,8 +219,60 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     g_vals.upload(valsFloat);
     g_scaling_factors.upload(scalingFloat);
 
-    // Store inv_power
+    // Upload derivatives if they exist (for triquintic interpolation)
+    if (force.hasDerivatives()) {
+        vector<double> derivatives_vec = force.getDerivatives();
+        std::cout << "Uploading " << derivatives_vec.size() << " derivatives to GPU..." << std::endl;
+
+        // Check for NaN/Inf values
+        int nan_count = 0;
+        int inf_count = 0;
+        for (size_t i = 0; i < std::min(derivatives_vec.size(), (size_t)1000); i++) {
+            if (std::isnan(derivatives_vec[i])) nan_count++;
+            if (std::isinf(derivatives_vec[i])) inf_count++;
+        }
+        std::cout << "  Checked first 1000 derivatives: " << nan_count << " NaN, " << inf_count << " Inf" << std::endl;
+
+        // Always create fresh CudaArray to avoid reinitialization issues
+        g_derivatives = CudaArray();
+        std::cout << "  Initializing CudaArray with size " << derivatives_vec.size() << "..." << std::endl;
+        try {
+            g_derivatives.initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
+            std::cout << "  CudaArray initialized successfully, size=" << g_derivatives.getSize() << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "  ERROR initializing CudaArray: " << e.what() << std::endl;
+            throw;
+        }
+
+        std::cout << "  Converting to float vector..." << std::endl;
+        vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
+        std::cout << "  Float vector size: " << derivativesFloat.size() << ", bytes: "
+                  << (derivativesFloat.size() * sizeof(float)) << std::endl;
+        std::cout << "  Setting CUDA context..." << std::endl;
+        cu.setAsCurrent();
+        std::cout << "  Calling g_derivatives.upload()..." << std::endl;
+        try {
+            g_derivatives.upload(derivativesFloat);
+            std::cout << "  Upload successful!" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "  ERROR during upload: " << e.what() << std::endl;
+            std::cerr << "  Array size: " << g_derivatives.getSize() << std::endl;
+            std::cerr << "  Vector size: " << derivativesFloat.size() << std::endl;
+            throw;
+        }
+    }
+
+    // Store inv_power, out-of-bounds restraint, and interpolation method (gridCap already set above)
     invPower = (float)inv_power;
+    outOfBoundsRestraint = (float)outOfBounds_k;
+    interpolationMethod = interp_method;
+
+    // Store grid origin
+    double ox, oy, oz;
+    force.getGridOrigin(ox, oy, oz);
+    originX = (float)ox;
+    originY = (float)oy;
+    originZ = (float)oz;
 
     // Compile kernel from .cu file
     map<string, string> defines;
@@ -206,6 +291,30 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         return 0.0;
     }
 
+    // Debug: print key parameters and track force buffer state
+    static int call_count = 0;
+    static std::map<const CudaCalcGridForceKernel*, int> kernel_ids;
+    if (kernel_ids.find(this) == kernel_ids.end()) {
+        kernel_ids[this] = kernel_ids.size();
+    }
+    int kernel_id = kernel_ids[this];
+    call_count++;
+
+    // std::cout << "\n=== CUDA Kernel " << kernel_id << " (invPower=" << invPower
+    //           << ") Call #" << call_count << " ===" << std::endl;
+    // std::cout << "  numAtoms = " << numAtoms << ", paddedNumAtoms = "
+    //           << cu.getPaddedNumAtoms() << std::endl;
+    // std::cout << "  forcePtr = 0x" << std::hex << cu.getLongForceBuffer().getDevicePointer()
+    //           << std::dec << std::endl;
+
+    // // Print first scaling factor
+    // std::vector<float> scalingCopy(g_scaling_factors.getSize());
+    // g_scaling_factors.download(scalingCopy);
+    // if (scalingCopy.size() > 0) {
+    //     std::cout << "  scaling[0] = " << std::scientific << std::setprecision(6)
+    //               << scalingCopy[0] << std::endl;
+    // }
+
     // Set kernel arguments
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
@@ -214,7 +323,20 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     CUdeviceptr spacingPtr = g_spacing.getDevicePointer();
     CUdeviceptr valsPtr = g_vals.getDevicePointer();
     CUdeviceptr scalingPtr = g_scaling_factors.getDevicePointer();
+    CUdeviceptr derivsPtr = (g_derivatives.isInitialized()) ? g_derivatives.getDevicePointer() : 0;
     CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
+
+    // Debug: Read force buffer BEFORE kernel execution
+    // const int num_force_components = 3 * paddedNumAtoms;
+    // std::vector<long long> forcesBefore(num_force_components);
+    // cuMemcpyDtoH(forcesBefore.data(), forcePtr, num_force_components * sizeof(long long));
+
+    // // Convert fixed-point to float for atom 0
+    // double fx_before = forcesBefore[0] / (double)0x100000000;
+    // double fy_before = forcesBefore[paddedNumAtoms] / (double)0x100000000;
+    // double fz_before = forcesBefore[2*paddedNumAtoms] / (double)0x100000000;
+    // std::cout << "  Force buffer BEFORE: atom0 = (" << fx_before << ", "
+    //           << fy_before << ", " << fz_before << ")" << std::endl;
 
     void* args[] = {
         &posqPtr,
@@ -224,6 +346,12 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &valsPtr,
         &scalingPtr,
         &invPower,
+        &interpolationMethod,
+        &outOfBoundsRestraint,
+        &originX,
+        &originY,
+        &originZ,
+        &derivsPtr,  // Derivatives for triquintic interpolation
         &energyPtr,
         &numAtoms,
         &paddedNumAtoms
@@ -231,6 +359,24 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
 
     // Execute kernel
     cu.executeKernel(kernel, args, numAtoms);
+
+    // Debug: Read force buffer AFTER kernel execution
+    // std::vector<long long> forcesAfter(num_force_components);
+    // cuMemcpyDtoH(forcesAfter.data(), forcePtr, num_force_components * sizeof(long long));
+
+    // // Convert fixed-point to float for atom 0
+    // double fx_after = forcesAfter[0] / (double)0x100000000;
+    // double fy_after = forcesAfter[paddedNumAtoms] / (double)0x100000000;
+    // double fz_after = forcesAfter[2*paddedNumAtoms] / (double)0x100000000;
+    // std::cout << "  Force buffer AFTER:  atom0 = (" << fx_after << ", "
+    //           << fy_after << ", " << fz_after << ")" << std::endl;
+
+    // // Show the delta
+    // double delta_fx = fx_after - fx_before;
+    // double delta_fy = fy_after - fy_before;
+    // double delta_fz = fz_after - fz_before;
+    // std::cout << "  Delta (this kernel):        = (" << delta_fx << ", "
+    //           << delta_fy << ", " << delta_fz << ")" << std::endl;
 
     return 0.0;
 }
@@ -252,20 +398,29 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
     if (vals.size() != counts[0] * counts[1] * counts[2])
         throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
 
-    // Check if we have the right number of scaling factors
-    if (scaling_factors.size() > numAtoms)
-        throw OpenMMException("GridForce: Too many scaling factors provided");
-    // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
-    if (scaling_factors.size() < numAtoms) {
-        const System& system = contextImpl.getSystem();
-        for (int i = scaling_factors.size(); i < numAtoms; i++) {
-            double mass = system.getParticleMass(i);
-            if (mass != 0.0 && !system.isVirtualSite(i)) {
-                throw OpenMMException("GridForce: Missing scaling factor for particle " +
-                                    std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+    // Skip scaling factor validation during auto-grid generation (no ligand atoms in system yet)
+    // Only validate when using grids with actual ligand particles
+    if (!force.getAutoGenerateGrid()) {
+        // Check if we have the right number of scaling factors
+        if (scaling_factors.size() > numAtoms)
+            throw OpenMMException("GridForce: Too many scaling factors provided");
+        // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
+        if (scaling_factors.size() < numAtoms) {
+            const System& system = contextImpl.getSystem();
+            for (int i = scaling_factors.size(); i < numAtoms; i++) {
+                double mass = system.getParticleMass(i);
+                if (mass != 0.0 && !system.isVirtualSite(i)) {
+                    throw OpenMMException("GridForce: Missing scaling factor for particle " +
+                                        std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+                }
+            }
+            // Pad with zeros for verified dummy/virtual particles
+            while (scaling_factors.size() < numAtoms) {
+                scaling_factors.push_back(0.0);
             }
         }
-        // Pad with zeros for verified dummy/virtual particles
+    } else {
+        // Auto-grid generation: pad scaling factors with zeros (no ligand atoms to scale)
         while (scaling_factors.size() < numAtoms) {
             scaling_factors.push_back(0.0);
         }
@@ -292,74 +447,194 @@ void CudaCalcGridForceKernel::generateGrid(
     const std::vector<int>& receptorAtoms,
     const std::vector<Vec3>& receptorPositions,
     double originX, double originY, double originZ,
-    std::vector<double>& vals) {
+    std::vector<double>& vals,
+    std::vector<double>& derivatives) {
+
+    cu.setAsCurrent();
 
     // Total grid points
-    int totalPoints = counts[0] * counts[1] * counts[2];
+    // Use size_t to avoid any potential overflow issues
+    size_t c0_size = static_cast<size_t>(counts[0]);
+    size_t c1_size = static_cast<size_t>(counts[1]);
+    size_t c2_size = static_cast<size_t>(counts[2]);
+    std::cout << "DEBUG size_t calculation:" << std::endl;
+    std::cout << "  c0_size = " << c0_size << std::endl;
+    std::cout << "  c1_size = " << c1_size << std::endl;
+    std::cout << "  c2_size = " << c2_size << std::endl;
+    size_t product01 = c0_size * c1_size;
+    std::cout << "  c0_size * c1_size = " << product01 << std::endl;
+    size_t totalPoints_size = product01 * c2_size;
+    std::cout << "  totalPoints_size = " << totalPoints_size << std::endl;
+    int totalPoints = static_cast<int>(totalPoints_size);
+    std::cout << "  totalPoints (int) = " << totalPoints << std::endl;
     vals.resize(totalPoints, 0.0);
 
     // Extract receptor atom parameters
-    std::vector<double> charges, sigmas, epsilons;
-    for (int atomIdx : receptorAtoms) {
+    std::vector<float3> positions(receptorAtoms.size());
+    std::vector<float> charges(receptorAtoms.size());
+    std::vector<float> sigmas(receptorAtoms.size());
+    std::vector<float> epsilons(receptorAtoms.size());
+
+    for (size_t i = 0; i < receptorAtoms.size(); i++) {
         double q, sig, eps;
-        nonbondedForce->getParticleParameters(atomIdx, q, sig, eps);
-        charges.push_back(q);
-        sigmas.push_back(sig);
-        epsilons.push_back(eps);
+        nonbondedForce->getParticleParameters(receptorAtoms[i], q, sig, eps);
+        positions[i] = make_float3(receptorPositions[i][0], receptorPositions[i][1], receptorPositions[i][2]);
+        charges[i] = q;
+        sigmas[i] = sig;
+        epsilons[i] = eps;
     }
 
-    // Physics constants in OpenMM units
-    const double COULOMB_CONST = 138.935456;  // kJ·nm/(mol·e²)
-    const double U_MAX = 41840.0;  // 10000 kcal/mol * 4.184 kJ/kcal
+    // Map grid type to integer
+    int gridTypeInt = 0;
+    if (gridType == "charge") gridTypeInt = 0;
+    else if (gridType == "ljr") gridTypeInt = 1;
+    else if (gridType == "lja") gridTypeInt = 2;
 
-    // For each grid point
-    int idx = 0;
-    for (int i = 0; i < counts[0]; i++) {
-        for (int j = 0; j < counts[1]; j++) {
-            for (int k = 0; k < counts[2]; k++) {
-                // Grid point position (in nm)
-                double gx = originX + i * spacing[0];
-                double gy = originY + j * spacing[1];
-                double gz = originZ + k * spacing[2];
+    // Allocate GPU memory
+    CudaArray receptorPos, receptorCharges, receptorSigmas, receptorEpsilons, gridVals;
+    receptorPos.initialize<float3>(cu, receptorAtoms.size(), "receptorPositions");
+    receptorCharges.initialize<float>(cu, receptorAtoms.size(), "receptorCharges");
+    receptorSigmas.initialize<float>(cu, receptorAtoms.size(), "receptorSigmas");
+    receptorEpsilons.initialize<float>(cu, receptorAtoms.size(), "receptorEpsilons");
+    gridVals.initialize<float>(cu, totalPoints, "gridValues");
 
-                // Calculate contribution from each receptor atom
-                double gridValue = 0.0;
-                for (size_t atomIdx = 0; atomIdx < receptorAtoms.size(); atomIdx++) {
-                    // Get atom position (in nm)
-                    Vec3 atomPos = receptorPositions[atomIdx];
+    // Upload data to GPU
+    receptorPos.upload(positions);
+    receptorCharges.upload(charges);
+    receptorSigmas.upload(sigmas);
+    receptorEpsilons.upload(epsilons);
 
-                    // Calculate distance
-                    double dx = gx - atomPos[0];
-                    double dy = gy - atomPos[1];
-                    double dz = gz - atomPos[2];
-                    double r2 = dx*dx + dy*dy + dz*dz;
-                    double r = std::sqrt(r2);
+    // Prepare grid counts and spacing for GPU
+    vector<int> gridCountsVec = {counts[0], counts[1], counts[2]};
+    vector<float> gridSpacingVec = {(float)spacing[0], (float)spacing[1], (float)spacing[2]};
 
-                    // Avoid singularities at very small distances
-                    if (r < 1e-6) {
-                        r = 1e-6;
-                    }
+    CudaArray d_gridCounts, d_gridSpacing;
+    d_gridCounts.initialize<int>(cu, 3, "gridCounts");
+    d_gridSpacing.initialize<float>(cu, 3, "gridSpacing");
+    d_gridCounts.upload(gridCountsVec);
+    d_gridSpacing.upload(gridSpacingVec);
 
-                    // Calculate contribution based on grid type
-                    if (gridType == "charge") {
-                        // Electrostatic potential: k * q / r
-                        gridValue += COULOMB_CONST * charges[atomIdx] / r;
-                    } else if (gridType == "ljr") {
-                        // LJ repulsive: sqrt(epsilon) * diameter^6 / r^12
-                        double diameter = 2.0 * sigmas[atomIdx];
-                        gridValue += std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 6.0) / std::pow(r, 12.0);
-                    } else if (gridType == "lja") {
-                        // LJ attractive: -2 * sqrt(epsilon) * diameter^3 / r^6
-                        double diameter = 2.0 * sigmas[atomIdx];
-                        gridValue += -2.0 * std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 3.0) / std::pow(r, 6.0);
-                    }
-                }
+    // Get kernel
+    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+    CUfunction kernel = cu.getKernel(module, "generateGridKernel");
 
-                // Apply capping to avoid extreme values
-                gridValue = U_MAX * std::tanh(gridValue / U_MAX);
+    // Convert origin to float
+    float originXf = (float)originX;
+    float originYf = (float)originY;
+    float originZf = (float)originZ;
+    int numReceptorAtoms = receptorAtoms.size();
+    float gridCapF = gridCap;
 
-                vals[idx++] = gridValue;
-            }
+    void* args[] = {
+        &gridVals.getDevicePointer(),
+        &receptorPos.getDevicePointer(),
+        &receptorCharges.getDevicePointer(),
+        &receptorSigmas.getDevicePointer(),
+        &receptorEpsilons.getDevicePointer(),
+        &numReceptorAtoms,
+        &gridTypeInt,
+        &gridCapF,
+        &originXf,
+        &originYf,
+        &originZf,
+        &d_gridCounts.getDevicePointer(),
+        &d_gridSpacing.getDevicePointer(),
+        &totalPoints
+    };
+
+    // Launch kernel directly with cuLaunchKernel for correct multi-block execution
+    // OpenMM's executeKernel caps grid size at numThreadBlocks which is too small for millions of grid points
+    int blockSize = 256;
+    int gridSize = (totalPoints + blockSize - 1) / blockSize;
+
+    CUresult result = cuLaunchKernel(kernel,
+        gridSize, 1, 1,        // Grid dimensions (gridSize blocks in X direction)
+        blockSize, 1, 1,       // Block dimensions (blockSize threads in X direction)
+        0,                     // Shared memory size
+        cu.getCurrentStream(), // Stream
+        args,                  // Kernel arguments
+        NULL);                 // Extra parameters
+
+    if (result != CUDA_SUCCESS) {
+        throw OpenMMException("Error launching grid generation kernel");
+    }
+
+    // Download results
+    vector<float> gridValsFloat(totalPoints);
+    gridVals.download(gridValsFloat);
+
+    // Convert to double
+    for (int i = 0; i < totalPoints; i++) {
+        vals[i] = gridValsFloat[i];
+    }
+
+    // Compute derivatives if enabled (for triquintic interpolation)
+    if (computeDerivatives) {
+        // Check if derivative array would exceed reasonable GPU memory limit (10 GB)
+        size_t derivativeBytes = 27 * totalPoints * sizeof(float);
+        const size_t MAX_DERIV_BYTES = 10LL * 1024 * 1024 * 1024;  // 10 GB
+
+        if (derivativeBytes > MAX_DERIV_BYTES) {
+            std::cerr << "WARNING: Derivative array would require "
+                      << (derivativeBytes / (1024.0 * 1024 * 1024))
+                      << " GB GPU memory, exceeding limit of "
+                      << (MAX_DERIV_BYTES / (1024.0 * 1024 * 1024))
+                      << " GB. Skipping derivative computation." << std::endl;
+            std::cerr << "         Grid size: " << counts[0] << "×" << counts[1] << "×" << counts[2]
+                      << " = " << totalPoints << " points × 27 derivatives" << std::endl;
+            std::cerr << "         Consider using a smaller grid or Reference platform for derivative computation." << std::endl;
+            derivatives.clear();  // Clear derivatives so hasDerivatives() returns false
+            return;  // Skip derivative computation
         }
+
+        // Allocate GPU memory for derivatives (27 values per grid point)
+        CudaArray derivsGPU;
+        try {
+            derivsGPU.initialize<float>(cu, 27 * totalPoints, "gridDerivatives");
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: Failed to allocate GPU memory for derivatives: " << e.what() << std::endl;
+            std::cerr << "       Requested: " << (derivativeBytes / (1024.0 * 1024 * 1024)) << " GB" << std::endl;
+            throw;
+        }
+
+        // Get derivative computation kernel
+        CUfunction derivKernel = cu.getKernel(module, "computeDerivativesKernel");
+
+        void* derivArgs[] = {
+            &derivsGPU.getDevicePointer(),
+            &gridVals.getDevicePointer(),
+            &d_gridCounts.getDevicePointer(),
+            &d_gridSpacing.getDevicePointer(),
+            &totalPoints
+        };
+
+        // Launch derivative kernel
+        result = cuLaunchKernel(derivKernel,
+            gridSize, 1, 1,
+            blockSize, 1, 1,
+            0,
+            cu.getCurrentStream(),
+            derivArgs,
+            NULL);
+
+        if (result != CUDA_SUCCESS) {
+            throw OpenMMException("Error launching derivative computation kernel");
+        }
+
+        // Synchronize to ensure kernel completes before downloading
+        cuStreamSynchronize(cu.getCurrentStream());
+
+        // Download derivatives
+        vector<float> derivsFloat(27 * totalPoints);
+        derivsGPU.download(derivsFloat);
+
+        // Convert to double and store in output parameter
+        derivatives.resize(27 * totalPoints);
+        for (int i = 0; i < 27 * totalPoints; i++) {
+            derivatives[i] = derivsFloat[i];
+        }
+
+        std::cout << "Computed " << derivatives.size() << " derivative values on GPU (grid: "
+                  << counts[0] << "×" << counts[1] << "×" << counts[2] << ")" << std::endl;
     }
 }

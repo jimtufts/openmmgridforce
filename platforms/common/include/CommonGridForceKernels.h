@@ -50,6 +50,7 @@ protected:
                      const std::vector<int>& receptorAtoms,
                      const std::vector<OpenMM::Vec3>& receptorPositions,
                      double originX, double originY, double originZ,
+                     double gridCap,
                      std::vector<double>& vals);
 
     bool hasInitializedKernel;

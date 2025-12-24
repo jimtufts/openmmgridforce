@@ -73,6 +73,9 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
     vector<double> scaling_factors;
     force.getGridParameters(counts_local, spacing_local, vals, scaling_factors);
     double inv_power = force.getInvPower();
+    double outOfBoundsRestraint = force.getOutOfBoundsRestraint();
+    double gridCap = force.getGridCap();
+    int interpolationMethod = force.getInterpolationMethod();
 
     numAtoms = system.getNumParticles();
 
@@ -183,7 +186,10 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
 
         // Generate grid
         generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
-                     ox, oy, oz, vals);
+                     ox, oy, oz, gridCap, vals);
+
+        // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
+        const_cast<GridForce&>(force).setGridValues(vals);
     }
 
     if (spacing.size() != 3 || counts.size() != 3) {
@@ -194,20 +200,29 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
         throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
     }
 
-    // Check if we have the right number of scaling factors
-    if (scaling_factors.size() > numAtoms) {
-        throw OpenMMException("GridForce: Too many scaling factors provided");
-    }
-    // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
-    if (scaling_factors.size() < numAtoms) {
-        for (int i = scaling_factors.size(); i < numAtoms; i++) {
-            double mass = system.getParticleMass(i);
-            if (mass != 0.0 && !system.isVirtualSite(i)) {
-                throw OpenMMException("GridForce: Missing scaling factor for particle " +
-                                    std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+    // Skip scaling factor validation during auto-grid generation (no ligand atoms in system yet)
+    // Only validate when using grids with actual ligand particles
+    if (!force.getAutoGenerateGrid()) {
+        // Check if we have the right number of scaling factors
+        if (scaling_factors.size() > numAtoms) {
+            throw OpenMMException("GridForce: Too many scaling factors provided");
+        }
+        // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
+        if (scaling_factors.size() < numAtoms) {
+            for (int i = scaling_factors.size(); i < numAtoms; i++) {
+                double mass = system.getParticleMass(i);
+                if (mass != 0.0 && !system.isVirtualSite(i)) {
+                    throw OpenMMException("GridForce: Missing scaling factor for particle " +
+                                        std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+                }
+            }
+            // Pad with zeros for verified dummy/virtual particles
+            while (scaling_factors.size() < numAtoms) {
+                scaling_factors.push_back(0.0);
             }
         }
-        // Pad with zeros for verified dummy/virtual particles
+    } else {
+        // Auto-grid generation: pad scaling factors with zeros (no ligand atoms to scale)
         while (scaling_factors.size() < numAtoms) {
             scaling_factors.push_back(0.0);
         }
@@ -249,6 +264,8 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
     computeKernel->addArg(g_vals);
     computeKernel->addArg(g_scaling_factors);
     computeKernel->addArg((float)inv_power);
+    computeKernel->addArg(interpolationMethod);
+    computeKernel->addArg((float)outOfBoundsRestraint);
     computeKernel->addArg(cc.getEnergyBuffer());
 
     cc.addForce(new GridForceInfo(numAtoms));
@@ -288,20 +305,29 @@ void CommonCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl
     if (vals.size() != counts[0] * counts[1] * counts[2])
         throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
 
-    // Check if we have the right number of scaling factors
-    if (scaling_factors.size() > numAtoms)
-        throw OpenMMException("GridForce: Too many scaling factors provided");
-    // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
-    if (scaling_factors.size() < numAtoms) {
-        const System& system = contextImpl.getSystem();
-        for (int i = scaling_factors.size(); i < numAtoms; i++) {
-            double mass = system.getParticleMass(i);
-            if (mass != 0.0 && !system.isVirtualSite(i)) {
-                throw OpenMMException("GridForce: Missing scaling factor for particle " +
-                                    std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+    // Skip scaling factor validation during auto-grid generation (no ligand atoms in system yet)
+    // Only validate when using grids with actual ligand particles
+    if (!force.getAutoGenerateGrid()) {
+        // Check if we have the right number of scaling factors
+        if (scaling_factors.size() > numAtoms)
+            throw OpenMMException("GridForce: Too many scaling factors provided");
+        // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
+        if (scaling_factors.size() < numAtoms) {
+            const System& system = contextImpl.getSystem();
+            for (int i = scaling_factors.size(); i < numAtoms; i++) {
+                double mass = system.getParticleMass(i);
+                if (mass != 0.0 && !system.isVirtualSite(i)) {
+                    throw OpenMMException("GridForce: Missing scaling factor for particle " +
+                                        std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
+                }
+            }
+            // Pad with zeros for verified dummy/virtual particles
+            while (scaling_factors.size() < numAtoms) {
+                scaling_factors.push_back(0.0);
             }
         }
-        // Pad with zeros for verified dummy/virtual particles
+    } else {
+        // Auto-grid generation: pad scaling factors with zeros (no ligand atoms to scale)
         while (scaling_factors.size() < numAtoms) {
             scaling_factors.push_back(0.0);
         }
@@ -329,6 +355,7 @@ void CommonCalcGridForceKernel::generateGrid(
     const std::vector<int>& receptorAtoms,
     const std::vector<Vec3>& receptorPositions,
     double originX, double originY, double originZ,
+    double gridCap,
     std::vector<double>& vals) {
 
     // Total grid points
@@ -347,7 +374,7 @@ void CommonCalcGridForceKernel::generateGrid(
 
     // Physics constants in OpenMM units
     const double COULOMB_CONST = 138.935456;  // kJ·nm/(mol·e²)
-    const double U_MAX = 41840.0;  // 10000 kcal/mol * 4.184 kJ/kcal
+    const double U_MAX = gridCap;  // Configurable capping threshold (kJ/mol)
 
     // For each grid point
     int idx = 0;

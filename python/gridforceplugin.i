@@ -41,6 +41,23 @@ namespace std {
 
 using namespace OpenMM;
 
+%pythoncode %{
+def _openmm_GridForce_director_call(force):
+    """Helper to downcast Force* to GridForce* when retrieved from System"""
+    if force is None:
+        return None
+    # Try to create a GridForce wrapper if the C++ object is actually a GridForce
+    try:
+        gf = GridForce.__new__(GridForce)
+        gf.this = force.this
+        gf.thisown = 0
+        # Test if it's actually a GridForce by trying to call a GridForce-specific method
+        _ = gf.getAutoGenerateGrid()
+        return gf
+    except:
+        return force
+%}
+
 namespace GridForcePlugin {
 
 class GridForce : public OpenMM::Force {
@@ -60,6 +77,12 @@ public:
 
     void setInvPower(double inv_power);
     double getInvPower() const;
+    void setGridCap(double uMax);
+    double getGridCap() const;
+    void setOutOfBoundsRestraint(double k);
+    double getOutOfBoundsRestraint() const;
+    void setInterpolationMethod(int method);
+    int getInterpolationMethod() const;
 
     void setAutoGenerateGrid(bool enable);
     bool getAutoGenerateGrid() const;
@@ -68,6 +91,11 @@ public:
 
     void setGridOrigin(double x, double y, double z);
     void getGridOrigin(double& OUTPUT, double& OUTPUT, double& OUTPUT) const;
+
+    void setComputeDerivatives(bool compute);
+    bool getComputeDerivatives() const;
+    bool hasDerivatives() const;
+    const std::vector<double>& getDerivatives() const;
 
     void setReceptorAtoms(const std::vector<int>& atomIndices);
     const std::vector<int>& getReceptorAtoms() const;
@@ -126,9 +154,26 @@ public:
 } // namespace
 
 %pythoncode %{
-  # when we import * from the python module, we only want to import the
-  # actual classes, and not the swigregistration methods, which have already
-  # been called, and are now unneeded by the user code, and only pollute the
-  # namespace
-  __all__ = [k for k in locals().keys() if not (k.endswith('_swigregister') or k.startswith('_'))]
+def castToGridForce(force):
+    """
+    Cast a generic Force object to GridForce if it's actually a GridForce.
+
+    This is needed because when retrieving forces from a System via getForce(),
+    they come back as generic Force objects even if they're actually GridForce objects.
+
+    Usage:
+        force = system.getForce(i)
+        gridforce = gridforceplugin.castToGridForce(force)
+        if gridforce is not None:
+            gridforce.saveToFile("grid.grid")
+
+    Returns GridForce if successful, None otherwise.
+    """
+    return _openmm_GridForce_director_call(force)
+
+# when we import * from the python module, we only want to import the
+# actual classes, and not the swigregistration methods, which have already
+# been called, and are now unneeded by the user code, and only pollute the
+# namespace
+__all__ = [k for k in locals().keys() if not (k.endswith('_swigregister') or k.startswith('_'))]
 %}

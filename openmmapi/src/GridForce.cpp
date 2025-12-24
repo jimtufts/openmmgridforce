@@ -45,8 +45,10 @@ using namespace std;
 
 namespace GridForcePlugin {
 
-GridForce::GridForce() : m_inv_power(0.0), m_autoCalculateScalingFactors(false), m_scalingProperty(""),
-                         m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}) {
+GridForce::GridForce() : m_inv_power(0.0), m_gridCap(41840.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
+                         m_autoCalculateScalingFactors(false), m_scalingProperty(""),
+                         m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
+                         m_computeDerivatives(false) {
     //
 }
 
@@ -67,6 +69,10 @@ void GridForce::addGridValue(double val) {
     m_vals.push_back(val);
 }
 
+void GridForce::setGridValues(const std::vector<double>& vals) {
+    m_vals = vals;
+}
+
 void GridForce::addScalingFactor(double val) {
     m_scaling_factors.push_back(val);
 }
@@ -75,12 +81,43 @@ void GridForce::setScalingFactor(int index, double val) {
     m_scaling_factors[index] = val;
 }
 
+void GridForce::setScalingFactors(const std::vector<double>& vals) {
+    m_scaling_factors = vals;
+}
+
 void GridForce::setInvPower(double inv_power) {
     m_inv_power = inv_power;
 }
 
 double GridForce::getInvPower() const {
     return m_inv_power;
+}
+
+void GridForce::setGridCap(double uMax) {
+    m_gridCap = uMax;
+}
+
+double GridForce::getGridCap() const {
+    return m_gridCap;
+}
+
+void GridForce::setOutOfBoundsRestraint(double k) {
+    m_outOfBoundsRestraint = k;
+}
+
+double GridForce::getOutOfBoundsRestraint() const {
+    return m_outOfBoundsRestraint;
+}
+
+void GridForce::setInterpolationMethod(int method) {
+    if (method < 0 || method > 3) {
+        throw OpenMMException("GridForce: Invalid interpolation method. Must be 0 (trilinear), 1 (cubic B-spline), 2 (tricubic), or 3 (quintic Hermite)");
+    }
+    m_interpolationMethod = method;
+}
+
+int GridForce::getInterpolationMethod() const {
+    return m_interpolationMethod;
 }
 
 void GridForce::getGridParameters(std::vector<int> &g_counts,
@@ -187,6 +224,26 @@ const std::vector<Vec3>& GridForce::getReceptorPositions() const {
     return m_receptorPositions;
 }
 
+void GridForce::setComputeDerivatives(bool compute) {
+    m_computeDerivatives = compute;
+}
+
+bool GridForce::getComputeDerivatives() const {
+    return m_computeDerivatives;
+}
+
+bool GridForce::hasDerivatives() const {
+    return !m_derivatives.empty();
+}
+
+const std::vector<double>& GridForce::getDerivatives() const {
+    return m_derivatives;
+}
+
+void GridForce::setDerivatives(const std::vector<double>& derivs) {
+    m_derivatives = derivs;
+}
+
 void GridForce::loadFromFile(const std::string& filename) {
     // Binary file I/O implementation
     std::ifstream file(filename, std::ios::binary);
@@ -207,7 +264,7 @@ void GridForce::loadFromFile(const std::string& filename) {
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
     file.read(reinterpret_cast<char*>(&header_size), sizeof(uint32_t));
 
-    if (version != 1) {
+    if (version != 1 && version != 2) {
         file.close();
         throw OpenMMException("GridForce: Unsupported file version " + std::to_string(version));
     }
@@ -218,8 +275,13 @@ void GridForce::loadFromFile(const std::string& filename) {
     file.read(reinterpret_cast<char*>(&ny), sizeof(int32_t));
     file.read(reinterpret_cast<char*>(&nz), sizeof(int32_t));
 
-    // Skip padding
-    file.seekg(4, std::ios::cur);
+    // Read derivative count (Version 2) or skip padding (Version 1)
+    uint32_t deriv_count = 0;
+    if (version == 2) {
+        file.read(reinterpret_cast<char*>(&deriv_count), sizeof(uint32_t));
+    } else {
+        file.seekg(4, std::ios::cur);  // Skip padding in Version 1
+    }
 
     // Read grid spacing
     double dx, dy, dz;
@@ -247,23 +309,38 @@ void GridForce::loadFromFile(const std::string& filename) {
     // Seek to data
     file.seekg(data_offset);
 
-    // Read grid values
-    size_t num_values = static_cast<size_t>(nx) * ny * nz;
-    std::vector<double> values(num_values);
-    file.read(reinterpret_cast<char*>(values.data()), num_values * sizeof(double));
+    // Read grid data
+    size_t num_points = static_cast<size_t>(nx) * ny * nz;
+
+    if (version == 2 && deriv_count > 0) {
+        // Version 2: Read derivatives [deriv_count, nx, ny, nz]
+        size_t total_values = deriv_count * num_points;
+        m_derivatives.resize(total_values);
+        file.read(reinterpret_cast<char*>(m_derivatives.data()), total_values * sizeof(double));
+
+        // Extract function values (first derivative index = 0)
+        std::vector<double> values(num_points);
+        for (size_t i = 0; i < num_points; ++i) {
+            values[i] = m_derivatives[i];  // f(x,y,z) is at offset i in [27, nx, ny, nz] layout
+        }
+
+        m_vals = values;
+    } else {
+        // Version 1: Read only function values
+        std::vector<double> values(num_points);
+        file.read(reinterpret_cast<char*>(values.data()), num_points * sizeof(double));
+        m_vals = values;
+        m_derivatives.clear();
+    }
 
     file.close();
 
     // Set the grid parameters
     m_counts.clear();
     m_spacing.clear();
-    m_vals.clear();
 
     addGridCounts(nx, ny, nz);
     addGridSpacing(dx, dy, dz);
-    for (double val : values) {
-        addGridValue(val);
-    }
 
     setGridOrigin(origin_x, origin_y, origin_z);
     setInvPower(inv_power);
@@ -285,6 +362,13 @@ void GridForce::saveToFile(const std::string& filename) const {
         throw OpenMMException("GridForce: Number of grid values doesn't match dimensions");
     }
 
+    bool hasDerivs = !m_derivatives.empty();
+    uint32_t deriv_count = hasDerivs ? 27 : 0;
+
+    if (hasDerivs && m_derivatives.size() != 27 * expected_values) {
+        throw OpenMMException("GridForce: Number of derivative values doesn't match dimensions (expected 27 * nx * ny * nz)");
+    }
+
     std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         throw OpenMMException("GridForce: Cannot create file '" + filename + "'");
@@ -295,8 +379,8 @@ void GridForce::saveToFile(const std::string& filename) const {
     file.write(magic, 8);
 
     // Write header
-    uint32_t version = 1;
-    uint32_t header_size = 64;
+    uint32_t version = hasDerivs ? 2 : 1;
+    uint32_t header_size = hasDerivs ? 128 : 64;
     file.write(reinterpret_cast<const char*>(&version), sizeof(uint32_t));
     file.write(reinterpret_cast<const char*>(&header_size), sizeof(uint32_t));
 
@@ -306,9 +390,13 @@ void GridForce::saveToFile(const std::string& filename) const {
     file.write(reinterpret_cast<const char*>(&ny), sizeof(int32_t));
     file.write(reinterpret_cast<const char*>(&nz), sizeof(int32_t));
 
-    // Write padding
-    float padding = 0.0f;
-    file.write(reinterpret_cast<const char*>(&padding), sizeof(float));
+    // Write deriv_count (Version 2) or padding (Version 1)
+    if (version == 2) {
+        file.write(reinterpret_cast<const char*>(&deriv_count), sizeof(uint32_t));
+    } else {
+        float padding = 0.0f;
+        file.write(reinterpret_cast<const char*>(&padding), sizeof(float));
+    }
 
     // Write grid spacing
     double dx = m_spacing[0], dy = m_spacing[1], dz = m_spacing[2];
@@ -316,8 +404,8 @@ void GridForce::saveToFile(const std::string& filename) const {
     file.write(reinterpret_cast<const char*>(&dy), sizeof(double));
     file.write(reinterpret_cast<const char*>(&dz), sizeof(double));
 
-    // Write data offset (224 bytes: 64 header + 160 metadata)
-    uint64_t data_offset = 224;
+    // Write data offset
+    uint64_t data_offset = version == 2 ? 128 : 224;  // V2: 128-byte header, V1: 64 header + 160 metadata
     file.write(reinterpret_cast<const char*>(&data_offset), sizeof(uint64_t));
 
     // Write metadata (origin)
@@ -345,12 +433,24 @@ void GridForce::saveToFile(const std::string& filename) const {
     // Write inv_power
     file.write(reinterpret_cast<const char*>(&m_inv_power), sizeof(double));
 
-    // Write description (120 bytes of zeros)
-    char description[120] = {0};
-    file.write(description, 120);
+    if (version == 1) {
+        // Version 1: Write description (120 bytes of zeros) to reach 224-byte offset
+        char description[120] = {0};
+        file.write(description, 120);
+    } else {
+        // Version 2: Pad to 128-byte header boundary (we're at offset 104, need 24 bytes)
+        char reserved[24] = {0};
+        file.write(reserved, 24);
+    }
 
-    // Write grid values
-    file.write(reinterpret_cast<const char*>(m_vals.data()), m_vals.size() * sizeof(double));
+    // Write grid data
+    if (version == 2 && hasDerivs) {
+        // Version 2: Write all derivatives [27, nx, ny, nz]
+        file.write(reinterpret_cast<const char*>(m_derivatives.data()), m_derivatives.size() * sizeof(double));
+    } else {
+        // Version 1: Write only function values
+        file.write(reinterpret_cast<const char*>(m_vals.data()), m_vals.size() * sizeof(double));
+    }
 
     file.close();
 }

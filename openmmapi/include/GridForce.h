@@ -65,8 +65,22 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     void addGridSpacing(double dx, double dy, double dz);  // length unit is 'nm'
 
     void addGridValue(double val);
+
+    /**
+     * Set all grid values at once. This is primarily used internally by kernels
+     * after auto-generating grids to copy the values back to the GridForce object.
+     *
+     * @param vals  vector of grid values (must match grid dimensions)
+     */
+    void setGridValues(const std::vector<double>& vals);
+
     void addScalingFactor(double val);
     void setScalingFactor(int index, double val);
+
+    /**
+     * Set all scaling factors at once.
+     */
+    void setScalingFactors(const std::vector<double>& vals);
 
     /**
      * Enable or disable automatic calculation of scaling factors from the System.
@@ -125,6 +139,60 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double getInvPower() const;
 
     /**
+     * Set the capping threshold for grid value saturation.
+     * During grid generation, grid values are capped using: value = U_MAX * tanh(value / U_MAX)
+     * This prevents extreme values at grid points very close to atoms, which improves
+     * interpolation accuracy but can limit gradients in tight binding pockets.
+     *
+     * @param uMax  capping threshold in kJ/mol (default: 41840.0, equivalent to 10000 kcal/mol)
+     */
+    void setGridCap(double uMax);
+
+    /**
+     * Get the current grid capping threshold.
+     * @return  the capping threshold in kJ/mol
+     */
+    double getGridCap() const;
+
+    /**
+     * Set the force constant for the harmonic restraint applied to atoms outside the grid.
+     * When an atom is outside the grid bounds, a harmonic restrain force is applied
+     * with energy: E = 0.5 * k * distance^2, where distance is the distance from the
+     * nearest grid boundary.
+     *
+     * Set to 0.0 to disable out-of-bounds restraints (useful when using multiple grids
+     * at different origins where atoms may legitimately be outside some grids).
+     *
+     * @param k  force constant in kJ/(mol*nm^2) (default: 10000.0)
+     */
+    void setOutOfBoundsRestraint(double k);
+
+    /**
+     * Get the current out-of-bounds restraint force constant.
+     * @return  the restraint force constant in kJ/(mol*nm^2)
+     */
+    double getOutOfBoundsRestraint() const;
+
+    /**
+     * Set the interpolation method for grid value lookup.
+     *
+     * Supported methods:
+     * - 0: Trilinear interpolation (default) - uses 2x2x2 grid points, fastest
+     * - 1: Cubic B-spline interpolation - uses 4x4x4 grid points, smoother gradients
+     * - 2: Tricubic interpolation - uses 4x4x4 grid points with derivatives, highest accuracy
+     * - 3: Quintic Hermite interpolation - uses 6x6x6 grid points, smoothest but slowest
+     *
+     * @param method  interpolation method code (default: 0 for trilinear)
+     */
+    void setInterpolationMethod(int method);
+
+    /**
+     * Get the current interpolation method.
+     * @return  interpolation method code
+     */
+    int getInterpolationMethod() const;
+
+    /**
      * Enable or disable automatic grid generation from the System.
      * When enabled, the grid will be generated from NonbondedForce parameters
      * and receptor positions during kernel initialization.
@@ -178,6 +246,45 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @param z  output z-coordinate of grid origin (nm)
      */
     void getGridOrigin(double& x, double& y, double& z) const;
+
+    /**
+     * Enable or disable derivative computation for triquintic interpolation.
+     * When enabled, grid generation will compute and store all 27 derivatives
+     * at each grid point, required for proper C² continuous triquintic interpolation.
+     * This creates Version 2 grid files which are 27× larger.
+     *
+     * @param compute  if true, compute derivatives; if false, store only function values
+     */
+    void setComputeDerivatives(bool compute);
+
+    /**
+     * Get whether derivative computation is enabled.
+     *
+     * @return  true if derivatives will be computed, false otherwise
+     */
+    bool getComputeDerivatives() const;
+
+    /**
+     * Check if the grid has precomputed derivatives.
+     *
+     * @return  true if derivatives are stored, false if only function values
+     */
+    bool hasDerivatives() const;
+
+    /**
+     * Get the derivative values (if computed).
+     * Data is stored as a 4D array [27, nx, ny, nz] in C order (row-major).
+     *
+     * @return  vector of derivative values, or empty if derivatives not computed
+     */
+    const std::vector<double>& getDerivatives() const;
+
+    /**
+     * Set the derivative values. Used internally by kernels after grid generation.
+     *
+     * @param derivs  vector of derivative values [27, nx, ny, nz]
+     */
+    void setDerivatives(const std::vector<double>& derivs);
 
     /**
      * Set which atoms to include in grid calculation (receptor atoms).
@@ -270,6 +377,9 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> m_vals;
     std::vector<double> m_scaling_factors;
     double m_inv_power;
+    double m_gridCap;  // Capping threshold for grid values (kJ/mol)
+    double m_outOfBoundsRestraint;  // Force constant for out-of-bounds harmonic restraint (kJ/mol/nm^2)
+    int m_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     bool m_autoCalculateScalingFactors;
     std::string m_scalingProperty;
 
@@ -280,6 +390,10 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<int> m_receptorAtoms;    // Indices of atoms to include
     std::vector<int> m_ligandAtoms;      // Indices of atoms to exclude
     std::vector<Vec3> m_receptorPositions; // Positions for grid generation (nm)
+
+    // Derivative storage for triquintic interpolation
+    bool m_computeDerivatives;           // Whether to compute derivatives during grid generation
+    std::vector<double> m_derivatives;   // 27 derivatives per grid point [27, nx, ny, nz]
 };
 
 }  // namespace GridForcePlugin

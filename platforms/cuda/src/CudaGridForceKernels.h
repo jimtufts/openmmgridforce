@@ -50,19 +50,27 @@ private:
                      const std::vector<int>& receptorAtoms,
                      const std::vector<OpenMM::Vec3>& receptorPositions,
                      double originX, double originY, double originZ,
-                     std::vector<double>& vals);
+                     std::vector<double>& vals,
+                     std::vector<double>& derivatives);
 
     bool hasInitializedKernel;
     int numAtoms;
     float invPower;
+    float gridCap;
+    float outOfBoundsRestraint;
+    int interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
+    float originX, originY, originZ;
     OpenMM::CudaContext& cu;
     OpenMM::CudaArray g_counts;
     OpenMM::CudaArray g_spacing;
     OpenMM::CudaArray g_vals;
     OpenMM::CudaArray g_scaling_factors;
+    OpenMM::CudaArray g_derivatives;  // 27 derivatives per grid point for triquintic [27, nx, ny, nz]
     CUfunction kernel;
     std::vector<int> counts;
     std::vector<double> spacing;
+    std::vector<int> ligandAtoms;  // Particle indices for ligand atoms
+    bool computeDerivatives;       // Whether derivatives were computed
 };
 
 } // namespace GridForcePlugin
