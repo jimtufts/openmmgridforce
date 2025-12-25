@@ -118,13 +118,15 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
                 // For electrostatic grids: use charge directly
                 scaling_factors[i] = charge;
             } else if (scalingProperty == "ljr") {
-                // For LJ repulsive: sqrt(epsilon) * (2*sigma)^6
-                double diameter = 2.0 * sigma;
-                scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 6.0);
+                // For LJ repulsive: sqrt(epsilon) * Rmin^6
+                // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                double rmin = std::pow(2.0, 1.0/6.0) * sigma;
+                scaling_factors[i] = std::sqrt(epsilon) * std::pow(rmin, 6.0);
             } else if (scalingProperty == "lja") {
-                // For LJ attractive: sqrt(epsilon) * (2*sigma)^3
-                double diameter = 2.0 * sigma;
-                scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 3.0);
+                // For LJ attractive: sqrt(epsilon) * Rmin^3
+                // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                double rmin = std::pow(2.0, 1.0/6.0) * sigma;
+                scaling_factors[i] = std::sqrt(epsilon) * std::pow(rmin, 3.0);
             }
         }
     }
@@ -186,7 +188,7 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
 
         // Generate grid
         generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
-                     ox, oy, oz, gridCap, vals);
+                     ox, oy, oz, gridCap, inv_power, vals);
 
         // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
         const_cast<GridForce&>(force).setGridValues(vals);
@@ -356,6 +358,7 @@ void CommonCalcGridForceKernel::generateGrid(
     const std::vector<Vec3>& receptorPositions,
     double originX, double originY, double originZ,
     double gridCap,
+    double invPower,
     std::vector<double>& vals) {
 
     // Total grid points
@@ -409,18 +412,26 @@ void CommonCalcGridForceKernel::generateGrid(
                         // Electrostatic potential: k * q / r
                         gridValue += COULOMB_CONST * charges[atomIdx] / r;
                     } else if (gridType == "ljr") {
-                        // LJ repulsive: sqrt(epsilon) * diameter^6 / r^12
-                        double diameter = 2.0 * sigmas[atomIdx];
-                        gridValue += std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 6.0) / std::pow(r, 12.0);
+                        // LJ repulsive: sqrt(epsilon) * Rmin^6 / r^12
+                        // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                        double rmin = std::pow(2.0, 1.0/6.0) * sigmas[atomIdx];
+                        gridValue += std::sqrt(epsilons[atomIdx]) * std::pow(rmin, 6.0) / std::pow(r, 12.0);
                     } else if (gridType == "lja") {
-                        // LJ attractive: -2 * sqrt(epsilon) * diameter^3 / r^6
-                        double diameter = 2.0 * sigmas[atomIdx];
-                        gridValue += -2.0 * std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 3.0) / std::pow(r, 6.0);
+                        // LJ attractive: -2 * sqrt(epsilon) * Rmin^3 / r^6
+                        // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                        double rmin = std::pow(2.0, 1.0/6.0) * sigmas[atomIdx];
+                        gridValue += -2.0 * std::sqrt(epsilons[atomIdx]) * std::pow(rmin, 3.0) / std::pow(r, 6.0);
                     }
                 }
 
                 // Apply capping to avoid extreme values
                 gridValue = U_MAX * std::tanh(gridValue / U_MAX);
+
+                // Apply inverse power transformation if specified
+                // Grid should store G^(1/n), kernel will apply ^n to recover G
+                if (invPower > 0.0) {
+                    gridValue = std::pow(gridValue, 1.0 / invPower);
+                }
 
                 vals[idx++] = gridValue;
             }

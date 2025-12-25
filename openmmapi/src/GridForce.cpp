@@ -39,6 +39,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstdint>
+#include <cmath>
 
 using namespace OpenMM;
 using namespace std;
@@ -86,6 +87,62 @@ void GridForce::setScalingFactors(const std::vector<double>& vals) {
 }
 
 void GridForce::setInvPower(double inv_power) {
+    // If grid values are already loaded and inv_power is changing, transform the values
+    if (!m_vals.empty() && inv_power != m_inv_power) {
+        if (m_inv_power == 0.0 && inv_power > 0.0) {
+            // Transform from G to G^(1/n)
+            for (size_t i = 0; i < m_vals.size(); ++i) {
+                m_vals[i] = std::pow(m_vals[i], 1.0 / inv_power);
+            }
+        } else if (m_inv_power > 0.0 && inv_power == 0.0) {
+            // Transform from G^(1/m) back to G
+            for (size_t i = 0; i < m_vals.size(); ++i) {
+                m_vals[i] = std::pow(m_vals[i], m_inv_power);
+            }
+        } else if (m_inv_power > 0.0 && inv_power > 0.0) {
+            // Transform from G^(1/m) to G^(1/n)
+            // First: G^(1/m) -> G by raising to power m
+            // Then: G -> G^(1/n) by raising to power 1/n
+            // Combined: (G^(1/m))^(m/n) = G^(1/n)
+            double power_factor = m_inv_power / inv_power;
+            for (size_t i = 0; i < m_vals.size(); ++i) {
+                m_vals[i] = std::pow(m_vals[i], power_factor);
+            }
+        }
+
+        // Transform derivatives if they exist
+        // Derivatives scale according to chain rule: d(f^a)/dx = a * f^(a-1) * df/dx
+        if (!m_derivatives.empty()) {
+            size_t num_points = m_vals.size();
+
+            // Determine scaling factor for derivatives
+            double deriv_scale;
+            if (m_inv_power == 0.0 && inv_power > 0.0) {
+                // From f to f^(1/n): derivative scales by (1/n) * f^(1/n - 1) / f^(-1) = (1/n) * f^(1/n)
+                // But this is point-dependent, so we handle it per-point below
+                deriv_scale = 1.0 / inv_power;
+            } else if (m_inv_power > 0.0 && inv_power == 0.0) {
+                // From f^(1/m) to f: derivative scales by m * f^(m-1) / (f^(1/m))^(m-1) = m
+                deriv_scale = m_inv_power;
+            } else {
+                // From f^(1/m) to f^(1/n): derivative scales by (m/n)
+                deriv_scale = m_inv_power / inv_power;
+            }
+
+            // The derivatives array is stored as [27, nx, ny, nz]
+            // Derivative index 0 is the function value (already transformed above in m_vals)
+            // Derivative indices 1-26 are the partial derivatives
+            // We need to scale derivatives 1-26 by the chain rule factor
+            for (size_t pt = 0; pt < num_points; ++pt) {
+                // Skip index 0 (function value) and scale indices 1-26 (derivatives)
+                for (size_t d = 1; d < 27; ++d) {
+                    size_t idx = pt + d * num_points;  // [deriv, nx, ny, nz] -> flat index
+                    m_derivatives[idx] *= deriv_scale;
+                }
+            }
+        }
+    }
+
     m_inv_power = inv_power;
 }
 

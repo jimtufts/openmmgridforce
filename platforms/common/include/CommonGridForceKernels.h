@@ -51,6 +51,7 @@ protected:
                      const std::vector<OpenMM::Vec3>& receptorPositions,
                      double originX, double originY, double originZ,
                      double gridCap,
+                     double invPower,
                      std::vector<double>& vals);
 
     bool hasInitializedKernel;

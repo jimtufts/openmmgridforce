@@ -43,8 +43,9 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
               << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
               << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
 
-    // Store grid cap BEFORE generateGrid() is called (it needs this->gridCap)
+    // Store grid cap and invPower BEFORE generateGrid() is called (it needs these values)
     gridCap = (float)grid_cap;
+    invPower = (float)inv_power;
 
     // Store ligand atoms and derivative computation flag
     ligandAtoms = force.getLigandAtoms();
@@ -85,13 +86,15 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 // For electrostatic grids: use charge directly
                 scaling_factors[i] = charge;
             } else if (scalingProperty == "ljr") {
-                // For LJ repulsive: sqrt(epsilon) * (2*sigma)^6
-                double diameter = 2.0 * sigma;
-                scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 6.0);
+                // For LJ repulsive: sqrt(epsilon) * Rmin^6
+                // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                double rmin = std::pow(2.0, 1.0/6.0) * sigma;
+                scaling_factors[i] = std::sqrt(epsilon) * std::pow(rmin, 6.0);
             } else if (scalingProperty == "lja") {
-                // For LJ attractive: sqrt(epsilon) * (2*sigma)^3
-                double diameter = 2.0 * sigma;
-                scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 3.0);
+                // For LJ attractive: sqrt(epsilon) * Rmin^3
+                // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                double rmin = std::pow(2.0, 1.0/6.0) * sigma;
+                scaling_factors[i] = std::sqrt(epsilon) * std::pow(rmin, 3.0);
             }
         }
 
@@ -262,8 +265,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         }
     }
 
-    // Store inv_power, out-of-bounds restraint, and interpolation method (gridCap already set above)
-    invPower = (float)inv_power;
+    // Store out-of-bounds restraint and interpolation method (gridCap and invPower already set above)
     outOfBoundsRestraint = (float)outOfBounds_k;
     interpolationMethod = interp_method;
 
@@ -534,6 +536,7 @@ void CudaCalcGridForceKernel::generateGrid(
         &numReceptorAtoms,
         &gridTypeInt,
         &gridCapF,
+        &invPower,
         &originXf,
         &originYf,
         &originZf,

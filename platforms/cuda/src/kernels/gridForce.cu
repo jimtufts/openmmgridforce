@@ -388,6 +388,7 @@ extern "C" __global__ void generateGridKernel(
     const int numReceptorAtoms,
     const int gridType,  // 0=charge, 1=ljr, 2=lja
     const float gridCap,  // Capping threshold (kJ/mol)
+    const float invPower,  // Inverse power transformation
     const float originX,
     const float originY,
     const float originZ,
@@ -440,22 +441,30 @@ extern "C" __global__ void generateGridKernel(
             // Electrostatic potential: k * q / r
             gridValue += COULOMB_CONST * receptorCharges[atomIdx] / r;
         } else if (gridType == 1) {
-            // LJ repulsive: sqrt(epsilon) * diameter^6 / r^12
-            const float diameter = 2.0f * receptorSigmas[atomIdx];
-            const float d6 = diameter * diameter * diameter * diameter * diameter * diameter;
+            // LJ repulsive: sqrt(epsilon) * Rmin^6 / r^12
+            // where Rmin = 2^(1/6) * sigma (AMBER convention)
+            const float rmin = powf(2.0f, 1.0f/6.0f) * receptorSigmas[atomIdx];
+            const float r6 = rmin * rmin * rmin * rmin * rmin * rmin;
             const float r12 = r2 * r2 * r2 * r2 * r2 * r2;
-            gridValue += sqrtf(receptorEpsilons[atomIdx]) * d6 / r12;
+            gridValue += sqrtf(receptorEpsilons[atomIdx]) * r6 / r12;
         } else if (gridType == 2) {
-            // LJ attractive: -2 * sqrt(epsilon) * diameter^3 / r^6
-            const float diameter = 2.0f * receptorSigmas[atomIdx];
-            const float d3 = diameter * diameter * diameter;
+            // LJ attractive: -2 * sqrt(epsilon) * Rmin^3 / r^6
+            // where Rmin = 2^(1/6) * sigma (AMBER convention)
+            const float rmin = powf(2.0f, 1.0f/6.0f) * receptorSigmas[atomIdx];
+            const float r3 = rmin * rmin * rmin;
             const float r6 = r2 * r2 * r2;
-            gridValue += -2.0f * sqrtf(receptorEpsilons[atomIdx]) * d3 / r6;
+            gridValue += -2.0f * sqrtf(receptorEpsilons[atomIdx]) * r3 / r6;
         }
     }
 
     // Apply capping to avoid extreme values
     gridValue = U_MAX * tanhf(gridValue / U_MAX);
+
+    // Apply inverse power transformation if specified
+    // Grid should store G^(1/n), kernel will apply ^n to recover G
+    if (invPower > 0.0f) {
+        gridValue = powf(gridValue, 1.0f / invPower);
+    }
 
     // Store result
     gridValues[gridIdx] = gridValue;
