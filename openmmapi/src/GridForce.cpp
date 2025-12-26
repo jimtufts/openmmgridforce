@@ -110,35 +110,54 @@ void GridForce::setInvPower(double inv_power) {
             }
         }
 
-        // Transform derivatives if they exist
-        // Derivatives scale according to chain rule: d(f^a)/dx = a * f^(a-1) * df/dx
+        // Transform LOGARITHMIC derivatives using analytical formulas
+        // Derivatives are stored as: [0]=f, [1-3]=L1 (G'/G), [4-9]=L2 (G''/G)
+        // For H = G^p: L1_H = p*L1_G, L2_H = p*L2_G + p*(p-1)*L1_G²
         if (!m_derivatives.empty()) {
-            size_t num_points = m_vals.size();
-
-            // Determine scaling factor for derivatives
-            double deriv_scale;
+            double p; // power transformation factor
             if (m_inv_power == 0.0 && inv_power > 0.0) {
-                // From f to f^(1/n): derivative scales by (1/n) * f^(1/n - 1) / f^(-1) = (1/n) * f^(1/n)
-                // But this is point-dependent, so we handle it per-point below
-                deriv_scale = 1.0 / inv_power;
+                p = 1.0 / inv_power;
             } else if (m_inv_power > 0.0 && inv_power == 0.0) {
-                // From f^(1/m) to f: derivative scales by m * f^(m-1) / (f^(1/m))^(m-1) = m
-                deriv_scale = m_inv_power;
+                p = m_inv_power;
             } else {
-                // From f^(1/m) to f^(1/n): derivative scales by (m/n)
-                deriv_scale = m_inv_power / inv_power;
+                p = m_inv_power / inv_power;
             }
 
-            // The derivatives array is stored as [27, nx, ny, nz]
-            // Derivative index 0 is the function value (already transformed above in m_vals)
-            // Derivative indices 1-26 are the partial derivatives
-            // We need to scale derivatives 1-26 by the chain rule factor
+            size_t num_points = m_vals.size();
+
             for (size_t pt = 0; pt < num_points; ++pt) {
-                // Skip index 0 (function value) and scale indices 1-26 (derivatives)
-                for (size_t d = 1; d < 27; ++d) {
-                    size_t idx = pt + d * num_points;  // [deriv, nx, ny, nz] -> flat index
-                    m_derivatives[idx] *= deriv_scale;
-                }
+                // Update function value (already done above)
+                m_derivatives[0 * num_points + pt] = m_vals[pt];
+
+                // Get old L1 values before transformation
+                double L1_x_old = m_derivatives[1 * num_points + pt];
+                double L1_y_old = m_derivatives[2 * num_points + pt];
+                double L1_z_old = m_derivatives[3 * num_points + pt];
+
+                // Transform first logarithmic derivatives: L1_new = p * L1_old
+                m_derivatives[1 * num_points + pt] = p * L1_x_old;
+                m_derivatives[2 * num_points + pt] = p * L1_y_old;
+                m_derivatives[3 * num_points + pt] = p * L1_z_old;
+
+                // Transform second logarithmic derivatives: L2_new = p*L2_old + p*(p-1)*L1_old²
+                // L2_xx
+                m_derivatives[4 * num_points + pt] = p * m_derivatives[4 * num_points + pt] +
+                                                      p * (p - 1) * L1_x_old * L1_x_old;
+                // L2_yy
+                m_derivatives[5 * num_points + pt] = p * m_derivatives[5 * num_points + pt] +
+                                                      p * (p - 1) * L1_y_old * L1_y_old;
+                // L2_zz
+                m_derivatives[6 * num_points + pt] = p * m_derivatives[6 * num_points + pt] +
+                                                      p * (p - 1) * L1_z_old * L1_z_old;
+                // L2_xy
+                m_derivatives[7 * num_points + pt] = p * m_derivatives[7 * num_points + pt] +
+                                                      p * (p - 1) * L1_x_old * L1_y_old;
+                // L2_xz
+                m_derivatives[8 * num_points + pt] = p * m_derivatives[8 * num_points + pt] +
+                                                      p * (p - 1) * L1_x_old * L1_z_old;
+                // L2_yz
+                m_derivatives[9 * num_points + pt] = p * m_derivatives[9 * num_points + pt] +
+                                                      p * (p - 1) * L1_y_old * L1_z_old;
             }
         }
     }
@@ -400,7 +419,8 @@ void GridForce::loadFromFile(const std::string& filename) {
     addGridSpacing(dx, dy, dz);
 
     setGridOrigin(origin_x, origin_y, origin_z);
-    setInvPower(inv_power);
+    // Restore inv_power directly without transformation (grid already has correct values)
+    m_inv_power = inv_power;
 
     // Decode grid type
     if (grid_type_code == 1) m_gridType = "charge";
