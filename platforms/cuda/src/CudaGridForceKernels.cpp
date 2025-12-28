@@ -39,9 +39,9 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // Store counts and spacing as member variables for generateGrid
     counts = counts_local;
     spacing = spacing_local;
-    std::cout << "CudaCalcGridForceKernel::initialize() received counts: ["
-              << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
-              << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
+//     std::cout << "CudaCalcGridForceKernel::initialize() received counts: ["
+//               << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
+//               << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
 
     // Store grid cap and invPower BEFORE generateGrid() is called (it needs these values)
     gridCap = (float)grid_cap;
@@ -225,7 +225,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // Upload derivatives if they exist (for triquintic interpolation)
     if (force.hasDerivatives()) {
         vector<double> derivatives_vec = force.getDerivatives();
-        std::cout << "Uploading " << derivatives_vec.size() << " derivatives to GPU..." << std::endl;
+//         std::cout << "Uploading " << derivatives_vec.size() << " derivatives to GPU..." << std::endl;
 
         // Check for NaN/Inf values
         int nan_count = 0;
@@ -234,29 +234,29 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             if (std::isnan(derivatives_vec[i])) nan_count++;
             if (std::isinf(derivatives_vec[i])) inf_count++;
         }
-        std::cout << "  Checked first 1000 derivatives: " << nan_count << " NaN, " << inf_count << " Inf" << std::endl;
+//         std::cout << "  Checked first 1000 derivatives: " << nan_count << " NaN, " << inf_count << " Inf" << std::endl;
 
         // Always create fresh CudaArray to avoid reinitialization issues
         g_derivatives = CudaArray();
-        std::cout << "  Initializing CudaArray with size " << derivatives_vec.size() << "..." << std::endl;
+//         std::cout << "  Initializing CudaArray with size " << derivatives_vec.size() << "..." << std::endl;
         try {
             g_derivatives.initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
-            std::cout << "  CudaArray initialized successfully, size=" << g_derivatives.getSize() << std::endl;
+//             std::cout << "  CudaArray initialized successfully, size=" << g_derivatives.getSize() << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "  ERROR initializing CudaArray: " << e.what() << std::endl;
             throw;
         }
 
-        std::cout << "  Converting to float vector..." << std::endl;
+//         std::cout << "  Converting to float vector..." << std::endl;
         vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
-        std::cout << "  Float vector size: " << derivativesFloat.size() << ", bytes: "
-                  << (derivativesFloat.size() * sizeof(float)) << std::endl;
-        std::cout << "  Setting CUDA context..." << std::endl;
+//         std::cout << "  Float vector size: " << derivativesFloat.size() << ", bytes: "
+//                   << (derivativesFloat.size() * sizeof(float)) << std::endl;
+//         std::cout << "  Setting CUDA context..." << std::endl;
         cu.setAsCurrent();
-        std::cout << "  Calling g_derivatives.upload()..." << std::endl;
+//         std::cout << "  Calling g_derivatives.upload()..." << std::endl;
         try {
             g_derivatives.upload(derivativesFloat);
-            std::cout << "  Upload successful!" << std::endl;
+//             std::cout << "  Upload successful!" << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "  ERROR during upload: " << e.what() << std::endl;
             std::cerr << "  Array size: " << g_derivatives.getSize() << std::endl;
@@ -459,16 +459,16 @@ void CudaCalcGridForceKernel::generateGrid(
     size_t c0_size = static_cast<size_t>(counts[0]);
     size_t c1_size = static_cast<size_t>(counts[1]);
     size_t c2_size = static_cast<size_t>(counts[2]);
-    std::cout << "DEBUG size_t calculation:" << std::endl;
-    std::cout << "  c0_size = " << c0_size << std::endl;
-    std::cout << "  c1_size = " << c1_size << std::endl;
-    std::cout << "  c2_size = " << c2_size << std::endl;
+//     std::cout << "DEBUG size_t calculation:" << std::endl;
+//     std::cout << "  c0_size = " << c0_size << std::endl;
+//     std::cout << "  c1_size = " << c1_size << std::endl;
+//     std::cout << "  c2_size = " << c2_size << std::endl;
     size_t product01 = c0_size * c1_size;
-    std::cout << "  c0_size * c1_size = " << product01 << std::endl;
+//     std::cout << "  c0_size * c1_size = " << product01 << std::endl;
     size_t totalPoints_size = product01 * c2_size;
-    std::cout << "  totalPoints_size = " << totalPoints_size << std::endl;
+//     std::cout << "  totalPoints_size = " << totalPoints_size << std::endl;
     int totalPoints = static_cast<int>(totalPoints_size);
-    std::cout << "  totalPoints (int) = " << totalPoints << std::endl;
+//     std::cout << "  totalPoints (int) = " << totalPoints << std::endl;
     vals.resize(totalPoints, 0.0);
 
     // Extract receptor atom parameters
@@ -516,63 +516,168 @@ void CudaCalcGridForceKernel::generateGrid(
     d_gridCounts.upload(gridCountsVec);
     d_gridSpacing.upload(gridSpacingVec);
 
-    // Get kernel
+    // Get kernel module
     CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
-    CUfunction kernel = cu.getKernel(module, "generateGridKernel");
 
     // Convert origin to float
     float originXf = (float)originX;
     float originYf = (float)originY;
     float originZf = (float)originZ;
     int numReceptorAtoms = receptorAtoms.size();
-    float gridCapF = gridCap;
 
-    void* args[] = {
-        &gridVals.getDevicePointer(),
-        &receptorPos.getDevicePointer(),
-        &receptorCharges.getDevicePointer(),
-        &receptorSigmas.getDevicePointer(),
-        &receptorEpsilons.getDevicePointer(),
-        &numReceptorAtoms,
-        &gridTypeInt,
-        &gridCapF,
-        &invPower,
-        &originXf,
-        &originYf,
-        &originZf,
-        &d_gridCounts.getDevicePointer(),
-        &d_gridSpacing.getDevicePointer(),
-        &totalPoints
-    };
-
-    // Launch kernel directly with cuLaunchKernel for correct multi-block execution
-    // OpenMM's executeKernel caps grid size at numThreadBlocks which is too small for millions of grid points
     int blockSize = 256;
     int gridSize = (totalPoints + blockSize - 1) / blockSize;
+    CUresult result;
 
-    CUresult result = cuLaunchKernel(kernel,
-        gridSize, 1, 1,        // Grid dimensions (gridSize blocks in X direction)
-        blockSize, 1, 1,       // Block dimensions (blockSize threads in X direction)
-        0,                     // Shared memory size
-        cu.getCurrentStream(), // Stream
-        args,                  // Kernel arguments
-        NULL);                 // Extra parameters
+    // Decide whether to use analytical derivatives (RASPA3 tensor method) for all grid types
+    bool useAnalyticalDerivatives = computeDerivatives;
 
-    if (result != CUDA_SUCCESS) {
-        throw OpenMMException("Error launching grid generation kernel");
+    if (useAnalyticalDerivatives) {
+        // Use RASPA3 tensor method with analytical derivatives for all grid types
+        // This generates energy AND all 27 derivatives in one pass
+//         std::cout << "Using analytical derivatives (RASPA3 tensor method) for " << gridType << " grid..." << std::endl;
+
+        // Check if derivative array would exceed reasonable GPU memory limit (10 GB)
+        size_t derivativeBytes = 27 * totalPoints * sizeof(float);
+        const size_t MAX_DERIV_BYTES = 10LL * 1024 * 1024 * 1024;  // 10 GB
+
+        if (derivativeBytes > MAX_DERIV_BYTES) {
+            std::cerr << "WARNING: Derivative array would require "
+                      << (derivativeBytes / (1024.0 * 1024 * 1024))
+                      << " GB GPU memory, exceeding limit of "
+                      << (MAX_DERIV_BYTES / (1024.0 * 1024 * 1024))
+                      << " GB. Falling back to energy-only generation." << std::endl;
+            useAnalyticalDerivatives = false;
+        }
     }
 
-    // Download results
-    vector<float> gridValsFloat(totalPoints);
-    gridVals.download(gridValsFloat);
+    if (useAnalyticalDerivatives) {
+        // Allocate GPU memory for grid data (27 values per point)
+        CudaArray gridDataGPU;
+        gridDataGPU.initialize<float>(cu, 27 * totalPoints, "gridDataWithDerivatives");
 
-    // Convert to double
-    for (int i = 0; i < totalPoints; i++) {
-        vals[i] = gridValsFloat[i];
+        // Get analytical derivative kernel
+        CUfunction analyticalKernel = cu.getKernel(module, "generateGridWithAnalyticalDerivatives");
+
+        // Map gridType for analytical kernel: 0=charge, 1=ljr, 2=lja
+        int analyticalGridType = gridTypeInt;  // Mapping is the same
+        float gridCapF = gridCap;
+        float invPowerF = invPower;
+
+        void* analyticalArgs[] = {
+            &gridDataGPU.getDevicePointer(),
+            &receptorPos.getDevicePointer(),
+            &receptorCharges.getDevicePointer(),
+            &receptorSigmas.getDevicePointer(),
+            &receptorEpsilons.getDevicePointer(),
+            &numReceptorAtoms,
+            &analyticalGridType,
+            &gridCapF,
+            &invPowerF,
+            &originXf,
+            &originYf,
+            &originZf,
+            &d_gridCounts.getDevicePointer(),
+            &d_gridSpacing.getDevicePointer(),
+            &totalPoints
+        };
+
+        // Launch analytical derivative kernel
+        result = cuLaunchKernel(analyticalKernel,
+            gridSize, 1, 1,
+            blockSize, 1, 1,
+            0,
+            cu.getCurrentStream(),
+            analyticalArgs,
+            NULL);
+
+        if (result != CUDA_SUCCESS) {
+            throw OpenMMException("Error launching analytical derivative kernel");
+        }
+
+        // Synchronize
+        cuStreamSynchronize(cu.getCurrentStream());
+
+        // Download all data (energy + derivatives)
+        vector<float> gridDataFloat(27 * totalPoints);
+        gridDataGPU.download(gridDataFloat);
+
+        // Extract energy values - stored at [0 * totalPoints + point_idx]
+        for (int i = 0; i < totalPoints; i++) {
+            vals[i] = gridDataFloat[0 * totalPoints + i];
+        }
+
+        // Diagnostic: check for problematic values in grid energies
+        int nan_count = 0, inf_count = 0;
+        double min_val = vals[0], max_val = vals[0];
+        for (int i = 0; i < totalPoints; i++) {
+            if (std::isnan(vals[i])) nan_count++;
+            if (std::isinf(vals[i])) inf_count++;
+            if (std::isfinite(vals[i])) {
+                min_val = std::min(min_val, vals[i]);
+                max_val = std::max(max_val, vals[i]);
+            }
+        }
+//         std::cout << "  Grid energy statistics: min=" << min_val << ", max=" << max_val
+//                   << ", NaN=" << nan_count << ", Inf=" << inf_count << std::endl;
+
+        // Store derivatives
+        derivatives.resize(27 * totalPoints);
+        for (int i = 0; i < 27 * totalPoints; i++) {
+            derivatives[i] = gridDataFloat[i];
+        }
+
+//         std::cout << "Generated grid with " << totalPoints << " points and "
+//                   << derivatives.size() << " derivative values using RASPA3 analytical method" << std::endl;
+
+    } else {
+        // Use original finite difference method
+        CUfunction kernel = cu.getKernel(module, "generateGridKernel");
+        float gridCapF = gridCap;
+
+        void* args[] = {
+            &gridVals.getDevicePointer(),
+            &receptorPos.getDevicePointer(),
+            &receptorCharges.getDevicePointer(),
+            &receptorSigmas.getDevicePointer(),
+            &receptorEpsilons.getDevicePointer(),
+            &numReceptorAtoms,
+            &gridTypeInt,
+            &gridCapF,
+            &invPower,
+            &originXf,
+            &originYf,
+            &originZf,
+            &d_gridCounts.getDevicePointer(),
+            &d_gridSpacing.getDevicePointer(),
+            &totalPoints
+        };
+
+        // Launch kernel
+        result = cuLaunchKernel(kernel,
+            gridSize, 1, 1,
+            blockSize, 1, 1,
+            0,
+            cu.getCurrentStream(),
+            args,
+            NULL);
+
+        if (result != CUDA_SUCCESS) {
+            throw OpenMMException("Error launching grid generation kernel");
+        }
+
+        // Download results
+        vector<float> gridValsFloat(totalPoints);
+        gridVals.download(gridValsFloat);
+
+        // Convert to double
+        for (int i = 0; i < totalPoints; i++) {
+            vals[i] = gridValsFloat[i];
+        }
     }
 
-    // Compute derivatives if enabled (for triquintic interpolation)
-    if (computeDerivatives) {
+    // Compute derivatives using finite differences if needed (for non-LJ grids or if analytical failed)
+    if (computeDerivatives && !useAnalyticalDerivatives) {
         // Check if derivative array would exceed reasonable GPU memory limit (10 GB)
         size_t derivativeBytes = 27 * totalPoints * sizeof(float);
         const size_t MAX_DERIV_BYTES = 10LL * 1024 * 1024 * 1024;  // 10 GB
@@ -637,7 +742,7 @@ void CudaCalcGridForceKernel::generateGrid(
             derivatives[i] = derivsFloat[i];
         }
 
-        std::cout << "Computed " << derivatives.size() << " derivative values on GPU (grid: "
-                  << counts[0] << "×" << counts[1] << "×" << counts[2] << ")" << std::endl;
+//         std::cout << "Computed " << derivatives.size() << " derivative values on GPU (grid: "
+//                   << counts[0] << "×" << counts[1] << "×" << counts[2] << ")" << std::endl;
     }
 }

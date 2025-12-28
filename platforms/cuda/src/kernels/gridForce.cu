@@ -26,6 +26,7 @@ extern "C" __global__ void computeGridForce(
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
+
     if (index >= numAtoms)
         return;
 
@@ -111,8 +112,6 @@ extern "C" __global__ void computeGridForce(
 
         } else if (interpolationMethod == 3 && gridDerivatives != nullptr) {
             // TRIQUINTIC HERMITE INTERPOLATION (requires precomputed derivatives)
-            // NOTE: Works best with moderate grid caps (<100k kJ/mol, <5% of grid at cap).
-            // At very high caps (>500k), capping artifacts cause polynomial oscillations.
             // Gather 216 derivative values (27 derivatives × 8 corners)
             int totalPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
             int corners[8][3] = {
@@ -120,50 +119,15 @@ extern "C" __global__ void computeGridForce(
                 {ix, iy, iz+1}, {ix+1, iy, iz+1}, {ix, iy+1, iz+1}, {ix+1, iy+1, iz+1}
             };
 
-            // Gather derivatives in layout: X[deriv_idx * 8 + corner_idx]
-            // Derivatives are stored as LOGARITHMIC: L1 = G'/G, L2 = G''/G
-            // Need to reconstruct raw derivatives: G' = G * L1, G'' = G * L2
+            // Gather derivatives in DERIVATIVE-MAJOR layout: X[deriv_idx * 8 + corner_idx]
+            // This matches RASPA3's layout expected by TRIQUINTIC_COEFFICIENTS matrix
+            // Derivatives are stored as RAW values (not logarithmic)
             float X[216];
-            for (int c = 0; c < 8; c++) {
-                int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
-
-                // Get function value
-                float f = gridDerivatives[0 * totalPoints + point_idx];
-                X[0 * 8 + c] = f;
-
-                // Reconstruct first derivatives from logarithmic: G' = G * L1
-                for (int d = 1; d <= 3; d++) {
-                    float L1 = gridDerivatives[d * totalPoints + point_idx];
-                    X[d * 8 + c] = f * L1;
+            for (int d = 0; d < 27; d++) {
+                for (int c = 0; c < 8; c++) {
+                    int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
+                    X[d * 8 + c] = gridDerivatives[d * totalPoints + point_idx];
                 }
-
-                // Reconstruct second derivatives from logarithmic: G'' = G * L2
-                for (int d = 4; d <= 9; d++) {
-                    float L2 = gridDerivatives[d * totalPoints + point_idx];
-                    X[d * 8 + c] = f * L2;
-                }
-
-                // Reconstruct third derivatives from logarithmic: G''' = G * L3
-                for (int d = 10; d <= 16; d++) {
-                    float L3 = gridDerivatives[d * totalPoints + point_idx];
-                    X[d * 8 + c] = f * L3;
-                }
-
-                // Reconstruct fourth derivatives from logarithmic: G'''' = G * L4
-                for (int d = 17; d <= 22; d++) {
-                    float L4 = gridDerivatives[d * totalPoints + point_idx];
-                    X[d * 8 + c] = f * L4;
-                }
-
-                // Reconstruct fifth derivatives from logarithmic: G''''' = G * L5
-                for (int d = 23; d <= 25; d++) {
-                    float L5 = gridDerivatives[d * totalPoints + point_idx];
-                    X[d * 8 + c] = f * L5;
-                }
-
-                // Reconstruct sixth derivative from logarithmic: G'''''' = G * L6
-                float L6 = gridDerivatives[26 * totalPoints + point_idx];
-                X[26 * 8 + c] = f * L6;
             }
 
             // Compute polynomial coefficients: a = 0.125 * TRIQUINTIC_COEFFICIENTS * X
@@ -208,6 +172,18 @@ extern "C" __global__ void computeGridForce(
             dx = dvalue_dx / gridSpacing[0];
             dy = dvalue_dy / gridSpacing[1];
             dz = dvalue_dz / gridSpacing[2];
+
+            // DEBUG: Only print if there are problematic values (NaN, Inf, or coefficients with all-zero derivatives)
+            bool hasProblems = isnan(value) || isinf(value) || isnan(a[0]) || isinf(a[0]) ||
+                               (X[0] > 1e6f) ||  // Very large corner value
+                               (fabsf(X[8]) < 1e-10f && fabsf(X[16]) < 1e-10f && fabsf(X[24]) < 1e-10f && X[0] > 1000.0f); // Zero derivs with high energy
+            if (hasProblems && index < 5) {  // Only print for first 5 atoms to avoid spam
+                printf("WARNING: TRIQUINTIC ISSUE (atom %d):\n", index);
+                printf("  corner0: f=%f, dx=%f, dy=%f, dz=%f\n", X[0], X[8], X[16], X[24]);
+                printf("  coeffs: a[0]=%f, a[1]=%f, a[6]=%f, a[36]=%f\n", a[0], a[1], a[6], a[36]);
+                printf("  interp: fx=%f, fy=%f, fz=%f, value=%f\n", fx, fy, fz, value);
+                printf("  derivs: dx=%f, dy=%f, dz=%f\n", dvalue_dx, dvalue_dy, dvalue_dz);
+            }
 
         } else {
             // TRILINEAR INTERPOLATION (default, 2x2x2 = 8 points)
@@ -262,12 +238,6 @@ extern "C" __global__ void computeGridForce(
         atomForce.x = -scalingFactor * dx;
         atomForce.y = -scalingFactor * dy;
         atomForce.z = -scalingFactor * dz;
-
-        // Debug: print force calculation for atom 0 only (critical for comparison)
-        // if (index == 0) {
-        //     printf("  A0: force=(%.6f, %.6f, %.6f) | gradients=(%.6f, %.6f, %.6f) | scale=%.9f\n",
-        //            atomForce.x, atomForce.y, atomForce.z, dx, dy, dz, scalingFactor);
-        // }
     }
     else {
         // Apply harmonic restraint outside grid (if enabled)
