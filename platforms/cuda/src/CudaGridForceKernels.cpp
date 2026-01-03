@@ -43,9 +43,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 //               << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
 //               << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
 
-    // Store grid cap and invPower BEFORE generateGrid() is called (it needs these values)
+    // Store grid cap, invPower, and invPowerMode BEFORE generateGrid() is called (it needs these values)
     gridCap = (float)grid_cap;
     invPower = (float)inv_power;
+    invPowerMode = static_cast<int>(force.getInvPowerMode());
 
     // Store ligand atoms and derivative computation flag
     ligandAtoms = force.getLigandAtoms();
@@ -166,6 +167,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         const_cast<GridForce&>(force).setGridValues(vals);
         if (!derivatives.empty()) {
             const_cast<GridForce&>(force).setDerivatives(derivatives);
+        }
+
+        // Set invPowerMode based on whether transformation was applied
+        if (invPower > 0.0f) {
+            const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::STORED, invPower);
+        } else {
+            const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::NONE, 0.0);
         }
     }
 
@@ -292,26 +300,6 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     if (numAtoms == 0) {
         return 0.0;
     }
-
-    // Debug: print key parameters and track force buffer state
-    static int call_count = 0;
-    static std::map<const CudaCalcGridForceKernel*, int> kernel_ids;
-    if (kernel_ids.find(this) == kernel_ids.end()) {
-        kernel_ids[this] = kernel_ids.size();
-    }
-    int kernel_id = kernel_ids[this];
-    call_count++;
-
-    // std::cout << "\n=== CUDA Kernel " << kernel_id << " (invPower=" << invPower
-    //           << ") Call #" << call_count << " ===" << std::endl;
-    // std::cout << "  numAtoms = " << numAtoms << ", paddedNumAtoms = "
-    //           << cu.getPaddedNumAtoms() << std::endl;
-    // std::cout << "  forcePtr = 0x" << std::hex << cu.getLongForceBuffer().getDevicePointer()
-    //           << std::dec << std::endl;
-
-    // // Print first scaling factor
-    // std::vector<float> scalingCopy(g_scaling_factors.getSize());
-    // g_scaling_factors.download(scalingCopy);
     // if (scalingCopy.size() > 0) {
     //     std::cout << "  scaling[0] = " << std::scientific << std::setprecision(6)
     //               << scalingCopy[0] << std::endl;
@@ -348,6 +336,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &valsPtr,
         &scalingPtr,
         &invPower,
+        &invPowerMode,
         &interpolationMethod,
         &outOfBoundsRestraint,
         &originX,
@@ -390,6 +379,7 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
     vector<double> scaling_factors;
     force.getGridParameters(counts, spacing, vals, scaling_factors);
     double inv_power = force.getInvPower();
+    int inv_power_mode = static_cast<int>(force.getInvPowerMode());
 
     if (numAtoms != contextImpl.getSystem().getNumParticles())
         throw OpenMMException("updateParametersInContext: The number of particles has changed");
@@ -440,6 +430,7 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
     g_scaling_factors.upload(scalingFloat);
 
     invPower = (float)inv_power;
+    invPowerMode = inv_power_mode;
 }
 
 void CudaCalcGridForceKernel::generateGrid(

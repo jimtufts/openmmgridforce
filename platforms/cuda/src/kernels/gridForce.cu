@@ -4,6 +4,8 @@
  */
 
 #include "include/InterpolationBasis.cuh"
+#include "include/HermiteBasis.cuh"
+#include "include/TricubicCoefficients.cuh"
 #include "include/TriquinticCoefficients.cuh"
 
 extern "C" __global__ void computeGridForce(
@@ -14,6 +16,7 @@ extern "C" __global__ void computeGridForce(
     const float* __restrict__ gridValues,
     const float* __restrict__ scalingFactors,
     const float invPower,
+    const int invPowerMode,  // 0=NONE, 1=RUNTIME, 2=STORED
     const int interpolationMethod,  // 0=trilinear, 1=B-spline, 2=tricubic, 3=triquintic
     const float outOfBoundsK,
     const float originX,
@@ -109,6 +112,178 @@ extern "C" __global__ void computeGridForce(
             dx = dvdx / gridSpacing[0];
             dy = dvdy / gridSpacing[1];
             dz = dvdz / gridSpacing[2];
+
+        } else if (interpolationMethod == 2) {
+            // LEKIEN-MARSDEN TRICUBIC INTERPOLATION (as used in RASPA3)
+            // Uses 64x64 transformation matrix to compute polynomial coefficients
+            // Can use either analytical derivatives (if available) or finite differences
+            if (index == 0) {
+                if (gridDerivatives != nullptr) {
+                    printf("TRICUBIC (Lekien-Marsden with ANALYTICAL derivatives) BRANCH EXECUTED for atom 0\n");
+                } else {
+                    printf("TRICUBIC (Lekien-Marsden with finite differences) BRANCH EXECUTED for atom 0\n");
+                }
+            }
+
+            // Get 8 corner indices
+            int corners[8][3] = {
+                {ix, iy, iz}, {ix+1, iy, iz}, {ix, iy+1, iz}, {ix+1, iy+1, iz},
+                {ix, iy, iz+1}, {ix+1, iy, iz+1}, {ix, iy+1, iz+1}, {ix+1, iy+1, iz+1}
+            };
+
+            // Storage: X[deriv*8 + corner] - DERIVATIVE-MAJOR (matches RASPA3/Lekien-Marsden)
+            // Derivatives: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
+            float X[64];
+
+            if (gridDerivatives != nullptr) {
+                // USE ANALYTICAL DERIVATIVES (high precision, eliminates finite difference errors)
+                int totalPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
+
+                // Map tricubic derivative order to gridDerivatives storage order
+                // Tricubic needs: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
+                // gridDerivatives: 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dyy, 6=dzz, 7=dxy, 8=dxz, 9=dyz, ..., 13=dxyz
+                const int derivMap[8] = {0, 1, 2, 3, 7, 8, 9, 13};
+
+                for (int d = 0; d < 8; d++) {
+                    for (int c = 0; c < 8; c++) {
+                        int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
+                        X[d*8 + c] = gridDerivatives[derivMap[d] * totalPoints + point_idx];
+                        if (index == 0 && d == 0 && c == 0) {
+                            printf("DEBUG: X[0] = gridDerivatives[%d] = %f (deriv=%d, corner=%d, point_idx=%d)\n",
+                                   derivMap[d] * totalPoints + point_idx, X[d*8 + c], d, c, point_idx);
+                        }
+                    }
+                }
+            } else {
+                // USE FINITE DIFFERENCES (fallback when analytical derivatives not available)
+                int im = ix * nyz + iy * gridCounts[2] + iz;
+                int imp = im + gridCounts[2];
+                int ip = im + nyz;
+                int ipp = ip + gridCounts[2];
+
+                // Get grid corner values
+                float f[8];
+                f[0] = gridValues[im];      // (0,0,0)
+                f[1] = gridValues[ip];      // (1,0,0)
+                f[2] = gridValues[imp];     // (0,1,0)
+                f[3] = gridValues[ipp];     // (1,1,0)
+                f[4] = gridValues[im + 1];  // (0,0,1)
+                f[5] = gridValues[ip + 1];  // (1,0,1)
+                f[6] = gridValues[imp + 1]; // (0,1,1)
+                f[7] = gridValues[ipp + 1]; // (1,1,1)
+
+                // Helper macros for grid indexing
+                #define GRID(dx, dy, dz) gridValues[((ix+(dx))*nyz + (iy+(dy))*gridCounts[2] + (iz+(dz)))]
+
+                // For each corner, compute function value and all derivatives using finite differences
+                // Store in derivative-major layout: X[deriv*8 + corner]
+                for (int c = 0; c < 8; c++) {
+                    int cx = (c & 1);  // x offset (0 or 1)
+                    int cy = (c >> 1) & 1;  // y offset (0 or 1)
+                    int cz = (c >> 2) & 1;  // z offset (0 or 1)
+
+                    // Function value
+                    X[0*8 + c] = f[c];
+
+                    // fx - x derivative (centered finite difference)
+                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1) {
+                        X[1*8 + c] = (GRID(cx+1, cy, cz) - GRID(cx-1, cy, cz)) / (2.0f * gridSpacing[0]);
+                    } else {
+                        X[1*8 + c] = 0.0f;
+                    }
+
+                    // fy - y derivative
+                    if (iy + cy > 0 && iy + cy < gridCounts[1] - 1) {
+                        X[2*8 + c] = (GRID(cx, cy+1, cz) - GRID(cx, cy-1, cz)) / (2.0f * gridSpacing[1]);
+                    } else {
+                        X[2*8 + c] = 0.0f;
+                    }
+
+                    // fz - z derivative
+                    if (iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
+                        X[3*8 + c] = (GRID(cx, cy, cz+1) - GRID(cx, cy, cz-1)) / (2.0f * gridSpacing[2]);
+                    } else {
+                        X[3*8 + c] = 0.0f;
+                    }
+
+                    // fxy - xy cross derivative
+                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1 && iy + cy > 0 && iy + cy < gridCounts[1] - 1) {
+                        X[4*8 + c] = (GRID(cx+1, cy+1, cz) - GRID(cx+1, cy-1, cz) - GRID(cx-1, cy+1, cz) + GRID(cx-1, cy-1, cz)) / (4.0f * gridSpacing[0] * gridSpacing[1]);
+                    } else {
+                        X[4*8 + c] = 0.0f;
+                    }
+
+                    // fxz - xz cross derivative
+                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1 && iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
+                        X[5*8 + c] = (GRID(cx+1, cy, cz+1) - GRID(cx+1, cy, cz-1) - GRID(cx-1, cy, cz+1) + GRID(cx-1, cy, cz-1)) / (4.0f * gridSpacing[0] * gridSpacing[2]);
+                    } else {
+                        X[5*8 + c] = 0.0f;
+                    }
+
+                    // fyz - yz cross derivative
+                    if (iy + cy > 0 && iy + cy < gridCounts[1] - 1 && iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
+                        X[6*8 + c] = (GRID(cx, cy+1, cz+1) - GRID(cx, cy+1, cz-1) - GRID(cx, cy-1, cz+1) + GRID(cx, cy-1, cz-1)) / (4.0f * gridSpacing[1] * gridSpacing[2]);
+                    } else {
+                        X[6*8 + c] = 0.0f;
+                    }
+
+                    // fxyz - xyz mixed derivative
+                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1 && iy + cy > 0 && iy + cy < gridCounts[1] - 1 && iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
+                        X[7*8 + c] = (GRID(cx+1, cy+1, cz+1) - GRID(cx+1, cy+1, cz-1) - GRID(cx+1, cy-1, cz+1) + GRID(cx+1, cy-1, cz-1)
+                                    - GRID(cx-1, cy+1, cz+1) + GRID(cx-1, cy+1, cz-1) + GRID(cx-1, cy-1, cz+1) - GRID(cx-1, cy-1, cz-1))
+                                    / (8.0f * gridSpacing[0] * gridSpacing[1] * gridSpacing[2]);
+                    } else {
+                        X[7*8 + c] = 0.0f;
+                    }
+                }
+
+                #undef GRID
+            }
+
+            // Multiply X by TRICUBIC_COEFFICIENTS matrix to get polynomial coefficients
+            float a[64];
+            for (int i = 0; i < 64; i++) {
+                a[i] = 0.0f;
+                for (int j = 0; j < 64; j++) {
+                    a[i] += TRICUBIC_COEFFICIENTS[i][j] * X[j];
+                }
+            }
+
+            // Evaluate tricubic polynomial at (fx, fy, fz) to get interpolated value and derivatives
+            // P(x,y,z) = sum_{i,j,k=0}^3 a_{ijk} * x^i * y^j * z^k
+            // where a are arranged as a[i + 4*j + 16*k]
+
+            interpolated = 0.0f;
+            dx = 0.0f;
+            dy = 0.0f;
+            dz = 0.0f;
+
+            for (int k = 0; k < 4; k++) {
+                float fz_pow_k = (k == 0) ? 1.0f : (k == 1) ? fz : (k == 2) ? fz*fz : fz*fz*fz;
+                float fz_pow_k_deriv = (k == 0) ? 0.0f : (k == 1) ? 1.0f : (k == 2) ? 2.0f*fz : 3.0f*fz*fz;
+
+                for (int j = 0; j < 4; j++) {
+                    float fy_pow_j = (j == 0) ? 1.0f : (j == 1) ? fy : (j == 2) ? fy*fy : fy*fy*fy;
+                    float fy_pow_j_deriv = (j == 0) ? 0.0f : (j == 1) ? 1.0f : (j == 2) ? 2.0f*fy : 3.0f*fy*fy;
+
+                    for (int i = 0; i < 4; i++) {
+                        float fx_pow_i = (i == 0) ? 1.0f : (i == 1) ? fx : (i == 2) ? fx*fx : fx*fx*fx;
+                        float fx_pow_i_deriv = (i == 0) ? 0.0f : (i == 1) ? 1.0f : (i == 2) ? 2.0f*fx : 3.0f*fx*fx;
+
+                        float coeff = a[i + 4*j + 16*k];
+
+                        interpolated += coeff * fx_pow_i * fy_pow_j * fz_pow_k;
+                        dx += coeff * fx_pow_i_deriv * fy_pow_j * fz_pow_k;
+                        dy += coeff * fx_pow_i * fy_pow_j_deriv * fz_pow_k;
+                        dz += coeff * fx_pow_i * fy_pow_j * fz_pow_k_deriv;
+                    }
+                }
+            }
+
+            // Convert derivatives from unit cell coordinates to physical coordinates
+            dx /= gridSpacing[0];
+            dy /= gridSpacing[1];
+            dz /= gridSpacing[2];
 
         } else if (interpolationMethod == 3 && gridDerivatives != nullptr) {
             // TRIQUINTIC HERMITE INTERPOLATION (requires precomputed derivatives)
@@ -224,10 +399,16 @@ extern "C" __global__ void computeGridForce(
                    fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm))) / gridSpacing[2];
         }
 
-        // Apply inverse power transformation if specified
-        if (invPower > 0.0f) {
-            float powerFactor = invPower * powf(interpolated, invPower - 1.0f);
-            interpolated = powf(interpolated, invPower);
+        // Apply inverse power transformation if mode == STORED (2)
+        // Grid values are G^(1/n), raise to ^n to recover original energy
+        // Handle negative values: sign(V) * |V|^n
+        if (invPowerMode == 2) {  // 2 = STORED
+            float interpolated_before = interpolated;
+            float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+            float absVal = fabsf(interpolated);
+            // Derivative: d/dV[sign(V)*|V|^n] = n*|V|^(n-1) for both positive and negative V
+            float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+            interpolated = sign * powf(absVal, invPower);
             dx *= powerFactor;
             dy *= powerFactor;
             dz *= powerFactor;

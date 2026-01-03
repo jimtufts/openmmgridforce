@@ -60,6 +60,12 @@ def _openmm_GridForce_director_call(force):
 
 namespace GridForcePlugin {
 
+enum class InvPowerMode {
+    NONE = 0,
+    RUNTIME = 1,
+    STORED = 2
+};
+
 class GridForce : public OpenMM::Force {
 public:
     GridForce();
@@ -67,6 +73,8 @@ public:
     void addGridCounts (int nx, int ny, int nz);
     void addGridSpacing (double dx, double dy, double dz);
     void addGridValue (double val);
+    void setGridValues(const std::vector<double>& vals);
+    const std::vector<double>& getGridValues() const;
     void addScalingFactor (double val);
     void setScalingFactor (int index, double val);
 
@@ -74,6 +82,10 @@ public:
     bool getAutoCalculateScalingFactors() const;
     void setScalingProperty(const std::string& property);
     const std::string& getScalingProperty() const;
+
+    void setInvPowerMode(InvPowerMode mode, double inv_power);
+    InvPowerMode getInvPowerMode() const;
+    void applyInvPowerTransformation();
 
     void setInvPower(double inv_power);
     double getInvPower() const;

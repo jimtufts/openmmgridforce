@@ -45,6 +45,34 @@ using namespace OpenMM;
 namespace GridForcePlugin {
 
 /**
+ * Inverse power transformation mode.
+ * Controls how and when the inv_power transformation is applied to grid values.
+ */
+enum class InvPowerMode {
+    /**
+     * No transformation applied.
+     * Grid values are used as-is, and no power transformation occurs during evaluation.
+     */
+    NONE = 0,
+
+    /**
+     * Transform grid values at initialization/runtime.
+     * Grid values are transformed G -> G^(1/n) once after loading, before evaluation.
+     * The evaluation kernel then applies ^n to recover original values.
+     * Only valid for grids WITHOUT analytical derivatives.
+     */
+    RUNTIME = 1,
+
+    /**
+     * Grid values already have transformation stored.
+     * Grid values are already G^(1/n) (from generation or prior transformation).
+     * The evaluation kernel applies ^n to recover original values.
+     * Compatible with analytical derivatives.
+     */
+    STORED = 2
+};
+
+/**
  * This class implements the AlGDock Nonbond interaction.
  */
 
@@ -73,6 +101,14 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @param vals  vector of grid values (must match grid dimensions)
      */
     void setGridValues(const std::vector<double>& vals);
+
+    /**
+     * Get all grid values. Returns a copy of the grid values vector.
+     * Note: Only works for grids without analytical derivatives (e.g., trilinear).
+     *
+     * @return vector of grid values
+     */
+    const std::vector<double>& getGridValues() const;
 
     void addScalingFactor(double val);
     void setScalingFactor(int index, double val);
@@ -120,7 +156,49 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     const std::string& getScalingProperty() const;
 
     /**
+     * Set the inverse power transformation mode and exponent.
+     * This controls how and when the inv_power transformation is applied.
+     *
+     * Modes:
+     * - NONE: No transformation (inv_power must be 0)
+     * - RUNTIME: Transform grid values G -> G^(1/n) at initialization, then apply ^n during evaluation
+     *            Only works for grids WITHOUT analytical derivatives
+     * - STORED: Grid values already store G^(1/n), apply ^n during evaluation only
+     *           Compatible with analytical derivatives
+     *
+     * @param mode       Transformation mode (see InvPowerMode enum)
+     * @param inv_power  Exponent to apply (must be > 0 if mode != NONE)
+     * @throws OpenMMException if validation fails (e.g., conflicting mode after loadFromFile)
+     */
+    void setInvPowerMode(InvPowerMode mode, double inv_power);
+
+    /**
+     * Get the current inverse power transformation mode.
+     * @return  the current mode
+     */
+    InvPowerMode getInvPowerMode() const;
+
+    /**
+     * Apply inverse power transformation to grid values (in-place).
+     * Transforms grid values: G -> sign(G) * |G|^(1/inv_power)
+     *
+     * Requirements:
+     * - Mode must be RUNTIME
+     * - Grid must NOT have analytical derivatives (hasDerivatives() == false)
+     * - Must be called after grid is loaded but before first evaluation
+     *
+     * After successful transformation, mode is automatically updated to STORED.
+     *
+     * @throws OpenMMException if requirements are not met
+     */
+    void applyInvPowerTransformation();
+
+    /**
      * Set the inverse power parameter for grid value transformation.
+     *
+     * DEPRECATED: Use setInvPowerMode() instead for explicit control over transformation timing.
+     * This method is kept for backward compatibility and maps to setInvPowerMode(STORED, inv_power).
+     *
      * When inv_power > 0, the interpolated grid value is raised to this power
      * before being multiplied by the scaling factor. This reverses the grid
      * transformation where grid values were stored as G^(1/inv_power).
@@ -377,6 +455,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> m_vals;
     std::vector<double> m_scaling_factors;
     double m_inv_power;
+    InvPowerMode m_invPowerMode;     // Transformation mode (NONE, RUNTIME, or STORED)
     double m_gridCap;  // Capping threshold for grid values (kJ/mol)
     double m_outOfBoundsRestraint;  // Force constant for out-of-bounds harmonic restraint (kJ/mol/nm^2)
     int m_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite

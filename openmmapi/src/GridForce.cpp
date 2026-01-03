@@ -46,7 +46,7 @@ using namespace std;
 
 namespace GridForcePlugin {
 
-GridForce::GridForce() : m_inv_power(0.0), m_gridCap(41840.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
+GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
                          m_autoCalculateScalingFactors(false), m_scalingProperty(""),
                          m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
                          m_computeDerivatives(false) {
@@ -74,6 +74,10 @@ void GridForce::setGridValues(const std::vector<double>& vals) {
     m_vals = vals;
 }
 
+const std::vector<double>& GridForce::getGridValues() const {
+    return m_vals;
+}
+
 void GridForce::addScalingFactor(double val) {
     m_scaling_factors.push_back(val);
 }
@@ -86,27 +90,120 @@ void GridForce::setScalingFactors(const std::vector<double>& vals) {
     m_scaling_factors = vals;
 }
 
+void GridForce::setInvPowerMode(InvPowerMode mode, double inv_power) {
+    // Validation
+    if (mode != InvPowerMode::NONE && inv_power <= 0.0) {
+        throw OpenMMException("GridForce: inv_power must be > 0 when mode != NONE");
+    }
+    if (mode == InvPowerMode::NONE && inv_power != 0.0) {
+        throw OpenMMException("GridForce: inv_power must be 0 when mode == NONE");
+    }
+
+    // Check for conflicting mode changes after grid is loaded
+    if (!m_vals.empty()) {
+        if (m_invPowerMode == InvPowerMode::STORED && mode == InvPowerMode::RUNTIME) {
+            throw OpenMMException(
+                "GridForce: Cannot set RUNTIME mode on grid that already has STORED transformation. "
+                "This would apply transformation twice!");
+        }
+        if (m_invPowerMode == InvPowerMode::RUNTIME && mode == InvPowerMode::STORED) {
+            throw OpenMMException(
+                "GridForce: Cannot set STORED mode on untransformed grid loaded with RUNTIME mode. "
+                "Call applyInvPowerTransformation() first.");
+        }
+    }
+
+    m_invPowerMode = mode;
+    m_inv_power = inv_power;
+}
+
+InvPowerMode GridForce::getInvPowerMode() const {
+    return m_invPowerMode;
+}
+
+void GridForce::applyInvPowerTransformation() {
+    // Validation
+    if (m_invPowerMode != InvPowerMode::RUNTIME) {
+        throw OpenMMException(
+            "GridForce: Can only call applyInvPowerTransformation() when mode == RUNTIME. "
+            "Current mode: " + std::to_string(static_cast<int>(m_invPowerMode)));
+    }
+
+    if (m_inv_power <= 0.0) {
+        throw OpenMMException("GridForce: inv_power must be > 0");
+    }
+
+    if (!m_derivatives.empty()) {
+        throw OpenMMException(
+            "GridForce: Cannot apply runtime transformation to grids with analytical derivatives. "
+            "Use mode STORED with pre-transformed grids instead.");
+    }
+
+    if (m_vals.empty()) {
+        throw OpenMMException("GridForce: No grid values to transform. Load grid first.");
+    }
+
+    // Apply transformation: G -> sign(G) * |G|^(1/inv_power)
+    for (size_t i = 0; i < m_vals.size(); ++i) {
+        if (m_vals[i] != 0.0) {
+            double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
+            m_vals[i] = sign * std::pow(std::abs(m_vals[i]), 1.0 / m_inv_power);
+        }
+    }
+
+    // Update mode to STORED since grid is now transformed
+    m_invPowerMode = InvPowerMode::STORED;
+}
+
 void GridForce::setInvPower(double inv_power) {
+    // DEPRECATED: Use setInvPowerMode() instead for explicit control
+    static bool warned = false;
+    if (!warned) {
+        std::cerr << "WARNING: GridForce::setInvPower() is deprecated. "
+                  << "Use setInvPowerMode() instead for explicit control over transformation timing."
+                  << std::endl;
+        warned = true;
+    }
+
     // If grid values are already loaded and inv_power is changing, transform the values
+    // Uses sign-preserving power transformations to handle negative values correctly
     if (!m_vals.empty() && inv_power != m_inv_power) {
-        if (m_inv_power == 0.0 && inv_power > 0.0) {
-            // Transform from G to G^(1/n)
+        if (m_inv_power == 0.0 && inv_power != 0.0) {
+            // Transform from G to G^(1/n) (works for both positive and negative n)
+            // Use sign-preserving: sign(G) * |G|^(1/n), preserve zeros
             for (size_t i = 0; i < m_vals.size(); ++i) {
-                m_vals[i] = std::pow(m_vals[i], 1.0 / inv_power);
+                if (m_vals[i] == 0.0) {
+                    m_vals[i] = 0.0;
+                } else {
+                    double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
+                    m_vals[i] = sign * std::pow(std::abs(m_vals[i]), 1.0 / inv_power);
+                }
             }
-        } else if (m_inv_power > 0.0 && inv_power == 0.0) {
-            // Transform from G^(1/m) back to G
+        } else if (m_inv_power != 0.0 && inv_power == 0.0) {
+            // Transform from G^(1/m) back to G (works for both positive and negative m)
+            // Use sign-preserving: sign(G) * |G|^m, preserve zeros
             for (size_t i = 0; i < m_vals.size(); ++i) {
-                m_vals[i] = std::pow(m_vals[i], m_inv_power);
+                if (m_vals[i] == 0.0) {
+                    m_vals[i] = 0.0;
+                } else {
+                    double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
+                    m_vals[i] = sign * std::pow(std::abs(m_vals[i]), m_inv_power);
+                }
             }
-        } else if (m_inv_power > 0.0 && inv_power > 0.0) {
-            // Transform from G^(1/m) to G^(1/n)
+        } else if (m_inv_power != 0.0 && inv_power != 0.0) {
+            // Transform from G^(1/m) to G^(1/n) (works for any combination of signs)
             // First: G^(1/m) -> G by raising to power m
             // Then: G -> G^(1/n) by raising to power 1/n
             // Combined: (G^(1/m))^(m/n) = G^(1/n)
+            // Use sign-preserving: sign(G) * |G|^(m/n), preserve zeros
             double power_factor = m_inv_power / inv_power;
             for (size_t i = 0; i < m_vals.size(); ++i) {
-                m_vals[i] = std::pow(m_vals[i], power_factor);
+                if (m_vals[i] == 0.0) {
+                    m_vals[i] = 0.0;
+                } else {
+                    double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
+                    m_vals[i] = sign * std::pow(std::abs(m_vals[i]), power_factor);
+                }
             }
         }
 
@@ -115,9 +212,9 @@ void GridForce::setInvPower(double inv_power) {
         // For H = G^p: L1_H = p*L1_G, L2_H = p*L2_G + p*(p-1)*L1_G²
         if (!m_derivatives.empty()) {
             double p; // power transformation factor
-            if (m_inv_power == 0.0 && inv_power > 0.0) {
+            if (m_inv_power == 0.0 && inv_power != 0.0) {
                 p = 1.0 / inv_power;
-            } else if (m_inv_power > 0.0 && inv_power == 0.0) {
+            } else if (m_inv_power != 0.0 && inv_power == 0.0) {
                 p = m_inv_power;
             } else {
                 p = m_inv_power / inv_power;
@@ -163,6 +260,13 @@ void GridForce::setInvPower(double inv_power) {
     }
 
     m_inv_power = inv_power;
+
+    // Update mode for backward compatibility
+    if (inv_power > 0.0) {
+        m_invPowerMode = InvPowerMode::STORED;
+    } else {
+        m_invPowerMode = InvPowerMode::NONE;
+    }
 }
 
 double GridForce::getInvPower() const {
@@ -340,7 +444,7 @@ void GridForce::loadFromFile(const std::string& filename) {
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
     file.read(reinterpret_cast<char*>(&header_size), sizeof(uint32_t));
 
-    if (version != 1 && version != 2) {
+    if (version < 1 || version > 3) {
         file.close();
         throw OpenMMException("GridForce: Unsupported file version " + std::to_string(version));
     }
@@ -382,6 +486,12 @@ void GridForce::loadFromFile(const std::string& filename) {
     double inv_power;
     file.read(reinterpret_cast<char*>(&inv_power), sizeof(double));
 
+    // Read inv_power_mode (Version 3 only)
+    uint32_t mode_value = 0;
+    if (version >= 3) {
+        file.read(reinterpret_cast<char*>(&mode_value), sizeof(uint32_t));
+    }
+
     // Seek to data
     file.seekg(data_offset);
 
@@ -422,6 +532,26 @@ void GridForce::loadFromFile(const std::string& filename) {
     // Restore inv_power directly without transformation (grid already has correct values)
     m_inv_power = inv_power;
 
+    // Restore inv_power_mode
+    if (version >= 3) {
+        // Validate mode value
+        if (mode_value > 2) {
+            throw OpenMMException("GridForce: Invalid inv_power_mode value in file: " + std::to_string(mode_value));
+        }
+        m_invPowerMode = static_cast<InvPowerMode>(mode_value);
+
+        // Additional validation
+        if (m_invPowerMode != InvPowerMode::NONE && inv_power <= 0.0) {
+            throw OpenMMException("GridForce: File has inv_power_mode enabled but invalid inv_power value");
+        }
+        if (m_invPowerMode == InvPowerMode::RUNTIME && !m_derivatives.empty()) {
+            throw OpenMMException("GridForce: File has RUNTIME mode but also has derivatives (incompatible)");
+        }
+    } else {
+        // V1/V2 files: default to NONE, user must set mode manually
+        m_invPowerMode = InvPowerMode::NONE;
+    }
+
     // Decode grid type
     if (grid_type_code == 1) m_gridType = "charge";
     else if (grid_type_code == 2) m_gridType = "ljr";
@@ -455,9 +585,9 @@ void GridForce::saveToFile(const std::string& filename) const {
     const char magic[8] = {'O', 'M', 'G', 'R', 'I', 'D', '\0', '\0'};
     file.write(magic, 8);
 
-    // Write header
-    uint32_t version = hasDerivs ? 2 : 1;
-    uint32_t header_size = hasDerivs ? 128 : 64;
+    // Write header (Version 3 format)
+    uint32_t version = 3;
+    uint32_t header_size = 128;  // Fixed size for V3
     file.write(reinterpret_cast<const char*>(&version), sizeof(uint32_t));
     file.write(reinterpret_cast<const char*>(&header_size), sizeof(uint32_t));
 
@@ -467,13 +597,8 @@ void GridForce::saveToFile(const std::string& filename) const {
     file.write(reinterpret_cast<const char*>(&ny), sizeof(int32_t));
     file.write(reinterpret_cast<const char*>(&nz), sizeof(int32_t));
 
-    // Write deriv_count (Version 2) or padding (Version 1)
-    if (version == 2) {
-        file.write(reinterpret_cast<const char*>(&deriv_count), sizeof(uint32_t));
-    } else {
-        float padding = 0.0f;
-        file.write(reinterpret_cast<const char*>(&padding), sizeof(float));
-    }
+    // Write deriv_count (0 if no derivatives)
+    file.write(reinterpret_cast<const char*>(&deriv_count), sizeof(uint32_t));
 
     // Write grid spacing
     double dx = m_spacing[0], dy = m_spacing[1], dz = m_spacing[2];
@@ -481,8 +606,8 @@ void GridForce::saveToFile(const std::string& filename) const {
     file.write(reinterpret_cast<const char*>(&dy), sizeof(double));
     file.write(reinterpret_cast<const char*>(&dz), sizeof(double));
 
-    // Write data offset
-    uint64_t data_offset = version == 2 ? 128 : 224;  // V2: 128-byte header, V1: 64 header + 160 metadata
+    // Write data offset (V3: 128-byte header)
+    uint64_t data_offset = 128;
     file.write(reinterpret_cast<const char*>(&data_offset), sizeof(uint64_t));
 
     // Write metadata (origin)
@@ -510,22 +635,24 @@ void GridForce::saveToFile(const std::string& filename) const {
     // Write inv_power
     file.write(reinterpret_cast<const char*>(&m_inv_power), sizeof(double));
 
-    if (version == 1) {
-        // Version 1: Write description (120 bytes of zeros) to reach 224-byte offset
-        char description[120] = {0};
-        file.write(description, 120);
-    } else {
-        // Version 2: Pad to 128-byte header boundary (we're at offset 104, need 24 bytes)
-        char reserved[24] = {0};
-        file.write(reserved, 24);
-    }
+    // Write inv_power_mode (Version 3)
+    uint32_t mode_value = static_cast<uint32_t>(m_invPowerMode);
+    file.write(reinterpret_cast<const char*>(&mode_value), sizeof(uint32_t));
+
+    // Pad to 128-byte header boundary
+    // Current offset: 8 (magic) + 4 (version) + 4 (header_size) + 3*4 (nx,ny,nz) + 4 (deriv_count)
+    //                 + 3*8 (dx,dy,dz) + 8 (data_offset) + 3*8 (origin) + 4 (grid_type) + 4 (flags)
+    //                 + 8 (inv_power) + 4 (inv_power_mode) = 108 bytes
+    // Need 128 - 108 = 20 bytes padding
+    char reserved[20] = {0};
+    file.write(reserved, 20);
 
     // Write grid data
-    if (version == 2 && hasDerivs) {
-        // Version 2: Write all derivatives [27, nx, ny, nz]
+    if (hasDerivs) {
+        // Version 3 with derivatives: Write all derivatives [27, nx, ny, nz]
         file.write(reinterpret_cast<const char*>(m_derivatives.data()), m_derivatives.size() * sizeof(double));
     } else {
-        // Version 1: Write only function values
+        // Version 3 without derivatives: Write only function values
         file.write(reinterpret_cast<const char*>(m_vals.data()), m_vals.size() * sizeof(double));
     }
 

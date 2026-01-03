@@ -56,6 +56,7 @@ private:
     bool hasInitializedKernel;
     int numAtoms;
     float invPower;
+    int invPowerMode;         // 0=NONE, 1=RUNTIME, 2=STORED
     float gridCap;
     float outOfBoundsRestraint;
     int interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
