@@ -25,7 +25,8 @@ extern "C" __global__ void computeGridForce(
     const float* __restrict__ gridDerivatives,  // For triquintic: 27 derivatives per point
     float* __restrict__ energyBuffer,
     const int numAtoms,
-    const int paddedNumAtoms) {
+    const int paddedNumAtoms,
+    const int* __restrict__ particleIndices) {  // Filtered particle indices (null = all particles)
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -33,9 +34,12 @@ extern "C" __global__ void computeGridForce(
     if (index >= numAtoms)
         return;
 
+    // Get actual particle index (use filtering if enabled)
+    const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
+
     // Load atom position and scaling factor
-    float4 posOrig = posq[index];
-    float scalingFactor = scalingFactors[index];
+    float4 posOrig = posq[particleIndex];
+    float scalingFactor = scalingFactors[particleIndex];
 
     // Transform position to grid coordinates (relative to origin)
     float3 pos;
@@ -117,13 +121,14 @@ extern "C" __global__ void computeGridForce(
             // LEKIEN-MARSDEN TRICUBIC INTERPOLATION (as used in RASPA3)
             // Uses 64x64 transformation matrix to compute polynomial coefficients
             // Can use either analytical derivatives (if available) or finite differences
-            if (index == 0) {
-                if (gridDerivatives != nullptr) {
-                    printf("TRICUBIC (Lekien-Marsden with ANALYTICAL derivatives) BRANCH EXECUTED for atom 0\n");
-                } else {
-                    printf("TRICUBIC (Lekien-Marsden with finite differences) BRANCH EXECUTED for atom 0\n");
-                }
-            }
+            // Debug output removed - feature now working correctly
+            // if (index == 0) {
+            //     if (gridDerivatives != nullptr) {
+            //         printf("TRICUBIC (Lekien-Marsden with ANALYTICAL derivatives) BRANCH EXECUTED for atom 0\n");
+            //     } else {
+            //         printf("TRICUBIC (Lekien-Marsden with finite differences) BRANCH EXECUTED for atom 0\n");
+            //     }
+            // }
 
             // Get 8 corner indices
             int corners[8][3] = {
@@ -148,10 +153,11 @@ extern "C" __global__ void computeGridForce(
                     for (int c = 0; c < 8; c++) {
                         int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
                         X[d*8 + c] = gridDerivatives[derivMap[d] * totalPoints + point_idx];
-                        if (index == 0 && d == 0 && c == 0) {
-                            printf("DEBUG: X[0] = gridDerivatives[%d] = %f (deriv=%d, corner=%d, point_idx=%d)\n",
-                                   derivMap[d] * totalPoints + point_idx, X[d*8 + c], d, c, point_idx);
-                        }
+                        // Debug output removed - feature now working correctly
+                        // if (index == 0 && d == 0 && c == 0) {
+                        //     printf("DEBUG: X[0] = gridDerivatives[%d] = %f (deriv=%d, corner=%d, point_idx=%d)\n",
+                        //            derivMap[d] * totalPoints + point_idx, X[d*8 + c], d, c, point_idx);
+                        // }
                     }
                 }
             } else {
@@ -381,7 +387,30 @@ extern "C" __global__ void computeGridForce(
             float vppm = gridValues[ipp];
             float vppp = gridValues[ipp + 1];
 
-            // Perform trilinear interpolation
+            // RUNTIME mode: Transform grid values BEFORE interpolation
+            // This makes interpolation smoother for steep potentials (e.g., LJ)
+            if (invPowerMode == 1) {  // 1 = RUNTIME
+                float invN = 1.0f / invPower;
+                // Transform each grid value: G -> sign(G) * |G|^(1/n)
+                if (fabsf(vmmm) >= 1e-10f) vmmm = (vmmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmm), invN);
+                else vmmm = 0.0f;
+                if (fabsf(vmmp) >= 1e-10f) vmmp = (vmmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmp), invN);
+                else vmmp = 0.0f;
+                if (fabsf(vmpm) >= 1e-10f) vmpm = (vmpm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpm), invN);
+                else vmpm = 0.0f;
+                if (fabsf(vmpp) >= 1e-10f) vmpp = (vmpp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpp), invN);
+                else vmpp = 0.0f;
+                if (fabsf(vpmm) >= 1e-10f) vpmm = (vpmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmm), invN);
+                else vpmm = 0.0f;
+                if (fabsf(vpmp) >= 1e-10f) vpmp = (vpmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmp), invN);
+                else vpmp = 0.0f;
+                if (fabsf(vppm) >= 1e-10f) vppm = (vppm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppm), invN);
+                else vppm = 0.0f;
+                if (fabsf(vppp) >= 1e-10f) vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppp), invN);
+                else vppp = 0.0f;
+            }
+
+            // Perform trilinear interpolation (in transformed space if RUNTIME mode)
             float vmm = oz * vmmm + fz * vmmp;
             float vmp = oz * vmpm + fz * vmpp;
             float vpm = oz * vpmm + fz * vpmp;
@@ -392,26 +421,27 @@ extern "C" __global__ void computeGridForce(
 
             interpolated = ox * vm + fx * vp;
 
-            // Calculate forces (gradients)
+            // Calculate forces (gradients in transformed space)
             dx = (vp - vm) / gridSpacing[0];
             dy = (ox * (vmp - vmm) + fx * (vpp - vpm)) / gridSpacing[1];
             dz = (ox * (oy * (vmmp - vmmm) + fy * (vmpp - vmpm)) +
                    fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm))) / gridSpacing[2];
         }
 
-        // Apply inverse power transformation if mode == STORED (2)
-        // Grid values are G^(1/n), raise to ^n to recover original energy
-        // Handle negative values: sign(V) * |V|^n
-        if (invPowerMode == 2) {  // 2 = STORED
-            float interpolated_before = interpolated;
+        // Back-convert from transformed space to get final energy
+        // Both RUNTIME and STORED modes need this: val^(1/n) -> (val^(1/n))^n = val
+        if (invPowerMode == 1 || invPowerMode == 2) {
             float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
             float absVal = fabsf(interpolated);
-            // Derivative: d/dV[sign(V)*|V|^n] = n*|V|^(n-1) for both positive and negative V
-            float powerFactor = invPower * powf(absVal, invPower - 1.0f);
-            interpolated = sign * powf(absVal, invPower);
-            dx *= powerFactor;
-            dy *= powerFactor;
-            dz *= powerFactor;
+            if (absVal > 1e-10f) {
+                // Back-convert: val^(1/n) -> val^n recovers original energy
+                // Derivative chain rule: d/dx[val^n] = n * val^(n-1) * d(val)/dx
+                float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+                interpolated = sign * powf(absVal, invPower);
+                dx *= powerFactor;
+                dy *= powerFactor;
+                dz *= powerFactor;
+            }
         }
 
         threadEnergy = scalingFactor * interpolated;
@@ -459,9 +489,9 @@ extern "C" __global__ void computeGridForce(
     //            fx_fixed, fy_fixed, fz_fixed);
     // }
 
-    atomicAdd(&forceBuffers[index], fx_fixed);
-    atomicAdd(&forceBuffers[index + paddedNumAtoms], fy_fixed);
-    atomicAdd(&forceBuffers[index + 2 * paddedNumAtoms], fz_fixed);
+    atomicAdd(&forceBuffers[particleIndex], fx_fixed);
+    atomicAdd(&forceBuffers[particleIndex + paddedNumAtoms], fy_fixed);
+    atomicAdd(&forceBuffers[particleIndex + 2 * paddedNumAtoms], fz_fixed);
 
     // Accumulate energy
     atomicAdd(&energyBuffer[0], threadEnergy);
