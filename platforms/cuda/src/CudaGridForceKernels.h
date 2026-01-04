@@ -64,13 +64,17 @@ private:
     OpenMM::CudaContext& cu;
     OpenMM::CudaArray g_counts;
     OpenMM::CudaArray g_spacing;
-    OpenMM::CudaArray g_vals;
+    OpenMM::CudaArray g_vals;  // Only used if not sharing
     OpenMM::CudaArray g_scaling_factors;
-    OpenMM::CudaArray g_derivatives;  // 27 derivatives per grid point for triquintic [27, nx, ny, nz]
+    OpenMM::CudaArray g_derivatives;  // Only used if not sharing
+    OpenMM::CudaArray particleIndices;  // Filtered particle indices (empty = all particles)
+    std::shared_ptr<OpenMM::CudaArray> g_vals_shared;        // Shared grid values (when cached)
+    std::shared_ptr<OpenMM::CudaArray> g_derivatives_shared; // Shared derivatives (when cached)
     CUfunction kernel;
     std::vector<int> counts;
     std::vector<double> spacing;
     std::vector<int> ligandAtoms;  // Particle indices for ligand atoms
+    std::vector<int> particles;    // Filtered particles for evaluation (empty = all particles)
     bool computeDerivatives;       // Whether derivatives were computed
 };
 

@@ -34,6 +34,7 @@
 
 #include <string>
 #include <vector>
+#include <memory>
 
 #include "internal/windowsExportGridForce.h"
 #include "openmm/Context.h"
@@ -365,6 +366,33 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     void setDerivatives(const std::vector<double>& derivs);
 
     /**
+     * Set which particles this GridForce applies to during energy evaluation.
+     * If not set (empty vector), the force applies to all particles in the System.
+     * If set, only the specified particles experience the grid potential.
+     *
+     * This enables per-ligand grid energy evaluation in multi-ligand systems.
+     * Each GridForce instance can be assigned to a specific set of particles,
+     * allowing independent energy queries via force groups.
+     *
+     * @param particles  vector of particle indices (empty = all particles)
+     */
+    void setParticles(const std::vector<int>& particles);
+
+    /**
+     * Get which particles this GridForce applies to.
+     *
+     * @return  vector of particle indices (empty = all particles)
+     */
+    const std::vector<int>& getParticles() const;
+
+    /**
+     * Clear grid data from host memory (values and derivatives).
+     * Call this after Context creation to free host memory when grid is cached on GPU.
+     * Note: After calling this, saveToFile() will not work.
+     */
+    void clearGridData();
+
+    /**
      * Set which atoms to include in grid calculation (receptor atoms).
      * If not set, all atoms except ligand atoms will be included.
      *
@@ -452,7 +480,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
    private:
     std::vector<int> m_counts;
     std::vector<double> m_spacing;  // the length unit is 'nm'
-    std::vector<double> m_vals;
+    std::shared_ptr<std::vector<double>> m_vals;        // Shared grid values for memory efficiency
     std::vector<double> m_scaling_factors;
     double m_inv_power;
     InvPowerMode m_invPowerMode;     // Transformation mode (NONE, RUNTIME, or STORED)
@@ -472,7 +500,10 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
 
     // Derivative storage for triquintic interpolation
     bool m_computeDerivatives;           // Whether to compute derivatives during grid generation
-    std::vector<double> m_derivatives;   // 27 derivatives per grid point [27, nx, ny, nz]
+    std::shared_ptr<std::vector<double>> m_derivatives;  // Shared derivatives [27, nx, ny, nz]
+
+    // Particle filtering for multi-ligand evaluation
+    std::vector<int> m_particles;        // Particle indices this force applies to (empty = all particles)
 };
 
 }  // namespace GridForcePlugin

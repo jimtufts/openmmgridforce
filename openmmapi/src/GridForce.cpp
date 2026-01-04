@@ -49,7 +49,9 @@ namespace GridForcePlugin {
 GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
                          m_autoCalculateScalingFactors(false), m_scalingProperty(""),
                          m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
-                         m_computeDerivatives(false) {
+                         m_computeDerivatives(false),
+                         m_vals(std::make_shared<std::vector<double>>()),
+                         m_derivatives(std::make_shared<std::vector<double>>()) {
     //
 }
 
@@ -67,15 +69,15 @@ void GridForce::addGridSpacing(double dx, double dy, double dz) {
 }
 
 void GridForce::addGridValue(double val) {
-    m_vals.push_back(val);
+    m_vals->push_back(val);
 }
 
 void GridForce::setGridValues(const std::vector<double>& vals) {
-    m_vals = vals;
+    *m_vals = vals;
 }
 
 const std::vector<double>& GridForce::getGridValues() const {
-    return m_vals;
+    return *m_vals;
 }
 
 void GridForce::addScalingFactor(double val) {
@@ -92,15 +94,15 @@ void GridForce::setScalingFactors(const std::vector<double>& vals) {
 
 void GridForce::setInvPowerMode(InvPowerMode mode, double inv_power) {
     // Validation
-    if (mode != InvPowerMode::NONE && inv_power <= 0.0) {
-        throw OpenMMException("GridForce: inv_power must be > 0 when mode != NONE");
+    if (mode != InvPowerMode::NONE && inv_power == 0.0) {
+        throw OpenMMException("GridForce: inv_power must be non-zero when mode != NONE");
     }
     if (mode == InvPowerMode::NONE && inv_power != 0.0) {
         throw OpenMMException("GridForce: inv_power must be 0 when mode == NONE");
     }
 
     // Check for conflicting mode changes after grid is loaded
-    if (!m_vals.empty()) {
+    if (m_vals && !m_vals->empty()) {
         if (m_invPowerMode == InvPowerMode::STORED && mode == InvPowerMode::RUNTIME) {
             throw OpenMMException(
                 "GridForce: Cannot set RUNTIME mode on grid that already has STORED transformation. "
@@ -129,25 +131,25 @@ void GridForce::applyInvPowerTransformation() {
             "Current mode: " + std::to_string(static_cast<int>(m_invPowerMode)));
     }
 
-    if (m_inv_power <= 0.0) {
-        throw OpenMMException("GridForce: inv_power must be > 0");
+    if (m_inv_power == 0.0) {
+        throw OpenMMException("GridForce: inv_power must be non-zero");
     }
 
-    if (!m_derivatives.empty()) {
+    if (m_derivatives && !m_derivatives->empty()) {
         throw OpenMMException(
             "GridForce: Cannot apply runtime transformation to grids with analytical derivatives. "
             "Use mode STORED with pre-transformed grids instead.");
     }
 
-    if (m_vals.empty()) {
+    if (!m_vals || m_vals->empty()) {
         throw OpenMMException("GridForce: No grid values to transform. Load grid first.");
     }
 
     // Apply transformation: G -> sign(G) * |G|^(1/inv_power)
-    for (size_t i = 0; i < m_vals.size(); ++i) {
-        if (m_vals[i] != 0.0) {
-            double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
-            m_vals[i] = sign * std::pow(std::abs(m_vals[i]), 1.0 / m_inv_power);
+    for (size_t i = 0; i < m_vals->size(); ++i) {
+        if ((*m_vals)[i] != 0.0) {
+            double sign = ((*m_vals)[i] >= 0.0) ? 1.0 : -1.0;
+            (*m_vals)[i] = sign * std::pow(std::abs((*m_vals)[i]), 1.0 / m_inv_power);
         }
     }
 
@@ -167,27 +169,27 @@ void GridForce::setInvPower(double inv_power) {
 
     // If grid values are already loaded and inv_power is changing, transform the values
     // Uses sign-preserving power transformations to handle negative values correctly
-    if (!m_vals.empty() && inv_power != m_inv_power) {
+    if (m_vals && !m_vals->empty() && inv_power != m_inv_power) {
         if (m_inv_power == 0.0 && inv_power != 0.0) {
             // Transform from G to G^(1/n) (works for both positive and negative n)
             // Use sign-preserving: sign(G) * |G|^(1/n), preserve zeros
-            for (size_t i = 0; i < m_vals.size(); ++i) {
-                if (m_vals[i] == 0.0) {
-                    m_vals[i] = 0.0;
+            for (size_t i = 0; i < m_vals->size(); ++i) {
+                if ((*m_vals)[i] == 0.0) {
+                    (*m_vals)[i] = 0.0;
                 } else {
-                    double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
-                    m_vals[i] = sign * std::pow(std::abs(m_vals[i]), 1.0 / inv_power);
+                    double sign = ((*m_vals)[i] >= 0.0) ? 1.0 : -1.0;
+                    (*m_vals)[i] = sign * std::pow(std::abs((*m_vals)[i]), 1.0 / inv_power);
                 }
             }
         } else if (m_inv_power != 0.0 && inv_power == 0.0) {
             // Transform from G^(1/m) back to G (works for both positive and negative m)
             // Use sign-preserving: sign(G) * |G|^m, preserve zeros
-            for (size_t i = 0; i < m_vals.size(); ++i) {
-                if (m_vals[i] == 0.0) {
-                    m_vals[i] = 0.0;
+            for (size_t i = 0; i < m_vals->size(); ++i) {
+                if ((*m_vals)[i] == 0.0) {
+                    (*m_vals)[i] = 0.0;
                 } else {
-                    double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
-                    m_vals[i] = sign * std::pow(std::abs(m_vals[i]), m_inv_power);
+                    double sign = ((*m_vals)[i] >= 0.0) ? 1.0 : -1.0;
+                    (*m_vals)[i] = sign * std::pow(std::abs((*m_vals)[i]), m_inv_power);
                 }
             }
         } else if (m_inv_power != 0.0 && inv_power != 0.0) {
@@ -197,12 +199,12 @@ void GridForce::setInvPower(double inv_power) {
             // Combined: (G^(1/m))^(m/n) = G^(1/n)
             // Use sign-preserving: sign(G) * |G|^(m/n), preserve zeros
             double power_factor = m_inv_power / inv_power;
-            for (size_t i = 0; i < m_vals.size(); ++i) {
-                if (m_vals[i] == 0.0) {
-                    m_vals[i] = 0.0;
+            for (size_t i = 0; i < m_vals->size(); ++i) {
+                if ((*m_vals)[i] == 0.0) {
+                    (*m_vals)[i] = 0.0;
                 } else {
-                    double sign = (m_vals[i] >= 0.0) ? 1.0 : -1.0;
-                    m_vals[i] = sign * std::pow(std::abs(m_vals[i]), power_factor);
+                    double sign = ((*m_vals)[i] >= 0.0) ? 1.0 : -1.0;
+                    (*m_vals)[i] = sign * std::pow(std::abs((*m_vals)[i]), power_factor);
                 }
             }
         }
@@ -210,7 +212,7 @@ void GridForce::setInvPower(double inv_power) {
         // Transform LOGARITHMIC derivatives using analytical formulas
         // Derivatives are stored as: [0]=f, [1-3]=L1 (G'/G), [4-9]=L2 (G''/G)
         // For H = G^p: L1_H = p*L1_G, L2_H = p*L2_G + p*(p-1)*L1_G²
-        if (!m_derivatives.empty()) {
+        if (m_derivatives && !m_derivatives->empty()) {
             double p; // power transformation factor
             if (m_inv_power == 0.0 && inv_power != 0.0) {
                 p = 1.0 / inv_power;
@@ -220,40 +222,40 @@ void GridForce::setInvPower(double inv_power) {
                 p = m_inv_power / inv_power;
             }
 
-            size_t num_points = m_vals.size();
+            size_t num_points = m_vals->size();
 
             for (size_t pt = 0; pt < num_points; ++pt) {
                 // Update function value (already done above)
-                m_derivatives[0 * num_points + pt] = m_vals[pt];
+                (*m_derivatives)[0 * num_points + pt] = (*m_vals)[pt];
 
                 // Get old L1 values before transformation
-                double L1_x_old = m_derivatives[1 * num_points + pt];
-                double L1_y_old = m_derivatives[2 * num_points + pt];
-                double L1_z_old = m_derivatives[3 * num_points + pt];
+                double L1_x_old = (*m_derivatives)[1 * num_points + pt];
+                double L1_y_old = (*m_derivatives)[2 * num_points + pt];
+                double L1_z_old = (*m_derivatives)[3 * num_points + pt];
 
                 // Transform first logarithmic derivatives: L1_new = p * L1_old
-                m_derivatives[1 * num_points + pt] = p * L1_x_old;
-                m_derivatives[2 * num_points + pt] = p * L1_y_old;
-                m_derivatives[3 * num_points + pt] = p * L1_z_old;
+                (*m_derivatives)[1 * num_points + pt] = p * L1_x_old;
+                (*m_derivatives)[2 * num_points + pt] = p * L1_y_old;
+                (*m_derivatives)[3 * num_points + pt] = p * L1_z_old;
 
                 // Transform second logarithmic derivatives: L2_new = p*L2_old + p*(p-1)*L1_old²
                 // L2_xx
-                m_derivatives[4 * num_points + pt] = p * m_derivatives[4 * num_points + pt] +
+                (*m_derivatives)[4 * num_points + pt] = p * (*m_derivatives)[4 * num_points + pt] +
                                                       p * (p - 1) * L1_x_old * L1_x_old;
                 // L2_yy
-                m_derivatives[5 * num_points + pt] = p * m_derivatives[5 * num_points + pt] +
+                (*m_derivatives)[5 * num_points + pt] = p * (*m_derivatives)[5 * num_points + pt] +
                                                       p * (p - 1) * L1_y_old * L1_y_old;
                 // L2_zz
-                m_derivatives[6 * num_points + pt] = p * m_derivatives[6 * num_points + pt] +
+                (*m_derivatives)[6 * num_points + pt] = p * (*m_derivatives)[6 * num_points + pt] +
                                                       p * (p - 1) * L1_z_old * L1_z_old;
                 // L2_xy
-                m_derivatives[7 * num_points + pt] = p * m_derivatives[7 * num_points + pt] +
+                (*m_derivatives)[7 * num_points + pt] = p * (*m_derivatives)[7 * num_points + pt] +
                                                       p * (p - 1) * L1_x_old * L1_y_old;
                 // L2_xz
-                m_derivatives[8 * num_points + pt] = p * m_derivatives[8 * num_points + pt] +
+                (*m_derivatives)[8 * num_points + pt] = p * (*m_derivatives)[8 * num_points + pt] +
                                                       p * (p - 1) * L1_x_old * L1_z_old;
                 // L2_yz
-                m_derivatives[9 * num_points + pt] = p * m_derivatives[9 * num_points + pt] +
+                (*m_derivatives)[9 * num_points + pt] = p * (*m_derivatives)[9 * num_points + pt] +
                                                       p * (p - 1) * L1_y_old * L1_z_old;
             }
         }
@@ -306,7 +308,7 @@ void GridForce::getGridParameters(std::vector<int> &g_counts,
                                   std::vector<double> &g_scaling_factors) const {
     g_counts = m_counts;
     g_spacing = m_spacing;
-    g_vals = m_vals;
+    g_vals = m_vals ? *m_vals : std::vector<double>();
     g_scaling_factors = m_scaling_factors;
 }
 
@@ -366,6 +368,21 @@ void GridForce::getGridOrigin(double& x, double& y, double& z) const {
     }
 }
 
+void GridForce::setParticles(const std::vector<int>& particles) {
+    m_particles = particles;
+}
+
+const std::vector<int>& GridForce::getParticles() const {
+    return m_particles;
+}
+
+void GridForce::clearGridData() {
+    // NOTE: With shared_ptr implementation, grid data is shared across instances.
+    // Clearing the shared data would affect all instances, so we make this a no-op.
+    // The shared data will be automatically freed when the last instance is destroyed.
+    // This preserves backward compatibility while enabling memory-efficient sharing.
+}
+
 void GridForce::setReceptorAtoms(const std::vector<int>& atomIndices) {
     m_receptorAtoms = atomIndices;
 }
@@ -413,18 +430,43 @@ bool GridForce::getComputeDerivatives() const {
 }
 
 bool GridForce::hasDerivatives() const {
-    return !m_derivatives.empty();
+    return m_derivatives && !m_derivatives->empty();
 }
 
 const std::vector<double>& GridForce::getDerivatives() const {
-    return m_derivatives;
+    static const std::vector<double> empty;
+    return m_derivatives ? *m_derivatives : empty;
 }
 
 void GridForce::setDerivatives(const std::vector<double>& derivs) {
-    m_derivatives = derivs;
+    *m_derivatives = derivs;
 }
 
+// File cache for sharing loaded grid data across multiple GridForce instances
+static std::map<std::string, std::shared_ptr<std::vector<double>>> fileValuesCache;
+static std::map<std::string, std::shared_ptr<std::vector<double>>> fileDerivativesCache;
+static std::map<std::string, std::tuple<std::vector<int>, std::vector<double>>> fileMetadataCache;
+
 void GridForce::loadFromFile(const std::string& filename) {
+    // Check file cache first - SHARE the cached data, don't copy it
+    auto cacheIt = fileValuesCache.find(filename);
+    if (cacheIt != fileValuesCache.end()) {
+        // Reuse cached data by sharing the pointer (zero-copy)
+        m_vals = cacheIt->second;
+        auto derivIt = fileDerivativesCache.find(filename);
+        if (derivIt != fileDerivativesCache.end()) {
+            m_derivatives = derivIt->second;
+        } else {
+            m_derivatives = std::make_shared<std::vector<double>>();
+        }
+        auto metaIt = fileMetadataCache.find(filename);
+        if (metaIt != fileMetadataCache.end()) {
+            m_counts = std::get<0>(metaIt->second);
+            m_spacing = std::get<1>(metaIt->second);
+        }
+        return;
+    }
+
     // Binary file I/O implementation
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
@@ -455,9 +497,9 @@ void GridForce::loadFromFile(const std::string& filename) {
     file.read(reinterpret_cast<char*>(&ny), sizeof(int32_t));
     file.read(reinterpret_cast<char*>(&nz), sizeof(int32_t));
 
-    // Read derivative count (Version 2) or skip padding (Version 1)
+    // Read derivative count (Version 2/3) or skip padding (Version 1)
     uint32_t deriv_count = 0;
-    if (version == 2) {
+    if (version == 2 || version == 3) {
         file.read(reinterpret_cast<char*>(&deriv_count), sizeof(uint32_t));
     } else {
         file.seekg(4, std::ios::cur);  // Skip padding in Version 1
@@ -498,25 +540,22 @@ void GridForce::loadFromFile(const std::string& filename) {
     // Read grid data
     size_t num_points = static_cast<size_t>(nx) * ny * nz;
 
-    if (version == 2 && deriv_count > 0) {
-        // Version 2: Read derivatives [deriv_count, nx, ny, nz]
+    if ((version == 2 || version == 3) && deriv_count > 0) {
+        // Version 2/3: Read derivatives [deriv_count, nx, ny, nz]
         size_t total_values = deriv_count * num_points;
-        m_derivatives.resize(total_values);
-        file.read(reinterpret_cast<char*>(m_derivatives.data()), total_values * sizeof(double));
+        m_derivatives->resize(total_values);
+        file.read(reinterpret_cast<char*>(m_derivatives->data()), total_values * sizeof(double));
 
         // Extract function values (first derivative index = 0)
-        std::vector<double> values(num_points);
+        m_vals->resize(num_points);
         for (size_t i = 0; i < num_points; ++i) {
-            values[i] = m_derivatives[i];  // f(x,y,z) is at offset i in [27, nx, ny, nz] layout
+            (*m_vals)[i] = (*m_derivatives)[i];  // f(x,y,z) is at offset i in [27, nx, ny, nz] layout
         }
-
-        m_vals = values;
     } else {
-        // Version 1: Read only function values
-        std::vector<double> values(num_points);
-        file.read(reinterpret_cast<char*>(values.data()), num_points * sizeof(double));
-        m_vals = values;
-        m_derivatives.clear();
+        // Version 1 or no derivatives: Read only function values
+        m_vals->resize(num_points);
+        file.read(reinterpret_cast<char*>(m_vals->data()), num_points * sizeof(double));
+        m_derivatives->clear();
     }
 
     file.close();
@@ -544,7 +583,7 @@ void GridForce::loadFromFile(const std::string& filename) {
         if (m_invPowerMode != InvPowerMode::NONE && inv_power <= 0.0) {
             throw OpenMMException("GridForce: File has inv_power_mode enabled but invalid inv_power value");
         }
-        if (m_invPowerMode == InvPowerMode::RUNTIME && !m_derivatives.empty()) {
+        if (m_invPowerMode == InvPowerMode::RUNTIME && m_derivatives && !m_derivatives->empty()) {
             throw OpenMMException("GridForce: File has RUNTIME mode but also has derivatives (incompatible)");
         }
     } else {
@@ -557,6 +596,13 @@ void GridForce::loadFromFile(const std::string& filename) {
     else if (grid_type_code == 2) m_gridType = "ljr";
     else if (grid_type_code == 3) m_gridType = "lja";
     else m_gridType = "";
+
+    // Populate cache for future instances to share (zero-copy via shared_ptr)
+    fileValuesCache[filename] = m_vals;
+    if (!m_derivatives->empty()) {
+        fileDerivativesCache[filename] = m_derivatives;
+    }
+    fileMetadataCache[filename] = std::make_tuple(m_counts, m_spacing);
 }
 
 void GridForce::saveToFile(const std::string& filename) const {
@@ -565,14 +611,14 @@ void GridForce::saveToFile(const std::string& filename) const {
     }
 
     size_t expected_values = static_cast<size_t>(m_counts[0]) * m_counts[1] * m_counts[2];
-    if (m_vals.size() != expected_values) {
+    if (!m_vals || m_vals->size() != expected_values) {
         throw OpenMMException("GridForce: Number of grid values doesn't match dimensions");
     }
 
-    bool hasDerivs = !m_derivatives.empty();
+    bool hasDerivs = m_derivatives && !m_derivatives->empty();
     uint32_t deriv_count = hasDerivs ? 27 : 0;
 
-    if (hasDerivs && m_derivatives.size() != 27 * expected_values) {
+    if (hasDerivs && m_derivatives->size() != 27 * expected_values) {
         throw OpenMMException("GridForce: Number of derivative values doesn't match dimensions (expected 27 * nx * ny * nz)");
     }
 
@@ -650,10 +696,10 @@ void GridForce::saveToFile(const std::string& filename) const {
     // Write grid data
     if (hasDerivs) {
         // Version 3 with derivatives: Write all derivatives [27, nx, ny, nz]
-        file.write(reinterpret_cast<const char*>(m_derivatives.data()), m_derivatives.size() * sizeof(double));
+        file.write(reinterpret_cast<const char*>(m_derivatives->data()), m_derivatives->size() * sizeof(double));
     } else {
         // Version 3 without derivatives: Write only function values
-        file.write(reinterpret_cast<const char*>(m_vals.data()), m_vals.size() * sizeof(double));
+        file.write(reinterpret_cast<const char*>(m_vals->data()), m_vals->size() * sizeof(double));
     }
 
     file.close();

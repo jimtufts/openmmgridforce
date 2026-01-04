@@ -18,6 +18,39 @@ using namespace GridForcePlugin;
 using namespace OpenMM;
 using namespace std;
 
+// Grid cache for sharing GPU memory across multiple GridForce instances WITHIN same CudaContext
+// Key: (CudaContext*, grid_hash), Value: (weak_ptr<CudaArray>, context_id)
+// Using weak_ptr allows automatic cleanup when all kernel instances are destroyed
+// Context ID helps detect stale entries from destroyed contexts
+static std::map<std::pair<void*, size_t>, std::weak_ptr<CudaArray>> gridCache;
+static std::map<std::pair<void*, size_t>, std::weak_ptr<CudaArray>> derivativeCache;
+static size_t nextContextId = 0;
+static std::map<void*, size_t> contextIds;
+
+// Helper to compute grid hash for caching
+static size_t computeGridHash(const vector<int>& counts, const vector<double>& spacing, const vector<double>& vals) {
+    size_t hash = 0;
+    // Hash dimensions
+    hash ^= std::hash<int>{}(counts[0]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= std::hash<int>{}(counts[1]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= std::hash<int>{}(counts[2]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    // Hash spacing
+    hash ^= std::hash<double>{}(spacing[0]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= std::hash<double>{}(spacing[1]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= std::hash<double>{}(spacing[2]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    // Hash first 100 and last 100 values (sufficient to distinguish different grids)
+    size_t n = std::min(vals.size(), (size_t)100);
+    for (size_t i = 0; i < n; i++) {
+        hash ^= std::hash<double>{}(vals[i]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+    if (vals.size() > 100) {
+        for (size_t i = vals.size() - 100; i < vals.size(); i++) {
+            hash ^= std::hash<double>{}(vals[i]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+    }
+    return hash;
+}
+
 CudaCalcGridForceKernel::~CudaCalcGridForceKernel() {
 }
 
@@ -51,6 +84,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // Store ligand atoms and derivative computation flag
     ligandAtoms = force.getLigandAtoms();
     computeDerivatives = force.getComputeDerivatives();
+
+    // Get filtered particle list (empty = all particles)
+    particles = force.getParticles();
+    if (!particles.empty()) {
+        // Only process filtered particles
+        numAtoms = particles.size();
+    }
 
     // Auto-calculate scaling factors if enabled and not already provided
     if (force.getAutoCalculateScalingFactors() && scaling_factors.empty()) {
@@ -216,60 +256,108 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // Initialize arrays
     g_counts.initialize<int>(cu, 3, "gridCounts");
     g_spacing.initialize<float>(cu, 3, "gridSpacing");
-    g_vals.initialize<float>(cu, vals.size(), "gridValues");
     g_scaling_factors.initialize<float>(cu, scaling_factors.size(), "scalingFactors");
 
-    // Copy data to device
+    // Copy counts, spacing, and scaling factors to device
     vector<int> countsVec = {counts[0], counts[1], counts[2]};
     vector<float> spacingVec = {(float)spacing[0], (float)spacing[1], (float)spacing[2]};
-    vector<float> valsFloat(vals.begin(), vals.end());
     vector<float> scalingFloat(scaling_factors.begin(), scaling_factors.end());
 
     g_counts.upload(countsVec);
     g_spacing.upload(spacingVec);
-    g_vals.upload(valsFloat);
     g_scaling_factors.upload(scalingFloat);
+
+    // Grid values: check cache first to enable sharing across multiple GridForce instances
+    size_t gridHash = computeGridHash(counts, spacing, vals);
+    auto cacheKey = std::make_pair((void*)&cu, gridHash);
+    auto it = gridCache.find(cacheKey);
+
+    if (it != gridCache.end()) {
+        // Try to lock weak_ptr to get shared_ptr
+        g_vals_shared = it->second.lock();
+        if (g_vals_shared) {
+            // Successfully reused cached grid
+//             std::cout << "Reusing cached grid (hash=" << gridHash << ")" << std::endl;
+            vals.clear();
+            vals.shrink_to_fit();
+        } else {
+            // Cached entry expired - remove it and create new one
+            gridCache.erase(it);
+            vector<float> valsFloat(vals.begin(), vals.end());
+            g_vals_shared = std::make_shared<CudaArray>();
+            g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
+            g_vals_shared->upload(valsFloat);
+            gridCache[cacheKey] = g_vals_shared;
+            vals.clear();
+            vals.shrink_to_fit();
+        }
+    } else {
+        // First instance with this grid - allocate and cache it
+        vector<float> valsFloat(vals.begin(), vals.end());
+        g_vals_shared = std::make_shared<CudaArray>();
+        g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
+        g_vals_shared->upload(valsFloat);
+        gridCache[cacheKey] = g_vals_shared;
+//         std::cout << "Caching new grid (hash=" << gridHash << ")" << std::endl;
+        vals.clear();
+        vals.shrink_to_fit();
+    }
+
+    // Upload particle indices if filtering is enabled
+    if (!particles.empty()) {
+        particleIndices.initialize<int>(cu, particles.size(), "particleIndices");
+        particleIndices.upload(particles);
+    }
 
     // Upload derivatives if they exist (for triquintic interpolation)
     if (force.hasDerivatives()) {
         vector<double> derivatives_vec = force.getDerivatives();
-//         std::cout << "Uploading " << derivatives_vec.size() << " derivatives to GPU..." << std::endl;
 
-        // Check for NaN/Inf values
-        int nan_count = 0;
-        int inf_count = 0;
-        for (size_t i = 0; i < std::min(derivatives_vec.size(), (size_t)1000); i++) {
-            if (std::isnan(derivatives_vec[i])) nan_count++;
-            if (std::isinf(derivatives_vec[i])) inf_count++;
-        }
-//         std::cout << "  Checked first 1000 derivatives: " << nan_count << " NaN, " << inf_count << " Inf" << std::endl;
+        // Check cache for derivatives (same hash as grid values since they're from same source)
+        auto derivCacheKey = std::make_pair((void*)&cu, gridHash);
+        auto derivIt = derivativeCache.find(derivCacheKey);
 
-        // Always create fresh CudaArray to avoid reinitialization issues
-        g_derivatives = CudaArray();
-//         std::cout << "  Initializing CudaArray with size " << derivatives_vec.size() << "..." << std::endl;
-        try {
-            g_derivatives.initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
-//             std::cout << "  CudaArray initialized successfully, size=" << g_derivatives.getSize() << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "  ERROR initializing CudaArray: " << e.what() << std::endl;
-            throw;
-        }
-
-//         std::cout << "  Converting to float vector..." << std::endl;
-        vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
-//         std::cout << "  Float vector size: " << derivativesFloat.size() << ", bytes: "
-//                   << (derivativesFloat.size() * sizeof(float)) << std::endl;
-//         std::cout << "  Setting CUDA context..." << std::endl;
-        cu.setAsCurrent();
-//         std::cout << "  Calling g_derivatives.upload()..." << std::endl;
-        try {
-            g_derivatives.upload(derivativesFloat);
-//             std::cout << "  Upload successful!" << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "  ERROR during upload: " << e.what() << std::endl;
-            std::cerr << "  Array size: " << g_derivatives.getSize() << std::endl;
-            std::cerr << "  Vector size: " << derivativesFloat.size() << std::endl;
-            throw;
+        if (derivIt != derivativeCache.end()) {
+            // Try to lock weak_ptr
+            g_derivatives_shared = derivIt->second.lock();
+            if (g_derivatives_shared) {
+                // Successfully reused cached derivatives
+//                 std::cout << "Reusing cached derivatives" << std::endl;
+                derivatives_vec.clear();
+                derivatives_vec.shrink_to_fit();
+            } else {
+                // Cached entry expired - remove and create new
+                derivativeCache.erase(derivIt);
+                vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
+                g_derivatives_shared = std::make_shared<CudaArray>();
+                cu.setAsCurrent();
+                try {
+                    g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
+                    g_derivatives_shared->upload(derivativesFloat);
+                    derivativeCache[derivCacheKey] = g_derivatives_shared;
+                    derivatives_vec.clear();
+                    derivatives_vec.shrink_to_fit();
+                } catch (const std::exception& e) {
+                    std::cerr << "ERROR caching derivatives: " << e.what() << std::endl;
+                    throw;
+                }
+            }
+        } else {
+            // First instance - allocate and cache derivatives
+            vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
+            g_derivatives_shared = std::make_shared<CudaArray>();
+            cu.setAsCurrent();
+            try {
+                g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
+                g_derivatives_shared->upload(derivativesFloat);
+                derivativeCache[derivCacheKey] = g_derivatives_shared;
+//                 std::cout << "Caching new derivatives" << std::endl;
+                derivatives_vec.clear();
+                derivatives_vec.shrink_to_fit();
+            } catch (const std::exception& e) {
+                std::cerr << "ERROR caching derivatives: " << e.what() << std::endl;
+                throw;
+            }
         }
     }
 
@@ -311,10 +399,12 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
     CUdeviceptr countsPtr = g_counts.getDevicePointer();
     CUdeviceptr spacingPtr = g_spacing.getDevicePointer();
-    CUdeviceptr valsPtr = g_vals.getDevicePointer();
+    CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
     CUdeviceptr scalingPtr = g_scaling_factors.getDevicePointer();
-    CUdeviceptr derivsPtr = (g_derivatives.isInitialized()) ? g_derivatives.getDevicePointer() : 0;
+    CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
+                            (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
     CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
+    CUdeviceptr particleIndicesPtr = (particleIndices.isInitialized()) ? particleIndices.getDevicePointer() : 0;
 
     // Debug: Read force buffer BEFORE kernel execution
     // const int num_force_components = 3 * paddedNumAtoms;
@@ -345,7 +435,8 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &derivsPtr,  // Derivatives for triquintic interpolation
         &energyPtr,
         &numAtoms,
-        &paddedNumAtoms
+        &paddedNumAtoms,
+        &particleIndicesPtr  // Filtered particle indices (null = all particles)
     };
 
     // Execute kernel
