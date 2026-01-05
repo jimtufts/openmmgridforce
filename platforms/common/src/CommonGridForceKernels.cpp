@@ -35,6 +35,7 @@
 #include "openmm/common/ComputeForceInfo.h"
 #include "openmm/common/ContextSelector.h"
 #include "openmm/NonbondedForce.h"
+#include "IsolatedNonbondedForce.h"
 #include <map>
 #include <iostream>
 #include <cstring>
@@ -95,24 +96,35 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
             throw OpenMMException("GridForce: Invalid scaling property '" + scalingProperty + "'. Must be 'charge', 'ljr', or 'lja'");
         }
 
-        // Find NonbondedForce in the system
+        // Find NonbondedForce or IsolatedNonbondedForce in the system
         const NonbondedForce* nonbondedForce = nullptr;
+        const IsolatedNonbondedForce* isolatedNonbondedForce = nullptr;
+
         for (int i = 0; i < system.getNumForces(); i++) {
             if (dynamic_cast<const NonbondedForce*>(&system.getForce(i)) != nullptr) {
                 nonbondedForce = dynamic_cast<const NonbondedForce*>(&system.getForce(i));
                 break;
+            } else if (dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i)) != nullptr) {
+                isolatedNonbondedForce = dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i));
+                // Keep searching in case there's a NonbondedForce (prefer that)
             }
         }
 
-        if (nonbondedForce == nullptr) {
-            throw OpenMMException("GridForce: Auto-calculate scaling factors requires a NonbondedForce in the system");
+        if (nonbondedForce == nullptr && isolatedNonbondedForce == nullptr) {
+            throw OpenMMException("GridForce: Auto-calculate scaling factors requires a NonbondedForce or IsolatedNonbondedForce in the system");
         }
 
         // Extract scaling factors based on property
         scaling_factors.resize(numAtoms);
         for (int i = 0; i < numAtoms; i++) {
             double charge, sigma, epsilon;
-            nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
+
+            // Get parameters from whichever force is available
+            if (nonbondedForce != nullptr) {
+                nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
+            } else {
+                isolatedNonbondedForce->getAtomParameters(i, charge, sigma, epsilon);
+            }
 
             if (scalingProperty == "charge") {
                 // For electrostatic grids: use charge directly
@@ -145,17 +157,22 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
             throw OpenMMException("GridForce: Grid counts and spacing must be set before auto-generation");
         }
 
-        // Find NonbondedForce
+        // Find NonbondedForce or IsolatedNonbondedForce
         const NonbondedForce* nonbondedForce = nullptr;
+        const IsolatedNonbondedForce* isolatedNonbondedForce = nullptr;
+
         for (int i = 0; i < system.getNumForces(); i++) {
             if (dynamic_cast<const NonbondedForce*>(&system.getForce(i)) != nullptr) {
                 nonbondedForce = dynamic_cast<const NonbondedForce*>(&system.getForce(i));
                 break;
+            } else if (dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i)) != nullptr) {
+                isolatedNonbondedForce = dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i));
+                // Keep searching in case there's a NonbondedForce (prefer that)
             }
         }
 
-        if (nonbondedForce == nullptr) {
-            throw OpenMMException("GridForce: Auto-grid generation requires a NonbondedForce in the system");
+        if (nonbondedForce == nullptr && isolatedNonbondedForce == nullptr) {
+            throw OpenMMException("GridForce: Auto-grid generation requires a NonbondedForce or IsolatedNonbondedForce in the system");
         }
 
         // Get receptor atoms and positions
@@ -187,7 +204,7 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
         force.getGridOrigin(ox, oy, oz);
 
         // Generate grid
-        generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
+        generateGrid(system, nonbondedForce, isolatedNonbondedForce, gridType, receptorAtoms, receptorPositions,
                      ox, oy, oz, gridCap, inv_power, vals);
 
         // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
@@ -353,6 +370,7 @@ void CommonCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl
 void CommonCalcGridForceKernel::generateGrid(
     const System& system,
     const NonbondedForce* nonbondedForce,
+    const IsolatedNonbondedForce* isolatedNonbondedForce,
     const std::string& gridType,
     const std::vector<int>& receptorAtoms,
     const std::vector<Vec3>& receptorPositions,
@@ -369,7 +387,11 @@ void CommonCalcGridForceKernel::generateGrid(
     std::vector<double> charges, sigmas, epsilons;
     for (int atomIdx : receptorAtoms) {
         double q, sig, eps;
-        nonbondedForce->getParticleParameters(atomIdx, q, sig, eps);
+        if (nonbondedForce != nullptr) {
+            nonbondedForce->getParticleParameters(atomIdx, q, sig, eps);
+        } else {
+            isolatedNonbondedForce->getAtomParameters(atomIdx, q, sig, eps);
+        }
         charges.push_back(q);
         sigmas.push_back(sig);
         epsilons.push_back(eps);
@@ -437,4 +459,9 @@ void CommonCalcGridForceKernel::generateGrid(
             }
         }
     }
+}
+
+vector<double> CommonCalcGridForceKernel::getParticleGroupEnergies() {
+    // Common platform does not support per-group energy tracking yet
+    return vector<double>();
 }

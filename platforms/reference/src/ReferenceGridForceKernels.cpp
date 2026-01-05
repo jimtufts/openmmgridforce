@@ -1126,6 +1126,9 @@ void ReferenceCalcGridForceKernel::copyParametersToContext(ContextImpl &context,
     g_inv_power = grid_force.getInvPower();
 }
 
-
+vector<double> ReferenceCalcGridForceKernel::getParticleGroupEnergies() {
+    // Reference platform does not support per-group energy tracking yet
+    return vector<double>();
+}
 
 }  // namespace AlGDockPlugin

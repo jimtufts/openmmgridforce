@@ -40,6 +40,12 @@ public:
      * @param force      the GridForce to copy the parameters from
      */
     void copyParametersToContext(OpenMM::ContextImpl& context, const GridForce& force);
+    /**
+     * Get per-particle-group energies.
+     *
+     * @return vector of energies, one per particle group (empty if no groups)
+     */
+    std::vector<double> getParticleGroupEnergies();
 private:
     /**
      * Generate grid values from receptor atoms and NonbondedForce parameters.
@@ -76,6 +82,16 @@ private:
     std::vector<int> ligandAtoms;  // Particle indices for ligand atoms
     std::vector<int> particles;    // Filtered particles for evaluation (empty = all particles)
     bool computeDerivatives;       // Whether derivatives were computed
+
+    // Particle group data for multi-ligand workflows (flattened for single kernel launch)
+    OpenMM::CudaArray allGroupParticleIndices;  // Flattened particle indices from all groups
+    OpenMM::CudaArray allGroupScalingFactors;   // Flattened scaling factors from all groups
+    int totalGroupParticles;                     // Total particles across all groups
+
+    // Per-group energy tracking
+    OpenMM::CudaArray particleToGroupMap;       // Map from particle index to group index
+    OpenMM::CudaArray groupEnergyBuffer;        // Per-group energy accumulation
+    int numParticleGroups;                       // Number of particle groups
 };
 
 } // namespace GridForcePlugin

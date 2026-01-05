@@ -76,8 +76,10 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
      * @param context    the context to copy parameters to
      * @param force      the AlGDockNonbondForce to copy the parameters from
      */
-    void copyParametersToContext(OpenMM::ContextImpl &context, 
+    void copyParametersToContext(OpenMM::ContextImpl &context,
                                 const GridForce &force);
+
+    std::vector<double> getParticleGroupEnergies();
 
    private:
     /**

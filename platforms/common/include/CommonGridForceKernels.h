@@ -4,6 +4,7 @@
 #include "GridForceKernels.h"
 #include "openmm/common/ComputeContext.h"
 #include "openmm/NonbondedForce.h"
+#include "IsolatedNonbondedForce.h"
 #include <vector>
 
 namespace GridForcePlugin {
@@ -40,12 +41,15 @@ public:
      */
     virtual void copyParametersToContext(OpenMM::ContextImpl& context, const GridForce& force);
 
+    virtual std::vector<double> getParticleGroupEnergies();
+
 protected:
     /**
-     * Generate grid values from receptor atoms and NonbondedForce parameters.
+     * Generate grid values from receptor atoms and NonbondedForce or IsolatedNonbondedForce parameters.
      */
     void generateGrid(const OpenMM::System& system,
                      const OpenMM::NonbondedForce* nonbondedForce,
+                     const IsolatedNonbondedForce* isolatedNonbondedForce,
                      const std::string& gridType,
                      const std::vector<int>& receptorAtoms,
                      const std::vector<OpenMM::Vec3>& receptorPositions,

@@ -6,7 +6,7 @@ import pytest
 from openmm import app
 import openmm as omm
 from openmm import unit
-import gridforceplugin
+import gridforceplugin  # InvPowerMode_NONE=0, InvPowerMode_RUNTIME=1, InvPowerMode_STORED=2
 import numpy as np
 from netCDF4 import Dataset
 import os
@@ -58,7 +58,7 @@ def test_binary_file_roundtrip():
     force.addGridCounts(5, 5, 5)
     force.addGridSpacing(0.1, 0.1, 0.1)
     force.setGridOrigin(1.0, 2.0, 3.0)
-    force.setInvPower(6.0)
+    force.setInvPowerMode(gridforceplugin.InvPowerMode_STORED, 6.0)
     force.setGridType("charge")
 
     # Add test values

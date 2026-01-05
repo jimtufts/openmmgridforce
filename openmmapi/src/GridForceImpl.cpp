@@ -53,6 +53,10 @@ GridForceImpl::~GridForceImpl() {
 }
 
 void GridForceImpl::initialize(ContextImpl &context) {
+    // Set the System pointer for per-System cache scoping
+    // Cast away const - this is safe because we only use it as a key, never dereference it
+    const_cast<GridForce&>(owner).setSystemPointer(&context.getSystem());
+
     kernel = context.getPlatform().createKernel(CalcGridForceKernel::Name(), context);
     kernel.getAs<CalcGridForceKernel>().initialize(context.getSystem(), owner);
 }
@@ -71,6 +75,10 @@ std::vector<std::string> GridForceImpl::getKernelNames() {
 
 void GridForceImpl::updateParametersInContext(ContextImpl &context) {
     kernel.getAs<CalcGridForceKernel>().copyParametersToContext(context, owner);
+}
+
+std::vector<double> GridForceImpl::getParticleGroupEnergies() {
+    return kernel.getAs<CalcGridForceKernel>().getParticleGroupEnergies();
 }
 
 }  // namespace GridForcePlugin

@@ -75,8 +75,14 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
      * @param context    the context to copy parameters to
      * @param force      the AlGDockForce to copy the parameters from
      */
-    virtual void copyParametersToContext(OpenMM::ContextImpl &context, 
+    virtual void copyParametersToContext(OpenMM::ContextImpl &context,
                                         const GridForce &force) = 0;
+    /**
+     * Get per-particle-group energies.
+     *
+     * @return vector of energies, one per particle group (empty if no groups)
+     */
+    virtual std::vector<double> getParticleGroupEnergies() = 0;
 };
 
 }  // namespace GridForcePlugin

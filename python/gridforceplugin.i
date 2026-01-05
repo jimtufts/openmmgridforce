@@ -12,6 +12,7 @@
 %include "std_pair.i"
 %include "std_set.i"
 %include "std_vector.i"
+%include "std_shared_ptr.i"
 namespace std {
   %template(pairii) pair<int,int>;
   %template(vectord) vector<double>;
@@ -27,8 +28,12 @@ namespace std {
 }
 
 %{
+#include "GridForceTypes.h"
+#include "GridData.h"
 #include "GridForce.h"
 #include "GridForceKernels.h"
+#include "IsolatedNonbondedForce.h"
+#include "IsolatedNonbondedForceKernels.h"
 #include "OpenMM.h"
 #include "OpenMMAmoeba.h"
 #include "OpenMMDrude.h"
@@ -39,7 +44,23 @@ namespace std {
 %feature("autodoc", "1");
 %nodefaultctor;
 
+// Exception handling for OpenMMException
+%exception {
+    try {
+        $action
+    } catch (const OpenMM::OpenMMException& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return NULL;
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return NULL;
+    }
+}
+
 using namespace OpenMM;
+
+// Declare shared_ptr support for GridData (must be outside namespace)
+%shared_ptr(GridForcePlugin::GridData)
 
 %pythoncode %{
 def _openmm_GridForce_director_call(force):
@@ -66,9 +87,80 @@ enum class InvPowerMode {
     STORED = 2
 };
 
+struct ParticleGroup {
+    ParticleGroup(const std::string& name,
+                  const std::vector<int>& particleIndices,
+                  const std::vector<double>& scalingFactors = std::vector<double>());
+
+    std::string name;
+    std::vector<int> particleIndices;
+    std::vector<double> scalingFactors;
+};
+
+class GridData {
+public:
+    GridData();
+    GridData(int nx, int ny, int nz, double dx, double dy, double dz);
+
+    static std::shared_ptr<GridData> loadFromFile(const std::string& filename);
+    void saveToFile(const std::string& filename) const;
+
+    // Dimension accessors
+    int getNx() const;
+    int getNy() const;
+    int getNz() const;
+    %apply int& OUTPUT {int& nx};
+    %apply int& OUTPUT {int& ny};
+    %apply int& OUTPUT {int& nz};
+    void getCounts(int& nx, int& ny, int& nz) const;
+    %clear int& nx;
+    %clear int& ny;
+    %clear int& nz;
+
+    // Spacing accessors
+    double getDx() const;
+    double getDy() const;
+    double getDz() const;
+    %apply double& OUTPUT {double& dx};
+    %apply double& OUTPUT {double& dy};
+    %apply double& OUTPUT {double& dz};
+    void getSpacing(double& dx, double& dy, double& dz) const;
+    %clear double& dx;
+    %clear double& dy;
+    %clear double& dz;
+
+    // Origin accessors
+    %apply double& OUTPUT {double& ox};
+    %apply double& OUTPUT {double& oy};
+    %apply double& OUTPUT {double& oz};
+    void getOrigin(double& ox, double& oy, double& oz) const;
+    %clear double& ox;
+    %clear double& oy;
+    %clear double& oz;
+    void setOrigin(double x, double y, double z);
+
+    // Data accessors
+    const std::vector<double>& getValues() const;
+    const std::vector<double>& getDerivatives() const;
+    bool hasDerivatives() const;
+
+    // Metadata accessors
+    const std::string& getGridType() const;
+    void setGridType(const std::string& type);
+    double getInvPower() const;
+
+    // Setters for construction
+    void setValues(const std::vector<double>& vals);
+    void setDerivatives(const std::vector<double>& derivs);
+};
+
 class GridForce : public OpenMM::Force {
 public:
     GridForce();
+    GridForce(std::shared_ptr<GridData> gridData);
+
+    void setGridData(std::shared_ptr<GridData> gridData);
+    std::shared_ptr<GridData> getGridData() const;
 
     void addGridCounts (int nx, int ny, int nz);
     void addGridSpacing (double dx, double dy, double dz);
@@ -87,7 +179,6 @@ public:
     InvPowerMode getInvPowerMode() const;
     void applyInvPowerTransformation();
 
-    void setInvPower(double inv_power);
     double getInvPower() const;
     void setGridCap(double uMax);
     double getGridCap() const;
@@ -113,6 +204,23 @@ public:
     const std::vector<int>& getReceptorAtoms() const;
     void setLigandAtoms(const std::vector<int>& atomIndices);
     const std::vector<int>& getLigandAtoms() const;
+
+    void setParticles(const std::vector<int>& particles);
+    const std::vector<int>& getParticles() const;
+
+    // Particle group management for multi-ligand workflows
+    int addParticleGroup(const std::string& name,
+                         const std::vector<int>& particleIndices,
+                         const std::vector<double>& scalingFactors = std::vector<double>());
+    int getNumParticleGroups() const;
+    const ParticleGroup& getParticleGroup(int index) const;
+    const ParticleGroup* getParticleGroupByName(const std::string& name) const;
+    void removeParticleGroup(int index);
+    void clearParticleGroups();
+
+    std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
+
+    void clearGridData();
 
     void setReceptorPositions(const std::vector<OpenMM::Vec3>& positions);
     void setReceptorPositionsFromArrays(const std::vector<double>& x,
@@ -158,9 +266,62 @@ public:
     void updateParametersInContext(Context &context);
 };
 
+class IsolatedNonbondedForce : public OpenMM::Force {
+public:
+    IsolatedNonbondedForce();
+
+    int getNumAtoms() const;
+    void setNumAtoms(int numAtoms);
+
+    void setParticles(const std::vector<int>& particles);
+    const std::vector<int>& getParticles() const;
+
+    void setAtomParameters(int index, double charge, double sigma, double epsilon);
+
+    %apply double& OUTPUT {double& charge};
+    %apply double& OUTPUT {double& sigma};
+    %apply double& OUTPUT {double& epsilon};
+    void getAtomParameters(int index, double& charge, double& sigma, double& epsilon) const;
+    %clear double& charge;
+    %clear double& sigma;
+    %clear double& epsilon;
+
+    void addExclusion(int atom1, int atom2);
+    int getNumExclusions() const;
+
+    %apply int& OUTPUT {int& atom1};
+    %apply int& OUTPUT {int& atom2};
+    void getExclusion(int index, int& atom1, int& atom2) const;
+    %clear int& atom1;
+    %clear int& atom2;
+
+    int addException(int atom1, int atom2, double chargeProd, double sigma, double epsilon);
+    int getNumExceptions() const;
+
+    %apply int& OUTPUT {int& atom1_ex};
+    %apply int& OUTPUT {int& atom2_ex};
+    %apply double& OUTPUT {double& chargeProd};
+    %apply double& OUTPUT {double& sigma_ex};
+    %apply double& OUTPUT {double& epsilon_ex};
+    void getExceptionParameters(int index, int& atom1_ex, int& atom2_ex, double& chargeProd,
+                                 double& sigma_ex, double& epsilon_ex) const;
+    %clear int& atom1_ex;
+    %clear int& atom2_ex;
+    %clear double& chargeProd;
+    %clear double& sigma_ex;
+    %clear double& epsilon_ex;
+
+    void updateParametersInContext(Context &context);
+};
+
 class CalcGridForceKernel : public OpenMM::KernelImpl {
 public:
     static std::string Name() {return "CalcGridForce";}
+};
+
+class CalcIsolatedNonbondedForceKernel : public OpenMM::KernelImpl {
+public:
+    static std::string Name() {return "CalcIsolatedNonbondedForce";}
 };
 
 } // namespace

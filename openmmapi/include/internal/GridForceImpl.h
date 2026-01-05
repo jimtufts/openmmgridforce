@@ -70,6 +70,8 @@ class OPENMM_EXPORT_GRIDFORCE GridForceImpl : public OpenMM::ForceImpl {
 
     void updateParametersInContext(OpenMM::ContextImpl &context);
 
+    std::vector<double> getParticleGroupEnergies();
+
    private:
     const GridForce &owner;
     OpenMM::Kernel kernel;

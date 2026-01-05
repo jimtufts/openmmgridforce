@@ -9,6 +9,7 @@ add_custom_command(
         -python -c++
         -o "${WRAP_FILE}"
         "-I${OPENMM_DIR}/include"
+        "-I${CMAKE_SOURCE_DIR}/openmmapi/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/gridforceplugin.i"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/gridforceplugin.i"
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"

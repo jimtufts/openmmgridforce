@@ -26,7 +26,10 @@ extern "C" __global__ void computeGridForce(
     float* __restrict__ energyBuffer,
     const int numAtoms,
     const int paddedNumAtoms,
-    const int* __restrict__ particleIndices) {  // Filtered particle indices (null = all particles)
+    const int* __restrict__ particleIndices,  // Filtered particle indices (null = all particles)
+    const int* __restrict__ particleToGroupMap,  // Map particle index to group index (null = no groups)
+    float* __restrict__ groupEnergyBuffer,  // Per-group energy buffer (null = no groups)
+    const int numGroups) {  // Number of particle groups
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -493,6 +496,14 @@ extern "C" __global__ void computeGridForce(
     atomicAdd(&forceBuffers[particleIndex + paddedNumAtoms], fy_fixed);
     atomicAdd(&forceBuffers[particleIndex + 2 * paddedNumAtoms], fz_fixed);
 
-    // Accumulate energy
+    // Accumulate energy (total and per-group if enabled)
     atomicAdd(&energyBuffer[0], threadEnergy);
+
+    // Per-group energy tracking
+    if (particleToGroupMap != nullptr && groupEnergyBuffer != nullptr) {
+        int groupIndex = particleToGroupMap[particleIndex];
+        if (groupIndex >= 0 && groupIndex < numGroups) {
+            atomicAdd(&groupEnergyBuffer[groupIndex], threadEnergy);
+        }
+    }
 }
