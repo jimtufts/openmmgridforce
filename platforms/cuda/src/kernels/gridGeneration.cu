@@ -229,6 +229,20 @@ extern "C" __global__ void generateGridKernel(
 
     // Calculate contribution from each receptor atom
     float gridValue = 0.0f;
+
+#if DEBUG_GRIDFORCE
+    // Debug for test grid point [100, 130, 110]
+    bool isTestPoint = (i == 100 && j == 130 && k == 110);
+    int topContributors[5] = {-1, -1, -1, -1, -1};
+    float topContribValues[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    // Print first receptor position for this grid point
+    if (isTestPoint && numReceptorAtoms > 0) {
+        float3 pos0 = receptorPositions[0];
+        printf("[GRIDGEN] First receptor position on GPU: (%.6f, %.6f, %.6f)\n", pos0.x, pos0.y, pos0.z);
+    }
+#endif
+
     for (int atomIdx = 0; atomIdx < numReceptorAtoms; atomIdx++) {
         // Get atom position
         float3 atomPos = receptorPositions[atomIdx];
@@ -246,28 +260,80 @@ extern "C" __global__ void generateGridKernel(
         }
 
         // Calculate contribution based on grid type
+        float contrib = 0.0f;
         if (gridType == 0) {
             // Electrostatic potential: k * q / r
-            gridValue += COULOMB_CONST * receptorCharges[atomIdx] / r;
+            contrib = COULOMB_CONST * receptorCharges[atomIdx] / r;
+            gridValue += contrib;
         } else if (gridType == 1) {
             // LJ repulsive: sqrt(epsilon) * Rmin^6 / r^12
             // where Rmin = 2^(1/6) * sigma (AMBER convention)
             const float rmin = powf(2.0f, 1.0f/6.0f) * receptorSigmas[atomIdx];
             const float r6 = rmin * rmin * rmin * rmin * rmin * rmin;
             const float r12 = r2 * r2 * r2 * r2 * r2 * r2;
-            gridValue += sqrtf(receptorEpsilons[atomIdx]) * r6 / r12;
+            contrib = sqrtf(receptorEpsilons[atomIdx]) * r6 / r12;
+            gridValue += contrib;
         } else if (gridType == 2) {
             // LJ attractive: -2 * sqrt(epsilon) * Rmin^3 / r^6
             // where Rmin = 2^(1/6) * sigma (AMBER convention)
             const float rmin = powf(2.0f, 1.0f/6.0f) * receptorSigmas[atomIdx];
             const float r3 = rmin * rmin * rmin;
             const float r6 = r2 * r2 * r2;
-            gridValue += -2.0f * sqrtf(receptorEpsilons[atomIdx]) * r3 / r6;
+            contrib = -2.0f * sqrtf(receptorEpsilons[atomIdx]) * r3 / r6;
+            gridValue += contrib;
         }
+
+#if DEBUG_GRIDFORCE
+        // Track top contributors for test point
+        if (isTestPoint) {
+            // Print first 5 atoms and top contributors
+            if (atomIdx < 5) {
+                float sigma = receptorSigmas[atomIdx];
+                float eps = receptorEpsilons[atomIdx];
+                float rmin = powf(2.0f, 1.0f/6.0f) * sigma;
+                printf("[GRIDGEN]   Atom %d: sigma=%.6e, eps=%.6e, rmin=%.6e, r=%.6e, contrib=%.6e\n",
+                       atomIdx, sigma, eps, rmin, r, contrib);
+            }
+
+            // Track absolute top contributors
+            for (int i = 0; i < 5; i++) {
+                if (topContributors[i] == -1 || fabsf(contrib) > fabsf(topContribValues[i])) {
+                    // Shift down
+                    for (int j = 4; j > i; j--) {
+                        topContributors[j] = topContributors[j-1];
+                        topContribValues[j] = topContribValues[j-1];
+                    }
+                    topContributors[i] = atomIdx;
+                    topContribValues[i] = contrib;
+                    break;
+                }
+            }
+        }
+#endif
     }
 
+#if DEBUG_GRIDFORCE
+    if (isTestPoint) {
+        printf("[GRIDGEN] Test point [%d, %d, %d] at (%.6f, %.6f, %.6f)\n", i, j, k, gx, gy, gz);
+        printf("[GRIDGEN]   gridType=%d, gridValue BEFORE capping: %.6e\n", gridType, gridValue);
+        printf("[GRIDGEN]   Top 5 contributors:\n");
+        for (int idx = 0; idx < 5; idx++) {
+            if (topContributors[idx] >= 0) {
+                printf("[GRIDGEN]     Atom %d: contrib=%.6e\n", topContributors[idx], topContribValues[idx]);
+            }
+        }
+    }
+#endif
+
     // Apply capping to avoid extreme values
+    float gridValueBeforeCap = gridValue;
     gridValue = U_MAX * tanhf(gridValue / U_MAX);
+
+#if DEBUG_GRIDFORCE
+    if (isTestPoint) {
+        printf("[GRIDGEN]   U_MAX=%.6f, gridValue AFTER capping: %.6e\n", U_MAX, gridValue);
+    }
+#endif
 
     // Apply inverse power transformation if specified
     // Grid should store G^(1/n), kernel will apply ^n to recover G
@@ -275,7 +341,18 @@ extern "C" __global__ void generateGridKernel(
     if (invPower != 0.0f) {
         float sign = (gridValue >= 0.0f) ? 1.0f : -1.0f;
         gridValue = sign * powf(fabsf(gridValue), 1.0f / invPower);
+#if DEBUG_GRIDFORCE
+        if (isTestPoint) {
+            printf("[GRIDGEN]   invPower=%.6f, gridValue AFTER inv_power: %.6e\n", invPower, gridValue);
+        }
+#endif
     }
+
+#if DEBUG_GRIDFORCE
+    if (isTestPoint) {
+        printf("[GRIDGEN]   FINAL gridValue stored: %.6e\n", gridValue);
+    }
+#endif
 
     // Store result
     gridValues[gridIdx] = gridValue;

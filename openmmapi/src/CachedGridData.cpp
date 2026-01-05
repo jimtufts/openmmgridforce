@@ -59,8 +59,8 @@ void CachedGridData::transformValues(std::vector<double>& values, double inv_pow
 
 void CachedGridData::applyTransformation(InvPowerMode mode, double inv_power, int interpMethod) {
     // Validation
-    if (mode != InvPowerMode::NONE && inv_power <= 0.0) {
-        throw OpenMMException("CachedGridData: inv_power must be > 0 when mode != NONE");
+    if (mode != InvPowerMode::NONE && inv_power == 0.0) {
+        throw OpenMMException("CachedGridData: inv_power must be non-zero when mode != NONE");
     }
 
     if (mode == InvPowerMode::NONE && inv_power != 0.0) {

@@ -338,7 +338,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         }
 
         // Set invPowerMode based on whether transformation was applied
-        if (invPower > 0.0f) {
+        if (invPower != 0.0f) {
             gridData->setInvPower(invPower);
             gridData->setInvPowerMode(InvPowerMode::STORED);
             const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::STORED, invPower);

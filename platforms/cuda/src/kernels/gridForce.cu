@@ -3,6 +3,8 @@
  * Main kernel for computing forces on ligand atoms from interpolated grid values.
  */
 
+#define DEBUG_GRIDFORCE 0
+
 #include "include/InterpolationBasis.cuh"
 #include "include/HermiteBasis.cuh"
 #include "include/TricubicCoefficients.cuh"
@@ -80,6 +82,17 @@ extern "C" __global__ void computeGridForce(
         fy = min(max(fy, 0.0f), 1.0f);
         fz = min(max(fz, 0.0f), 1.0f);
 
+#if DEBUG_GRIDFORCE
+        if (index == 0) {
+            printf("[KERNEL atom=0] ========== TRILINEAR INTERP ==========\n");
+            printf("[KERNEL atom=0] invPower=%.6f, invPowerMode=%d\n", invPower, invPowerMode);
+            printf("[KERNEL atom=0] scalingFactor=%.6f\n", scalingFactor);
+            printf("[KERNEL atom=0] Position: (%.6f, %.6f, %.6f)\n", pos.x, pos.y, pos.z);
+            printf("[KERNEL atom=0] Grid indices: ix=%d, iy=%d, iz=%d\n", ix, iy, iz);
+            printf("[KERNEL atom=0] Fractional: fx=%.6f, fy=%.6f, fz=%.6f\n", fx, fy, fz);
+        }
+#endif
+
         // Declare variables for interpolation
         float interpolated = 0.0f;
         float dx, dy, dz;
@@ -149,8 +162,8 @@ extern "C" __global__ void computeGridForce(
 
                 // Map tricubic derivative order to gridDerivatives storage order
                 // Tricubic needs: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
-                // gridDerivatives: 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dyy, 6=dzz, 7=dxy, 8=dxz, 9=dyz, ..., 13=dxyz
-                const int derivMap[8] = {0, 1, 2, 3, 7, 8, 9, 13};
+                // gridDerivatives (RASPA3 order): 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dxy, 6=dxz, 7=dyy, 8=dyz, 9=dzz, ..., 13=dxyz
+                const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
 
                 for (int d = 0; d < 8; d++) {
                     for (int c = 0; c < 8; c++) {
@@ -390,6 +403,14 @@ extern "C" __global__ void computeGridForce(
             float vppm = gridValues[ipp];
             float vppp = gridValues[ipp + 1];
 
+#if DEBUG_GRIDFORCE
+            if (index == 0) {
+                printf("[KERNEL atom=0] Corner values BEFORE transform:\n");
+                printf("  v000=%.6e, v001=%.6e, v010=%.6e, v011=%.6e\n", vmmm, vmmp, vmpm, vmpp);
+                printf("  v100=%.6e, v101=%.6e, v110=%.6e, v111=%.6e\n", vpmm, vpmp, vppm, vppp);
+            }
+#endif
+
             // RUNTIME mode: Transform grid values BEFORE interpolation
             // This makes interpolation smoother for steep potentials (e.g., LJ)
             if (invPowerMode == 1) {  // 1 = RUNTIME
@@ -411,6 +432,14 @@ extern "C" __global__ void computeGridForce(
                 else vppm = 0.0f;
                 if (fabsf(vppp) >= 1e-10f) vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppp), invN);
                 else vppp = 0.0f;
+
+#if DEBUG_GRIDFORCE
+                if (index == 0) {
+                    printf("[KERNEL atom=0] Corner values AFTER RUNTIME transform (G -> G^(1/n)):\n");
+                    printf("  v000=%.6e, v001=%.6e, v010=%.6e, v011=%.6e\n", vmmm, vmmp, vmpm, vmpp);
+                    printf("  v100=%.6e, v101=%.6e, v110=%.6e, v111=%.6e\n", vpmm, vpmp, vppm, vppp);
+                }
+#endif
             }
 
             // Perform trilinear interpolation (in transformed space if RUNTIME mode)
@@ -429,6 +458,13 @@ extern "C" __global__ void computeGridForce(
             dy = (ox * (vmp - vmm) + fx * (vpp - vpm)) / gridSpacing[1];
             dz = (ox * (oy * (vmmp - vmmm) + fy * (vmpp - vmpm)) +
                    fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm))) / gridSpacing[2];
+
+#if DEBUG_GRIDFORCE
+            if (index == 0) {
+                printf("[KERNEL atom=0] Interpolated value (before back-convert): %.6e\n", interpolated);
+                printf("[KERNEL atom=0] Gradients (before back-convert): dx=%.6e, dy=%.6e, dz=%.6e\n", dx, dy, dz);
+            }
+#endif
         }
 
         // Back-convert from transformed space to get final energy
@@ -452,6 +488,15 @@ extern "C" __global__ void computeGridForce(
         atomForce.x = -scalingFactor * dx;
         atomForce.y = -scalingFactor * dy;
         atomForce.z = -scalingFactor * dz;
+
+#if DEBUG_GRIDFORCE
+        if (index == 0) {
+            printf("[KERNEL atom=0] After back-convert: energy=%.6e\n", interpolated);
+            printf("[KERNEL atom=0] After back-convert: dx=%.6e, dy=%.6e, dz=%.6e\n", dx, dy, dz);
+            printf("[KERNEL atom=0] Final threadEnergy (scaled): %.6e\n", threadEnergy);
+            printf("[KERNEL atom=0] Final force: (%.6e, %.6e, %.6e)\n", atomForce.x, atomForce.y, atomForce.z);
+        }
+#endif
     }
     else {
         // Apply harmonic restraint outside grid (if enabled)

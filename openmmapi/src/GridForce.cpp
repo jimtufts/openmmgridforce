@@ -42,6 +42,7 @@
 #include <fstream>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 
 using namespace OpenMM;
 using namespace std;
@@ -559,10 +560,37 @@ void GridForce::loadFromFile(const std::string& filename) {
             (*m_vals)[i] = (*m_derivatives)[i];  // f(x,y,z) is at offset i in [27, nx, ny, nz] layout
         }
     } else {
-        // V3 without derivatives: Read only function values
+        // V3 without derivatives in header: Read only function values
         m_vals->resize(num_points);
         file.read(reinterpret_cast<char*>(m_vals->data()), num_points * sizeof(double));
         m_derivatives->clear();
+
+        // Skip scaling factors (for compatibility)
+        int numScalingFactors;
+        file.read(reinterpret_cast<char*>(&numScalingFactors), sizeof(int));
+        if (numScalingFactors > 0) {
+            vector<double> scalingFactors(numScalingFactors);
+            file.read(reinterpret_cast<char*>(scalingFactors.data()), numScalingFactors * sizeof(double));
+        }
+
+        // Skip origin (written again for V3 compatibility)
+        double origin[3];
+        file.read(reinterpret_cast<char*>(origin), 3 * sizeof(double));
+
+        // Check for optional DERIVS block (GridData format)
+        file.peek();
+        if (!file.eof()) {
+            char derivHeader[8];
+            file.read(derivHeader, 8);
+            if (strncmp(derivHeader, "DERIVS", 6) == 0) {
+                int numDerivs = (static_cast<unsigned char>(derivHeader[6]) << 8) |
+                               static_cast<unsigned char>(derivHeader[7]);
+                size_t derivSize = numDerivs * num_points;
+                m_derivatives->resize(derivSize);
+                file.read(reinterpret_cast<char*>(m_derivatives->data()),
+                         derivSize * sizeof(double));
+            }
+        }
     }
 
     file.close();
@@ -586,7 +614,7 @@ void GridForce::loadFromFile(const std::string& filename) {
     m_invPowerMode = static_cast<InvPowerMode>(mode_value);
 
     // Additional validation
-    if (m_invPowerMode != InvPowerMode::NONE && inv_power <= 0.0) {
+    if (m_invPowerMode != InvPowerMode::NONE && inv_power == 0.0) {
         throw OpenMMException("GridForce: File has inv_power_mode enabled but invalid inv_power value");
     }
     if (m_invPowerMode == InvPowerMode::RUNTIME && m_derivatives && !m_derivatives->empty()) {
