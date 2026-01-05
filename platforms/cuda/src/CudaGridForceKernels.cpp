@@ -72,6 +72,27 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // Store counts and spacing as member variables for generateGrid
     counts = counts_local;
     spacing = spacing_local;
+
+    // Ensure CachedGridData exists for proper GPU cache keying
+    // This is needed because loadFromFile() is called before m_systemPtr is set,
+    // so CachedGridData might not have been created during file loading.
+    if (!force.getCachedGridData() && !vals.empty()) {
+        // Get grid origin
+        double ox, oy, oz;
+        force.getGridOrigin(ox, oy, oz);
+
+        // Create CachedGridData with current grid values
+        auto cachedGridData = std::make_shared<CachedGridData>(
+            vals,
+            vector<double>(),  // derivatives (empty for now)
+            counts_local,
+            spacing_local,
+            ox, oy, oz
+        );
+
+        // Set it on the GridForce object
+        const_cast<GridForce&>(force).setCachedGridData(cachedGridData);
+    }
 //     std::cout << "CudaCalcGridForceKernel::initialize() received counts: ["
 //               << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
 //               << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
@@ -80,6 +101,25 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     gridCap = (float)grid_cap;
     invPower = (float)inv_power;
     invPowerMode = static_cast<int>(force.getInvPowerMode());
+    interpolationMethod = interp_method;
+
+    // Validate RUNTIME mode requirements
+    if (invPowerMode == 1) {  // RUNTIME mode
+        // Check: RUNTIME mode only works with trilinear (0) or b-spline (1)
+        if (interpolationMethod != 0 && interpolationMethod != 1) {
+            throw OpenMMException(
+                "GridForce: RUNTIME inv_power mode only supports trilinear (0) and b-spline (1) interpolation. "
+                "Tricubic (2) and triquintic (3) require STORED mode with pre-transformed grids that include "
+                "chain-rule derivatives. Current interpolation method: " + std::to_string(interpolationMethod));
+        }
+
+        // Check: RUNTIME mode cannot be used with analytical derivatives
+        if (force.hasDerivatives()) {
+            throw OpenMMException(
+                "GridForce: RUNTIME inv_power mode cannot be used with grids that have analytical derivatives. "
+                "Use STORED mode instead, with grids pre-transformed during generation.");
+        }
+    }
 
     // Store ligand atoms and derivative computation flag
     ligandAtoms = force.getLigandAtoms();
@@ -141,6 +181,43 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
         // Copy calculated scaling factors back to GridForce object
         const_cast<GridForce&>(force).setScalingFactors(scaling_factors);
+    }
+
+    // Handle particle groups for multi-ligand workflows
+    numParticleGroups = force.getNumParticleGroups();
+    if (numParticleGroups > 0) {
+        // Initialize scaling_factors if not already done (needed for particle group mapping)
+        if (scaling_factors.empty()) {
+            scaling_factors.resize(numAtoms, 0.0);
+        }
+
+        // Create particle-to-group mapping for per-group energy tracking
+        vector<int> particleToGroupMapHost(numAtoms, -1);  // -1 = no group
+
+        // Populate from particle groups
+        for (int i = 0; i < numParticleGroups; i++) {
+            const ParticleGroup& group = force.getParticleGroup(i);
+            for (size_t j = 0; j < group.particleIndices.size(); j++) {
+                int particleIdx = group.particleIndices[j];
+                if (particleIdx < numAtoms) {
+                    // If group has explicit scaling factors, use them
+                    // Otherwise keep the auto-calculated ones from above (or zeros)
+                    if (!group.scalingFactors.empty() && j < group.scalingFactors.size()) {
+                        scaling_factors[particleIdx] = group.scalingFactors[j];
+                    }
+                    particleToGroupMapHost[particleIdx] = i;  // Map particle to group index
+                }
+            }
+        }
+
+        // Upload particle-to-group mapping to GPU
+        particleToGroupMap.initialize<int>(cu, numAtoms, "particleToGroupMap");
+        particleToGroupMap.upload(particleToGroupMapHost);
+
+        // Initialize per-group energy buffer
+        groupEnergyBuffer.initialize<float>(cu, numParticleGroups, "groupEnergyBuffer");
+    } else {
+        numParticleGroups = 0;
     }
 
     // Auto-generate grid if enabled and grid values are empty
@@ -209,6 +286,18 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             const_cast<GridForce&>(force).setDerivatives(derivatives);
         }
 
+        // Create GridData object with auto-generated values so saveToFile() uses new format
+        std::shared_ptr<GridData> gridData = std::make_shared<GridData>(
+            counts[0], counts[1], counts[2],
+            spacing[0], spacing[1], spacing[2]
+        );
+        gridData->setOrigin(ox, oy, oz);  // Set the grid origin
+        gridData->setValues(vals);
+        if (!derivatives.empty()) {
+            gridData->setDerivatives(derivatives);
+        }
+        const_cast<GridForce&>(force).setGridData(gridData);
+
         // Set invPowerMode based on whether transformation was applied
         if (invPower > 0.0f) {
             const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::STORED, invPower);
@@ -268,7 +357,22 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     g_scaling_factors.upload(scalingFloat);
 
     // Grid values: check cache first to enable sharing across multiple GridForce instances
-    size_t gridHash = computeGridHash(counts, spacing, vals);
+    // Priority: GridData > CachedGridData > vals.data()
+    std::shared_ptr<GridData> sharedGridData = force.getGridData();
+    std::shared_ptr<CachedGridData> cachedGridData = force.getCachedGridData();
+    size_t gridHash;
+    if (sharedGridData) {
+        // Use GridData pointer as hash for O(1) cache lookup
+        gridHash = reinterpret_cast<size_t>(sharedGridData.get());
+    } else if (cachedGridData) {
+        // Use CachedGridData pointer as hash (for file-loaded grids)
+        gridHash = reinterpret_cast<size_t>(cachedGridData.get());
+    } else if (!vals.empty()) {
+        // Use values vector data pointer as hash (fallback for old code paths)
+        gridHash = reinterpret_cast<size_t>(vals.data());
+    } else {
+        throw OpenMMException("GridForce: No grid values or GridData provided");
+    }
     auto cacheKey = std::make_pair((void*)&cu, gridHash);
     auto it = gridCache.find(cacheKey);
 
@@ -277,7 +381,6 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         g_vals_shared = it->second.lock();
         if (g_vals_shared) {
             // Successfully reused cached grid
-//             std::cout << "Reusing cached grid (hash=" << gridHash << ")" << std::endl;
             vals.clear();
             vals.shrink_to_fit();
         } else {
@@ -298,7 +401,6 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
         g_vals_shared->upload(valsFloat);
         gridCache[cacheKey] = g_vals_shared;
-//         std::cout << "Caching new grid (hash=" << gridHash << ")" << std::endl;
         vals.clear();
         vals.shrink_to_fit();
     }
@@ -372,6 +474,38 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     originY = (float)oy;
     originZ = (float)oz;
 
+    // Handle particle groups for multi-ligand workflows
+    // Flatten all groups into single arrays for efficient single-kernel-launch execution
+    // (numParticleGroups already declared above when generating scaling factors)
+    if (numParticleGroups > 0) {
+        std::vector<int> flattenedParticleIndices;
+        std::vector<float> flattenedScalingFactors;
+
+        for (int i = 0; i < numParticleGroups; i++) {
+            const ParticleGroup& group = force.getParticleGroup(i);
+
+            // Append this group's data to flattened arrays
+            flattenedParticleIndices.insert(flattenedParticleIndices.end(),
+                                           group.particleIndices.begin(),
+                                           group.particleIndices.end());
+
+            flattenedScalingFactors.insert(flattenedScalingFactors.end(),
+                                          group.scalingFactors.begin(),
+                                          group.scalingFactors.end());
+        }
+
+        totalGroupParticles = flattenedParticleIndices.size();
+
+        // Upload flattened arrays to GPU
+        allGroupParticleIndices.initialize<int>(cu, flattenedParticleIndices.size(), "allGroupParticleIndices");
+        allGroupParticleIndices.upload(flattenedParticleIndices);
+
+        allGroupScalingFactors.initialize<float>(cu, flattenedScalingFactors.size(), "allGroupScalingFactors");
+        allGroupScalingFactors.upload(flattenedScalingFactors);
+    } else {
+        totalGroupParticles = 0;
+    }
+
     // Compile kernel from .cu file
     map<string, string> defines;
     CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
@@ -393,30 +527,44 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     //               << scalingCopy[0] << std::endl;
     // }
 
-    // Set kernel arguments
+    // Set common kernel arguments
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
     CUdeviceptr countsPtr = g_counts.getDevicePointer();
     CUdeviceptr spacingPtr = g_spacing.getDevicePointer();
     CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
-    CUdeviceptr scalingPtr = g_scaling_factors.getDevicePointer();
     CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
                             (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
     CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
-    CUdeviceptr particleIndicesPtr = (particleIndices.isInitialized()) ? particleIndices.getDevicePointer() : 0;
 
-    // Debug: Read force buffer BEFORE kernel execution
-    // const int num_force_components = 3 * paddedNumAtoms;
-    // std::vector<long long> forcesBefore(num_force_components);
-    // cuMemcpyDtoH(forcesBefore.data(), forcePtr, num_force_components * sizeof(long long));
+    // Execute kernel - single launch for either particle groups or legacy mode
+    CUdeviceptr scalingPtr;
+    CUdeviceptr particleIndicesPtr;
+    int kernelNumAtoms;
 
-    // // Convert fixed-point to float for atom 0
-    // double fx_before = forcesBefore[0] / (double)0x100000000;
-    // double fy_before = forcesBefore[paddedNumAtoms] / (double)0x100000000;
-    // double fz_before = forcesBefore[2*paddedNumAtoms] / (double)0x100000000;
-    // std::cout << "  Force buffer BEFORE: atom0 = (" << fx_before << ", "
-    //           << fy_before << ", " << fz_before << ")" << std::endl;
+    if (totalGroupParticles > 0) {
+        // Multi-ligand mode: single kernel launch with all groups' particles flattened
+        scalingPtr = allGroupScalingFactors.getDevicePointer();
+        particleIndicesPtr = allGroupParticleIndices.getDevicePointer();
+        kernelNumAtoms = totalGroupParticles;
+    } else {
+        // Legacy mode: single execution with global scaling factors and particle filter
+        scalingPtr = g_scaling_factors.getDevicePointer();
+        particleIndicesPtr = (particleIndices.isInitialized()) ? particleIndices.getDevicePointer() : 0;
+        kernelNumAtoms = numAtoms;
+    }
+
+    // Clear group energy buffer if using particle groups
+    CUdeviceptr particleToGroupMapPtr = 0;
+    CUdeviceptr groupEnergyBufferPtr = 0;
+    if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
+        // Zero out the group energy buffer
+        vector<float> zeros(numParticleGroups, 0.0f);
+        groupEnergyBuffer.upload(zeros);
+        particleToGroupMapPtr = particleToGroupMap.getDevicePointer();
+        groupEnergyBufferPtr = groupEnergyBuffer.getDevicePointer();
+    }
 
     void* args[] = {
         &posqPtr,
@@ -432,15 +580,17 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &originX,
         &originY,
         &originZ,
-        &derivsPtr,  // Derivatives for triquintic interpolation
+        &derivsPtr,
         &energyPtr,
-        &numAtoms,
+        &kernelNumAtoms,
         &paddedNumAtoms,
-        &particleIndicesPtr  // Filtered particle indices (null = all particles)
+        &particleIndicesPtr,
+        &particleToGroupMapPtr,
+        &groupEnergyBufferPtr,
+        &numParticleGroups
     };
 
-    // Execute kernel
-    cu.executeKernel(kernel, args, numAtoms);
+    cu.executeKernel(kernel, args, kernelNumAtoms);
 
     // Debug: Read force buffer AFTER kernel execution
     // std::vector<long long> forcesAfter(num_force_components);
@@ -464,64 +614,33 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
 }
 
 void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, const GridForce& force) {
-    vector<int> counts;
-    vector<double> spacing;
-    vector<double> vals;
-    vector<double> scaling_factors;
-    force.getGridParameters(counts, spacing, vals, scaling_factors);
+    // For updateParametersInContext, we only need to update inv_power and invPowerMode
+    // Grid values and scaling factors don't change (they're either shared via GridData or already set)
     double inv_power = force.getInvPower();
     int inv_power_mode = static_cast<int>(force.getInvPowerMode());
 
-    if (numAtoms != contextImpl.getSystem().getNumParticles())
-        throw OpenMMException("updateParametersInContext: The number of particles has changed");
+    // For RUNTIME inv_power mode, only update the transformation parameters
+    // Grid values and scaling factors remain unchanged
+    invPower = (float)inv_power;
+    invPowerMode = inv_power_mode;
+}
 
-    if (spacing.size() != 3 || counts.size() != 3)
-        throw OpenMMException("GridForce: Grid dimensions must be 3D");
+vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {
+    vector<double> groupEnergies;
 
-    if (vals.size() != counts[0] * counts[1] * counts[2])
-        throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
+    if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
+        // Download group energies from GPU
+        vector<float> groupEnergiesFloat(numParticleGroups);
+        groupEnergyBuffer.download(groupEnergiesFloat);
 
-    // Skip scaling factor validation during auto-grid generation (no ligand atoms in system yet)
-    // Only validate when using grids with actual ligand particles
-    if (!force.getAutoGenerateGrid()) {
-        // Check if we have the right number of scaling factors
-        if (scaling_factors.size() > numAtoms)
-            throw OpenMMException("GridForce: Too many scaling factors provided");
-        // If we have fewer, verify the missing ones are virtual sites or dummy particles (mass=0)
-        if (scaling_factors.size() < numAtoms) {
-            const System& system = contextImpl.getSystem();
-            for (int i = scaling_factors.size(); i < numAtoms; i++) {
-                double mass = system.getParticleMass(i);
-                if (mass != 0.0 && !system.isVirtualSite(i)) {
-                    throw OpenMMException("GridForce: Missing scaling factor for particle " +
-                                        std::to_string(i) + " (mass=" + std::to_string(mass) + ")");
-                }
-            }
-            // Pad with zeros for verified dummy/virtual particles
-            while (scaling_factors.size() < numAtoms) {
-                scaling_factors.push_back(0.0);
-            }
-        }
-    } else {
-        // Auto-grid generation: pad scaling factors with zeros (no ligand atoms to scale)
-        while (scaling_factors.size() < numAtoms) {
-            scaling_factors.push_back(0.0);
+        // Convert to double
+        groupEnergies.resize(numParticleGroups);
+        for (int i = 0; i < numParticleGroups; i++) {
+            groupEnergies[i] = (double)groupEnergiesFloat[i];
         }
     }
 
-    // Update arrays
-    vector<int> countsVec = {counts[0], counts[1], counts[2]};
-    vector<float> spacingVec = {(float)spacing[0], (float)spacing[1], (float)spacing[2]};
-    vector<float> valsFloat(vals.begin(), vals.end());
-    vector<float> scalingFloat(scaling_factors.begin(), scaling_factors.end());
-
-    g_counts.upload(countsVec);
-    g_spacing.upload(spacingVec);
-    g_vals.upload(valsFloat);
-    g_scaling_factors.upload(scalingFloat);
-
-    invPower = (float)inv_power;
-    invPowerMode = inv_power_mode;
+    return groupEnergies;
 }
 
 void CudaCalcGridForceKernel::generateGrid(

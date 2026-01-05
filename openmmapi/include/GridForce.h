@@ -36,6 +36,9 @@
 #include <vector>
 #include <memory>
 
+#include "GridForceTypes.h"
+#include "GridData.h"
+#include "CachedGridData.h"
 #include "internal/windowsExportGridForce.h"
 #include "openmm/Context.h"
 #include "openmm/Force.h"
@@ -46,31 +49,31 @@ using namespace OpenMM;
 namespace GridForcePlugin {
 
 /**
- * Inverse power transformation mode.
- * Controls how and when the inv_power transformation is applied to grid values.
+ * Represents a named group of particles for multi-ligand simulations.
+ * Allows multiple ligands to share a single GridForce while maintaining
+ * independent particle lists and per-group energy tracking.
  */
-enum class InvPowerMode {
+struct OPENMM_EXPORT_GRIDFORCE ParticleGroup {
     /**
-     * No transformation applied.
-     * Grid values are used as-is, and no power transformation occurs during evaluation.
+     * Create a particle group.
+     *
+     * @param name              name of the group (e.g., "ligand1")
+     * @param particleIndices   indices of particles in this group
+     * @param scalingFactors    per-particle scaling factors (optional)
      */
-    NONE = 0,
+    ParticleGroup(const std::string& name,
+                  const std::vector<int>& particleIndices,
+                  const std::vector<double>& scalingFactors = std::vector<double>())
+        : name(name), particleIndices(particleIndices), scalingFactors(scalingFactors) {
+        // If no scaling factors provided, default to 1.0 for all particles
+        if (this->scalingFactors.empty()) {
+            this->scalingFactors.resize(particleIndices.size(), 1.0);
+        }
+    }
 
-    /**
-     * Transform grid values at initialization/runtime.
-     * Grid values are transformed G -> G^(1/n) once after loading, before evaluation.
-     * The evaluation kernel then applies ^n to recover original values.
-     * Only valid for grids WITHOUT analytical derivatives.
-     */
-    RUNTIME = 1,
-
-    /**
-     * Grid values already have transformation stored.
-     * Grid values are already G^(1/n) (from generation or prior transformation).
-     * The evaluation kernel applies ^n to recover original values.
-     * Compatible with analytical derivatives.
-     */
-    STORED = 2
+    std::string name;                    // Group name for identification
+    std::vector<int> particleIndices;    // Particle indices in this group
+    std::vector<double> scalingFactors;  // Per-particle scaling factors
 };
 
 /**
@@ -87,8 +90,46 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     GridForce();
 
     /**
+     * Construct a GridForce with shared GridData.
+     * This constructor enables multiple GridForce instances to share the same grid data,
+     * reducing memory usage for multi-ligand simulations.
+     *
+     * @param gridData  shared_ptr to GridData containing grid values and metadata
+     */
+    GridForce(std::shared_ptr<GridData> gridData);
+
+    /**
+     * Set the grid data for this force.
+     * Allows explicit sharing of GridData across multiple GridForce instances.
+     *
+     * @param gridData  shared_ptr to GridData
+     */
+    void setGridData(std::shared_ptr<GridData> gridData);
+
+    /**
+     * Get the shared grid data.
+     *
+     * @return shared_ptr to GridData (may be null if not using GridData API)
+     */
+    std::shared_ptr<GridData> getGridData() const;
+
+    /**
+     * Get the cached grid data (used internally for GPU cache keys).
+     *
+     * @return shared_ptr to CachedGridData (may be null if not loaded from file)
+     */
+    std::shared_ptr<CachedGridData> getCachedGridData() const;
+
+    /**
+     * Set the cached grid data (used internally by kernels).
+     *
+     * @param cachedGridData shared_ptr to CachedGridData
+     */
+    void setCachedGridData(std::shared_ptr<CachedGridData> cachedGridData);
+
+    /**
      * Get the force field parameters for a Nonbond Energy term
-     * 
+     *
      */
     void addGridCounts(int nx, int ny, int nz);
     void addGridSpacing(double dx, double dy, double dz);  // length unit is 'nm'
@@ -193,23 +234,6 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @throws OpenMMException if requirements are not met
      */
     void applyInvPowerTransformation();
-
-    /**
-     * Set the inverse power parameter for grid value transformation.
-     *
-     * DEPRECATED: Use setInvPowerMode() instead for explicit control over transformation timing.
-     * This method is kept for backward compatibility and maps to setInvPowerMode(STORED, inv_power).
-     *
-     * When inv_power > 0, the interpolated grid value is raised to this power
-     * before being multiplied by the scaling factor. This reverses the grid
-     * transformation where grid values were stored as G^(1/inv_power).
-     *
-     * For example, if grids were transformed as G^(1/4), set inv_power=4.0
-     * to compute: energy = scaling_factor * (interpolated)^4
-     *
-     * @param inv_power  exponent to apply to interpolated values (default: 0.0, meaning no transformation)
-     */
-    void setInvPower(double inv_power);
 
     /**
      * Get the current inverse power parameter.
@@ -386,6 +410,64 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     const std::vector<int>& getParticles() const;
 
     /**
+     * Add a named particle group for multi-ligand simulations.
+     * Each group has its own set of particles and scaling factors,
+     * allowing multiple ligands to share a single GridForce instance.
+     *
+     * @param name              name for this group (e.g., "ligand1")
+     * @param particleIndices   particle indices in this group
+     * @param scalingFactors    per-particle scaling factors (optional, defaults to 1.0)
+     * @return                  index of the added group
+     */
+    int addParticleGroup(const std::string& name,
+                         const std::vector<int>& particleIndices,
+                         const std::vector<double>& scalingFactors = std::vector<double>());
+
+    /**
+     * Get the number of particle groups.
+     *
+     * @return  number of particle groups
+     */
+    int getNumParticleGroups() const;
+
+    /**
+     * Get a particle group by index.
+     *
+     * @param index  index of the group
+     * @return       const reference to the ParticleGroup
+     */
+    const ParticleGroup& getParticleGroup(int index) const;
+
+    /**
+     * Get a particle group by name.
+     *
+     * @param name  name of the group
+     * @return      pointer to the ParticleGroup, or nullptr if not found
+     */
+    const ParticleGroup* getParticleGroupByName(const std::string& name) const;
+
+    /**
+     * Remove a particle group by index.
+     *
+     * @param index  index of the group to remove
+     */
+    void removeParticleGroup(int index);
+
+    /**
+     * Clear all particle groups.
+     */
+    void clearParticleGroups();
+
+    /**
+     * Get per-particle-group energies from the most recent evaluation.
+     * Only available after evaluating a Context with particle groups.
+     *
+     * @param context  the Context to query
+     * @return         vector of energies, one per particle group (empty if no groups)
+     */
+    std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
+
+    /**
      * Clear grid data from host memory (values and derivatives).
      * Call this after Context creation to free host memory when grid is cached on GPU.
      * Note: After calling this, saveToFile() will not work.
@@ -477,7 +559,30 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
    protected:
     ForceImpl *createImpl() const;
 
+   public:
+    /**
+     * Internal: Set the System pointer for per-System cache scoping.
+     * This is called by GridForceImpl during initialization.
+     * Users should not call this directly.
+     */
+    void setSystemPointer(const void* systemPtr);
+
+    /**
+     * Internal: Get the System pointer.
+     */
+    const void* getSystemPointer() const;
+
    private:
+    // Shared grid data container (when null, uses legacy storage below)
+    std::shared_ptr<GridData> m_gridData;
+
+    // Cached grid data with transformation state tracking
+    std::shared_ptr<CachedGridData> m_cachedGridData;
+
+    // System pointer for per-System cache scoping
+    const void* m_systemPtr;
+
+    // Grid storage (used when m_gridData is null for backward compatibility)
     std::vector<int> m_counts;
     std::vector<double> m_spacing;  // the length unit is 'nm'
     std::shared_ptr<std::vector<double>> m_vals;        // Shared grid values for memory efficiency
@@ -504,6 +609,9 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
 
     // Particle filtering for multi-ligand evaluation
     std::vector<int> m_particles;        // Particle indices this force applies to (empty = all particles)
+
+    // Named particle groups for multi-ligand workflows
+    std::vector<ParticleGroup> m_particleGroups;  // Named groups of particles with individual scaling
 };
 
 }  // namespace GridForcePlugin
