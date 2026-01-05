@@ -3,6 +3,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "GridData.h"
+#include "GridForceTypes.h"
 #include "openmm/OpenMMException.h"
 #include <fstream>
 #include <sstream>
@@ -17,14 +18,14 @@ GridData::GridData()
     : m_counts(3, 0), m_spacing(3, 0.0), m_origin(3, 0.0),
       m_vals(make_shared<vector<double>>()),
       m_derivatives(make_shared<vector<double>>()),
-      m_nyz(0), m_invPower(0.0) {
+      m_nyz(0), m_invPower(0.0), m_invPowerMode(InvPowerMode::NONE) {
 }
 
 GridData::GridData(int nx, int ny, int nz, double dx, double dy, double dz)
     : m_counts{nx, ny, nz}, m_spacing{dx, dy, dz}, m_origin(3, 0.0),
       m_vals(make_shared<vector<double>>()),
       m_derivatives(make_shared<vector<double>>()),
-      m_nyz(ny * nz), m_invPower(0.0) {
+      m_nyz(ny * nz), m_invPower(0.0), m_invPowerMode(InvPowerMode::NONE) {
 }
 
 void GridData::setValues(const vector<double>& vals) {
@@ -121,6 +122,12 @@ shared_ptr<GridData> GridData::loadFromFile(const string& filename) {
     uint32_t mode_value;
     file.read(reinterpret_cast<char*>(&mode_value), sizeof(uint32_t));
 
+    // Validate and set inv_power_mode
+    if (mode_value > 2) {
+        throw OpenMMException("GridData: Invalid inv_power_mode value in file: " + to_string(mode_value));
+    }
+    gridData->m_invPowerMode = static_cast<InvPowerMode>(mode_value);
+
     // Read reserved padding (20 bytes to reach 128-byte header)
     char reserved[20];
     file.read(reserved, 20);
@@ -216,12 +223,11 @@ void GridData::saveToFile(const string& filename) const {
     uint32_t flags = 0;
     file.write(reinterpret_cast<const char*>(&flags), sizeof(uint32_t));
 
-    // Write inv_power (GridData doesn't store this - write 0.0)
-    double inv_power = 0.0;
-    file.write(reinterpret_cast<const char*>(&inv_power), sizeof(double));
+    // Write inv_power
+    file.write(reinterpret_cast<const char*>(&m_invPower), sizeof(double));
 
-    // Write inv_power_mode (GridData doesn't store this - write 0 = NONE)
-    uint32_t mode_value = 0;
+    // Write inv_power_mode
+    uint32_t mode_value = static_cast<uint32_t>(m_invPowerMode);
     file.write(reinterpret_cast<const char*>(&mode_value), sizeof(uint32_t));
 
     // Pad to 128-byte header boundary (20 bytes padding needed)

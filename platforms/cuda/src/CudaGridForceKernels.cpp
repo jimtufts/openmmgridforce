@@ -2,11 +2,14 @@
  *                              OpenMMGridForce                               *
  * -------------------------------------------------------------------------- */
 
+#define DEBUG_GRIDFORCE 0
+
 #include "CudaGridForceKernels.h"
 #include "CudaGridForceKernelSources.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/NonbondedForce.h"
+#include <cuda_runtime.h>
 #include <map>
 #include <iostream>
 #include <iomanip>
@@ -133,6 +136,11 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     }
 
     // Auto-calculate scaling factors if enabled and not already provided
+#if DEBUG_GRIDFORCE
+    std::cout << "[DEBUG] Auto-calculate check: autoCalc=" << force.getAutoCalculateScalingFactors()
+              << ", scaling_factors.empty()=" << scaling_factors.empty()
+              << ", scaling_factors.size()=" << scaling_factors.size() << std::endl;
+#endif
     if (force.getAutoCalculateScalingFactors() && scaling_factors.empty()) {
         std::string scalingProperty = force.getScalingProperty();
         if (scalingProperty.empty()) {
@@ -163,6 +171,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             double charge, sigma, epsilon;
             nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
 
+#if DEBUG_GRIDFORCE
+            if (i < 3) {
+                std::cout << "[AUTO-CALC] Particle " << i << ": charge=" << charge
+                          << ", sigma=" << sigma << ", epsilon=" << epsilon << std::endl;
+            }
+#endif
+
             if (scalingProperty == "charge") {
                 // For electrostatic grids: use charge directly
                 scaling_factors[i] = charge;
@@ -177,10 +192,35 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 double rmin = std::pow(2.0, 1.0/6.0) * sigma;
                 scaling_factors[i] = std::sqrt(epsilon) * std::pow(rmin, 3.0);
             }
+
+#if DEBUG_GRIDFORCE
+            if (i < 3) {
+                std::cout << "[AUTO-CALC] scalingFactors[" << i << "] = " << scaling_factors[i]
+                          << " (property=" << scalingProperty << ")" << std::endl;
+            }
+#endif
         }
 
         // Copy calculated scaling factors back to GridForce object
         const_cast<GridForce&>(force).setScalingFactors(scaling_factors);
+
+        // IMPORTANT: If using particle groups, update their scaling factors too
+        // Particle groups may have been initialized with default 1.0 values,
+        // but we want to use the auto-calculated values instead
+        if (force.getNumParticleGroups() > 0) {
+            for (int i = 0; i < force.getNumParticleGroups(); i++) {
+                ParticleGroup& group = const_cast<ParticleGroup&>(force.getParticleGroup(i));
+                // Update the group's scaling factors with auto-calculated values
+                group.scalingFactors.clear();
+                for (int particleIdx : group.particleIndices) {
+                    if (particleIdx < scaling_factors.size()) {
+                        group.scalingFactors.push_back(scaling_factors[particleIdx]);
+                    } else {
+                        group.scalingFactors.push_back(0.0);
+                    }
+                }
+            }
+        }
     }
 
     // Handle particle groups for multi-ligand workflows
@@ -296,14 +336,19 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         if (!derivatives.empty()) {
             gridData->setDerivatives(derivatives);
         }
-        const_cast<GridForce&>(force).setGridData(gridData);
 
         // Set invPowerMode based on whether transformation was applied
         if (invPower > 0.0f) {
+            gridData->setInvPower(invPower);
+            gridData->setInvPowerMode(InvPowerMode::STORED);
             const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::STORED, invPower);
         } else {
+            gridData->setInvPower(0.0);
+            gridData->setInvPowerMode(InvPowerMode::NONE);
             const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::NONE, 0.0);
         }
+
+        const_cast<GridForce&>(force).setGridData(gridData);
     }
 
     if (spacing.size() != 3 || counts.size() != 3) {
@@ -484,17 +529,55 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         for (int i = 0; i < numParticleGroups; i++) {
             const ParticleGroup& group = force.getParticleGroup(i);
 
+#if DEBUG_GRIDFORCE
+            std::cout << "[DEBUG] Processing group " << i << ": name=" << group.name
+                      << ", particleIndices.size()=" << group.particleIndices.size()
+                      << ", scalingFactors.size()=" << group.scalingFactors.size() << std::endl;
+            if (!group.scalingFactors.empty() && group.scalingFactors.size() <= 5) {
+                std::cout << "[DEBUG] Group scaling factors: ";
+                for (auto sf : group.scalingFactors) {
+                    std::cout << sf << " ";
+                }
+                std::cout << std::endl;
+            }
+#endif
+
             // Append this group's data to flattened arrays
             flattenedParticleIndices.insert(flattenedParticleIndices.end(),
                                            group.particleIndices.begin(),
                                            group.particleIndices.end());
 
-            flattenedScalingFactors.insert(flattenedScalingFactors.end(),
-                                          group.scalingFactors.begin(),
-                                          group.scalingFactors.end());
+            // If group has explicit scaling factors, use them
+            // Otherwise use auto-calculated values from scaling_factors array
+            if (!group.scalingFactors.empty()) {
+                flattenedScalingFactors.insert(flattenedScalingFactors.end(),
+                                              group.scalingFactors.begin(),
+                                              group.scalingFactors.end());
+            } else {
+                // Use auto-calculated scaling factors for this group's particles
+                for (int particleIdx : group.particleIndices) {
+                    if (particleIdx < scaling_factors.size()) {
+                        flattenedScalingFactors.push_back(scaling_factors[particleIdx]);
+                    } else {
+                        flattenedScalingFactors.push_back(0.0f);
+                    }
+                }
+            }
         }
 
         totalGroupParticles = flattenedParticleIndices.size();
+
+#if DEBUG_GRIDFORCE
+        std::cout << "[DEBUG] Flattened scaling factors for particle groups:" << std::endl;
+        std::cout << "  Total particles: " << flattenedScalingFactors.size() << std::endl;
+        if (flattenedScalingFactors.size() > 0) {
+            std::cout << "  First 5: ";
+            for (size_t i = 0; i < std::min((size_t)5, flattenedScalingFactors.size()); i++) {
+                std::cout << flattenedScalingFactors[i] << " ";
+            }
+            std::cout << std::endl;
+        }
+#endif
 
         // Upload flattened arrays to GPU
         allGroupParticleIndices.initialize<int>(cu, flattenedParticleIndices.size(), "allGroupParticleIndices");
@@ -512,6 +595,33 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     kernel = cu.getKernel(module, "computeGridForce");
 
     hasInitializedKernel = true;
+
+#if DEBUG_GRIDFORCE
+    std::cout << "[GRIDFORCE DEBUG] ========== INITIALIZATION ==========" << std::endl;
+    std::cout << "[CONFIG] invPower=" << invPower << ", invPowerMode=" << invPowerMode
+              << " (0=NONE, 1=RUNTIME, 2=STORED)" << std::endl;
+    std::cout << "[CONFIG] interpolationMethod=" << interpolationMethod
+              << " (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)" << std::endl;
+    std::cout << "[CONFIG] Grid counts: [" << counts[0] << ", " << counts[1] << ", " << counts[2] << "]" << std::endl;
+    std::cout << "[CONFIG] Grid spacing: [" << spacing[0] << ", " << spacing[1] << ", " << spacing[2] << "]" << std::endl;
+    std::cout << "[CONFIG] Grid origin: [" << originX << ", " << originY << ", " << originZ << "]" << std::endl;
+    std::cout << "[CONFIG] numAtoms=" << numAtoms << std::endl;
+    std::cout << "[CONFIG] numParticleGroups=" << numParticleGroups << std::endl;
+    std::cout << "[CONFIG] totalGroupParticles=" << totalGroupParticles << std::endl;
+    std::cout << "[CONFIG] scalingProperty=" << force.getScalingProperty() << std::endl;
+    std::cout << "[CONFIG] autoCalculateScalingFactors=" << force.getAutoCalculateScalingFactors() << std::endl;
+    // Print first few scaling factors
+    std::cout << "[CONFIG] scaling_factors.size()=" << scaling_factors.size() << std::endl;
+    if (scaling_factors.size() > 0) {
+        std::cout << "[CONFIG] scalingFactors[0]=" << scaling_factors[0] << std::endl;
+        if (scaling_factors.size() > 1) {
+            std::cout << "[CONFIG] scalingFactors[1]=" << scaling_factors[1] << std::endl;
+        }
+        if (scaling_factors.size() > 2) {
+            std::cout << "[CONFIG] scalingFactors[2]=" << scaling_factors[2] << std::endl;
+        }
+    }
+#endif
 }
 
 double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces, bool includeEnergy) {
@@ -590,7 +700,17 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &numParticleGroups
     };
 
+#if DEBUG_GRIDFORCE
+    std::cout << "[GRIDFORCE DEBUG] ========== EXECUTE ==========" << std::endl;
+    std::cout << "[EXEC] Launching kernel with numAtoms=" << kernelNumAtoms << std::endl;
+    std::cout << "[EXEC] invPower=" << invPower << ", invPowerMode=" << invPowerMode << std::endl;
+#endif
+
     cu.executeKernel(kernel, args, kernelNumAtoms);
+
+#if DEBUG_GRIDFORCE
+    cudaDeviceSynchronize();  // Ensure kernel printf output is flushed
+#endif
 
     // Debug: Read force buffer AFTER kernel execution
     // std::vector<long long> forcesAfter(num_force_components);
@@ -706,6 +826,13 @@ void CudaCalcGridForceKernel::generateGrid(
     receptorCharges.upload(charges);
     receptorSigmas.upload(sigmas);
     receptorEpsilons.upload(epsilons);
+
+#if DEBUG_GRIDFORCE
+    std::cout << "[GRID GEN] First 3 receptor positions BEFORE upload:" << std::endl;
+    for (size_t i = 0; i < std::min((size_t)3, positions.size()); i++) {
+        std::cout << "  " << i << ": (" << positions[i].x << ", " << positions[i].y << ", " << positions[i].z << ") nm" << std::endl;
+    }
+#endif
 
     // Prepare grid counts and spacing for GPU
     vector<int> gridCountsVec = {counts[0], counts[1], counts[2]};
@@ -835,6 +962,29 @@ void CudaCalcGridForceKernel::generateGrid(
         // Use original finite difference method
         CUfunction kernel = cu.getKernel(module, "generateGridKernel");
         float gridCapF = gridCap;
+
+#if DEBUG_GRIDFORCE
+        std::cout << "[GRID GEN] Using finite difference method" << std::endl;
+        std::cout << "[GRID GEN] gridType=" << gridTypeInt << " (0=charge, 1=ljr, 2=lja)" << std::endl;
+        std::cout << "[GRID GEN] gridCap=" << gridCapF << " kJ/mol" << std::endl;
+        std::cout << "[GRID GEN] invPower=" << invPower << std::endl;
+        std::cout << "[GRID GEN] numReceptorAtoms=" << numReceptorAtoms << std::endl;
+
+        // Download and print first few receptor parameters to verify
+        std::vector<float> charges_host(std::min(3, numReceptorAtoms));
+        std::vector<float> sigmas_host(std::min(3, numReceptorAtoms));
+        std::vector<float> epsilons_host(std::min(3, numReceptorAtoms));
+        cuMemcpyDtoH(charges_host.data(), receptorCharges.getDevicePointer(), charges_host.size() * sizeof(float));
+        cuMemcpyDtoH(sigmas_host.data(), receptorSigmas.getDevicePointer(), sigmas_host.size() * sizeof(float));
+        cuMemcpyDtoH(epsilons_host.data(), receptorEpsilons.getDevicePointer(), epsilons_host.size() * sizeof(float));
+
+        std::cout << "[GRID GEN] First 3 receptor atoms on GPU:" << std::endl;
+        for (size_t i = 0; i < charges_host.size(); i++) {
+            std::cout << "  " << i << ": q=" << charges_host[i]
+                      << ", sigma=" << sigmas_host[i]
+                      << ", eps=" << epsilons_host[i] << std::endl;
+        }
+#endif
 
         void* args[] = {
             &gridVals.getDevicePointer(),

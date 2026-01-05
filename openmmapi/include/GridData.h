@@ -2,6 +2,7 @@
 #define OPENMM_GRIDDATA_H_
 
 #include "openmm/Vec3.h"
+#include "GridForceTypes.h"
 #include "internal/windowsExportGridForce.h"
 #include <vector>
 #include <string>
@@ -115,6 +116,9 @@ public:
     double getInvPower() const { return m_invPower; }
     void setInvPower(double invPower) { m_invPower = invPower; }
 
+    InvPowerMode getInvPowerMode() const { return m_invPowerMode; }
+    void setInvPowerMode(InvPowerMode mode) { m_invPowerMode = mode; }
+
     // Internal data access (for GridForce compatibility)
     std::shared_ptr<std::vector<double>> getValuesPtr() const { return m_vals; }
     std::shared_ptr<std::vector<double>> getDerivativesPtr() const { return m_derivatives; }
@@ -141,8 +145,9 @@ private:
 
     int m_nyz;  // Cached: ny * nz for index calculation
 
-    std::string m_gridType;  // e.g., "charge", "ljr", "lja"
-    double m_invPower;       // Inverse power for transformations
+    std::string m_gridType;     // e.g., "charge", "ljr", "lja"
+    double m_invPower;          // Inverse power for transformations
+    InvPowerMode m_invPowerMode; // Transformation mode (NONE, RUNTIME, STORED)
 };
 
 } // namespace GridForcePlugin
