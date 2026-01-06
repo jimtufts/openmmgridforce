@@ -593,6 +593,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     map<string, string> defines;
     CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
     kernel = cu.getKernel(module, "computeGridForce");
+    addGroupEnergiesKernel = cu.getKernel(module, "addGroupEnergiesToTotal");
 
     hasInitializedKernel = true;
 
@@ -625,6 +626,12 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 }
 
 double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces, bool includeEnergy) {
+    // Diagnostic: Count kernel calls per instance
+    static std::map<void*, int> callCounts;
+    callCounts[this]++;
+    printf("[FORCE DEBUG] execute() called: this=%p, call #%d, includeForces=%d, includeEnergy=%d\n",
+           (void*)this, callCounts[this], includeForces, includeEnergy);
+
     if (!hasInitializedKernel) {
         throw OpenMMException("CudaCalcGridForceKernel: Kernel not initialized before execution");
     }
@@ -706,11 +713,28 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     std::cout << "[EXEC] invPower=" << invPower << ", invPowerMode=" << invPowerMode << std::endl;
 #endif
 
+    printf("[FORCE DEBUG] Launching computeGridForce kernel (this=%p)\n", (void*)this);
     cu.executeKernel(kernel, args, kernelNumAtoms);
 
 #if DEBUG_GRIDFORCE
     cudaDeviceSynchronize();  // Ensure kernel printf output is flushed
 #endif
+
+    // When particle groups are used, the kernel accumulates energy in groupEnergyBuffer
+    // but the Context needs the total in the main energyBuffer. Add group energies to total.
+    if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
+        // Download and save group energies (buffer will be zeroed on next execute)
+        lastGroupEnergies.resize(numParticleGroups);
+        groupEnergyBuffer.download(lastGroupEnergies);
+
+        // Use a kernel to sum group energies and add to main energy buffer
+        void* sumArgs[] = {
+            &energyPtr,
+            &groupEnergyBufferPtr,
+            &numParticleGroups
+        };
+        cu.executeKernel(addGroupEnergiesKernel, sumArgs, 1);
+    }
 
     // Debug: Read force buffer AFTER kernel execution
     // std::vector<long long> forcesAfter(num_force_components);
@@ -730,6 +754,8 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     // std::cout << "  Delta (this kernel):        = (" << delta_fx << ", "
     //           << delta_fy << ", " << delta_fz << ")" << std::endl;
 
+    // Energy is accumulated in the energy buffer by the kernel
+    // OpenMM Context will read from the energy buffer
     return 0.0;
 }
 
@@ -748,16 +774,14 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
 vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {
     vector<double> groupEnergies;
 
-    if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
-        // Download group energies from GPU
-        vector<float> groupEnergiesFloat(numParticleGroups);
-        groupEnergyBuffer.download(groupEnergiesFloat);
-
-        // Convert to double
+    // Return the saved group energies from the last execute()
+    // Don't download from GPU buffer because it may have been zeroed
+    if (numParticleGroups > 0 && !lastGroupEnergies.empty()) {
         groupEnergies.resize(numParticleGroups);
         for (int i = 0; i < numParticleGroups; i++) {
-            groupEnergies[i] = (double)groupEnergiesFloat[i];
+            groupEnergies[i] = (double)lastGroupEnergies[i];
         }
+        printf("[getParticleGroupEnergies] returning saved energy[0] = %f\n", groupEnergies[0]);
     }
 
     return groupEnergies;

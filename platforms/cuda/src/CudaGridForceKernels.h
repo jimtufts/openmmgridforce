@@ -77,6 +77,7 @@ private:
     std::shared_ptr<OpenMM::CudaArray> g_vals_shared;        // Shared grid values (when cached)
     std::shared_ptr<OpenMM::CudaArray> g_derivatives_shared; // Shared derivatives (when cached)
     CUfunction kernel;
+    CUfunction addGroupEnergiesKernel;  // Kernel to sum group energies into main buffer
     std::vector<int> counts;
     std::vector<double> spacing;
     std::vector<int> ligandAtoms;  // Particle indices for ligand atoms
@@ -90,7 +91,8 @@ private:
 
     // Per-group energy tracking
     OpenMM::CudaArray particleToGroupMap;       // Map from particle index to group index
-    OpenMM::CudaArray groupEnergyBuffer;        // Per-group energy accumulation
+    OpenMM::CudaArray groupEnergyBuffer;        // Per-group energy accumulation (gets zeroed each execute)
+    std::vector<float> lastGroupEnergies;        // Persistent copy of last group energies
     int numParticleGroups;                       // Number of particle groups
 };
 

@@ -120,6 +120,17 @@ extern "C" __global__ void computeGridForce(
                         int gz = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
                         int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
                         float val = gridValues[gridIdx];
+
+                        // Apply RUNTIME inv_power transformation before interpolation
+                        if (invPowerMode == 1) {  // RUNTIME mode
+                            float invN = 1.0f / invPower;
+                            if (fabsf(val) >= 1e-10f) {
+                                val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                            } else {
+                                val = 0.0f;
+                            }
+                        }
+
                         float weight = bx[i] * by[j] * bz[k];
                         interpolated += weight * val;
                         dvdx += dbx[i] * by[j] * bz[k] * val;
@@ -541,14 +552,36 @@ extern "C" __global__ void computeGridForce(
     atomicAdd(&forceBuffers[particleIndex + paddedNumAtoms], fy_fixed);
     atomicAdd(&forceBuffers[particleIndex + 2 * paddedNumAtoms], fz_fixed);
 
-    // Accumulate energy (total and per-group if enabled)
-    atomicAdd(&energyBuffer[0], threadEnergy);
-
-    // Per-group energy tracking
+    // Accumulate energy - EITHER to group OR to total, not both
     if (particleToGroupMap != nullptr && groupEnergyBuffer != nullptr) {
         int groupIndex = particleToGroupMap[particleIndex];
         if (groupIndex >= 0 && groupIndex < numGroups) {
+            // Particle in a group - only add to group energy
             atomicAdd(&groupEnergyBuffer[groupIndex], threadEnergy);
+        } else {
+            // Particle not in any group - add to total
+            atomicAdd(&energyBuffer[0], threadEnergy);
         }
+    } else {
+        // No group tracking - add to total
+        atomicAdd(&energyBuffer[0], threadEnergy);
+    }
+}
+
+/**
+ * Add group energies to main energy buffer.
+ * Simple kernel to sum per-group energies and add to total.
+ */
+extern "C" __global__ void addGroupEnergiesToTotal(
+    float* __restrict__ energyBuffer,
+    const float* __restrict__ groupEnergyBuffer,
+    const int numGroups)
+{
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        float total = 0.0f;
+        for (int i = 0; i < numGroups; i++) {
+            total += groupEnergyBuffer[i];
+        }
+        atomicAdd(&energyBuffer[0], total);
     }
 }

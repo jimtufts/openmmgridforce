@@ -107,15 +107,18 @@ extern "C" __global__ void computeIsolatedNonbonded(
     // Total energy
     real pairEnergy = coulombEnergy + ljEnergy;
 
-    // Compute force magnitude: dE/dr
-    real coulombForce = coulombEnergy * invR;
-    real ljForce = 4.0f * epsilon * (12.0f * sig_r12 - 6.0f * sig_r6) * invR;
-    real forceMag = (coulombForce + ljForce) * invR;  // multiply by 1/r for direction
+    // Compute force: F = -dE/dr
+    // For LJ: dE/dr = 4ε(-12σ¹²/r¹³ + 6σ⁶/r⁷), so -dE/dr = 4ε(12σ¹²/r¹³ - 6σ⁶/r⁷)
+    // For Coulomb: dE/dr = -qq/(4πε₀r²), so -dE/dr = qq/(4πε₀r²)
+    real coulombForce = coulombEnergy * invR;  // qq/(4πε₀r²)
+    real ljForce = 4.0f * epsilon * (12.0f * sig_r12 - 6.0f * sig_r6) * invR;  // 4ε(12σ¹²/r¹³ - 6σ⁶/r⁷)
+    real forceMagnitude = coulombForce + ljForce;  // -dE/dr along separation vector
 
-    // Force components
-    real fx = forceMag * dx;
-    real fy = forceMag * dy;
-    real fz = forceMag * dz;
+    // Force components: F_vec = forceMagnitude * (r_vec/|r|)
+    // where r_vec = posI - posJ points from J toward I
+    real fx = forceMagnitude * dx * invR;
+    real fy = forceMagnitude * dy * invR;
+    real fz = forceMagnitude * dz * invR;
 
     // Accumulate forces (Newton's third law: equal and opposite)
     // Use OpenMM's force buffer format (fixed-point atomicAdd)
