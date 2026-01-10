@@ -25,21 +25,24 @@ __device__ inline void computeLJRadialDerivatives(
 ) {
     float arg1 = 4.0f * epsilon;
     float arg2 = sigma * sigma;
-    float temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);
+    float temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);  // (σ/r)^6
 
+    // Need r for correct odd-power denominators
+    float r = sqrtf(r2);
+    float r3 = r2 * r;
     float r4 = r2 * r2;
+    float r5 = r4 * r;
     float r6 = r4 * r2;
-    float r8 = r6 * r2;
-    float r10 = r8 * r2;
-    float r12 = r10 * r2;
 
+    // Coefficients derived from d^n/dr^n of r^(-12) and r^(-6) terms:
+    // d^n/dr^n(r^(-m)) = (-1)^n * m*(m+1)*...*(m+n-1) * r^(-m-n)
     derivs[0] = arg1 * (temp3 * temp3 - temp3) - shift;
-    derivs[1] = -6.0f * arg1 * (2.0f * temp3 * temp3 - temp3) / r2;
-    derivs[2] = 24.0f * arg1 * (7.0f * temp3 * temp3 - 2.0f * temp3) / r4;
-    derivs[3] = -96.0f * arg1 * (28.0f * temp3 * temp3 - 5.0f * temp3) / r6;
-    derivs[4] = 1152.0f * arg1 * (42.0f * temp3 * temp3 - 5.0f * temp3) / r8;
-    derivs[5] = -80640.0f * arg1 * (12.0f * temp3 * temp3 - temp3) / r10;
-    derivs[6] = 645120.0f * arg1 * (33.0f * temp3 * temp3 - 2.0f * temp3) / r12;
+    derivs[1] = arg1 * (-12.0f * temp3 * temp3 + 6.0f * temp3) / r;
+    derivs[2] = arg1 * (156.0f * temp3 * temp3 - 42.0f * temp3) / r2;
+    derivs[3] = arg1 * (-2184.0f * temp3 * temp3 + 336.0f * temp3) / r3;
+    derivs[4] = arg1 * (32760.0f * temp3 * temp3 - 3024.0f * temp3) / r4;
+    derivs[5] = arg1 * (-524160.0f * temp3 * temp3 + 30240.0f * temp3) / r5;
+    derivs[6] = arg1 * (8910720.0f * temp3 * temp3 - 332640.0f * temp3) / r6;
 }
 
 __device__ inline void computeLJRepulsionRadialDerivatives(
@@ -54,19 +57,22 @@ __device__ inline void computeLJRepulsionRadialDerivatives(
     float temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);
     float temp3_rc = (arg2 / cutoff2) * (arg2 / cutoff2) * (arg2 / cutoff2);
 
+    // Need r for correct odd-power denominators
+    float r = sqrtf(r2);
+    float r3 = r2 * r;
     float r4 = r2 * r2;
+    float r5 = r4 * r;
     float r6 = r4 * r2;
-    float r8 = r6 * r2;
-    float r10 = r8 * r2;
-    float r12 = r10 * r2;
 
+    // U = 4ε(σ/r)¹² with shift at cutoff
+    // Coefficients: d^n/dr^n(r^(-12)) = (-1)^n × 12×13×...×(12+n-1) × r^(-12-n)
     derivs[0] = arg1 * (temp3 * temp3 - temp3_rc * temp3_rc);
-    derivs[1] = -12.0f * arg1 * temp3 * temp3 / r2;
-    derivs[2] = 168.0f * arg1 * temp3 * temp3 / r4;
-    derivs[3] = -2688.0f * arg1 * temp3 * temp3 / r6;
-    derivs[4] = 48384.0f * arg1 * temp3 * temp3 / r8;
-    derivs[5] = -967680.0f * arg1 * temp3 * temp3 / r10;
-    derivs[6] = 21288960.0f * arg1 * temp3 * temp3 / r12;
+    derivs[1] = -12.0f * arg1 * temp3 * temp3 / r;
+    derivs[2] = 156.0f * arg1 * temp3 * temp3 / r2;
+    derivs[3] = -2184.0f * arg1 * temp3 * temp3 / r3;
+    derivs[4] = 32760.0f * arg1 * temp3 * temp3 / r4;
+    derivs[5] = -524160.0f * arg1 * temp3 * temp3 / r5;
+    derivs[6] = 8910720.0f * arg1 * temp3 * temp3 / r6;
 }
 
 __device__ inline void computeLJAttractionRadialDerivatives(
@@ -81,19 +87,22 @@ __device__ inline void computeLJAttractionRadialDerivatives(
     float temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);
     float temp3_rc = (arg2 / cutoff2) * (arg2 / cutoff2) * (arg2 / cutoff2);
 
+    // Need r for correct odd-power denominators
+    float r = sqrtf(r2);
+    float r3 = r2 * r;
     float r4 = r2 * r2;
+    float r5 = r4 * r;
     float r6 = r4 * r2;
-    float r8 = r6 * r2;
-    float r10 = r8 * r2;
-    float r12 = r10 * r2;
 
+    // U = 4ε(σ/r)⁶ with shift at cutoff (note: positive, not standard -4ε form)
+    // Coefficients: d^n/dr^n(r^(-6)) = (-1)^n × 6×7×...×(6+n-1) × r^(-6-n)
     derivs[0] = arg1 * (temp3 - temp3_rc);
-    derivs[1] = -6.0f * arg1 * temp3 / r2;
-    derivs[2] = 48.0f * arg1 * temp3 / r4;
-    derivs[3] = -480.0f * arg1 * temp3 / r6;
-    derivs[4] = 5760.0f * arg1 * temp3 / r8;
-    derivs[5] = -80640.0f * arg1 * temp3 / r10;
-    derivs[6] = 1290240.0f * arg1 * temp3 / r12;
+    derivs[1] = -6.0f * arg1 * temp3 / r;
+    derivs[2] = 42.0f * arg1 * temp3 / r2;
+    derivs[3] = -336.0f * arg1 * temp3 / r3;
+    derivs[4] = 3024.0f * arg1 * temp3 / r4;
+    derivs[5] = -30240.0f * arg1 * temp3 / r5;
+    derivs[6] = 332640.0f * arg1 * temp3 / r6;
 }
 
 /**
@@ -280,21 +289,25 @@ __device__ inline void applyCappingToDerivatives(float* derivs, float U_max) {
 }
 
 /**
- * Accumulate one atom's contribution to the 27 Cartesian derivatives using RASPA3 tensor formulas.
+ * Accumulate one atom's contribution to the 27 Cartesian derivatives using tensor formulas.
  *
- * This implements the exact tensor chain rule formulas from RASPA3's framework_molecule_grid.cpp
- * to convert radial LJ derivatives to Cartesian spatial derivatives.
+ * This implements the exact tensor chain rule formulas to convert radial derivatives
+ * to Cartesian spatial derivatives for radially symmetric functions U(r).
+ *
+ * For a radially symmetric function U(r) where r = |x|, the key insight is that
+ * derivatives are expressed in terms of direction cosines n_i = x_i/r and
+ * auxiliary coefficients involving radial derivatives and inverse powers of r.
  *
  * Input:
  *   dr[3]: displacement vector (grid_point - atom_position) components [dx, dy, dz]
  *   radial_derivs[7]: radial derivatives [U, dU/dr, d²U/dr², d³U/dr³, d⁴U/dr⁴, d⁵U/dr⁵, d⁶U/dr⁶]
  *
  * Output (accumulated):
- *   cartesian_derivs[27]: the 27 Cartesian derivatives in RASPA3 storage order
+ *   cartesian_derivs[27]: the 27 Cartesian derivatives
  *     [0]      = U
  *     [1-3]    = ∂U/∂x, ∂U/∂y, ∂U/∂z
  *     [4-9]    = ∂²U/∂x², ∂²U/∂x∂y, ∂²U/∂x∂z, ∂²U/∂y², ∂²U/∂y∂z, ∂²U/∂z²
- *     [10-16]  = 7 third derivatives (∂³U/∂x²∂y, ∂³U/∂x²∂z, ∂³U/∂x∂y², ∂³U/∂x∂y∂z, ∂³U/∂y²∂z, ∂³U/∂x∂z², ∂³U/∂y∂z²)
+ *     [10-16]  = 7 third derivatives
  *     [17-22]  = 6 fourth derivatives
  *     [23-25]  = 3 fifth derivatives
  *     [26]     = 1 sixth derivative (∂⁶U/∂x²∂y²∂z²)
@@ -318,72 +331,88 @@ __device__ inline void accumulateCartesianDerivatives(
     float r2 = dx*dx + dy*dy + dz*dz;
     float r = sqrtf(r2);
     float invr = 1.0f / r;
+    float invr2 = invr * invr;
+    float invr3 = invr2 * invr;
+    float invr4 = invr2 * invr2;
+    float invr5 = invr4 * invr;
+
+    // Direction cosines
+    float nx = dx * invr;
+    float ny = dy * invr;
+    float nz = dz * invr;
+    float nx2 = nx * nx;
+    float ny2 = ny * ny;
+    float nz2 = nz * nz;
+
+    // Auxiliary coefficients for different orders
+    // These combine radial derivatives with 1/r factors for proper tensor conversion
+    // Order 2: ∂²U/∂xi∂xj = A2*ni*nj + (dU/r)*δij
+    float A2 = d2U - dU * invr;
+
+    // Order 3: ∂³U/∂xi∂xj∂xk = A3*ni*nj*nk + B3*(sum of delta-n terms)
+    float A3 = d3U - 3.0f * d2U * invr + 3.0f * dU * invr2;
+    float B3 = d2U * invr - dU * invr2;
+
+    // Order 4: ∂⁴U/∂xi∂xj∂xk∂xl = A4*ni*nj*nk*nl + B4*(delta-nn terms) + C4*(double-delta terms)
+    float A4 = d4U - 6.0f * d3U * invr + 15.0f * d2U * invr2 - 15.0f * dU * invr3;
+    float B4 = d3U * invr - 3.0f * d2U * invr2 + 3.0f * dU * invr3;
+    float C4 = d2U * invr2 - dU * invr3;
+
+    // Order 5
+    float A5 = d5U - 10.0f * d4U * invr + 45.0f * d3U * invr2 - 105.0f * d2U * invr3 + 105.0f * dU * invr4;
+    float B5 = d4U * invr - 6.0f * d3U * invr2 + 15.0f * d2U * invr3 - 15.0f * dU * invr4;
+    float C5 = d3U * invr2 - 3.0f * d2U * invr3 + 3.0f * dU * invr4;
+
+    // Order 6
+    float A6 = d6U - 15.0f * d5U * invr + 105.0f * d4U * invr2 - 420.0f * d3U * invr3 + 945.0f * d2U * invr4 - 945.0f * dU * invr5;
+    float B6 = d5U * invr - 10.0f * d4U * invr2 + 45.0f * d3U * invr3 - 105.0f * d2U * invr4 + 105.0f * dU * invr5;
+    float C6 = d4U * invr2 - 6.0f * d3U * invr3 + 15.0f * d2U * invr4 - 15.0f * dU * invr5;
+    float D6 = d3U * invr3 - 3.0f * d2U * invr4 + 3.0f * dU * invr5;
 
     // Index 0: Energy
     cartesian_derivs[0] += U;
 
     // Indices 1-3: First derivatives
-    // Formula: ∂U/∂x_i = (dU/dr) * (dr[i] / r)
-    cartesian_derivs[1] += (dx * invr) * dU;  // ∂U/∂x
-    cartesian_derivs[2] += (dy * invr) * dU;  // ∂U/∂y
-    cartesian_derivs[3] += (dz * invr) * dU;  // ∂U/∂z
+    // Formula: ∂U/∂xi = dU * ni
+    cartesian_derivs[1] += dU * nx;  // ∂U/∂x
+    cartesian_derivs[2] += dU * ny;  // ∂U/∂y
+    cartesian_derivs[3] += dU * nz;  // ∂U/∂z
 
     // Indices 4-9: Second derivatives (6 unique)
-    // Formula: ∂²U/∂x_i∂x_j = (d²U/dr²) * dr[i] * dr[j] + δ_ij * (dU/dr)
-    cartesian_derivs[4] += d2U * dx * dx + dU;      // ∂²U/∂x²
-    cartesian_derivs[5] += d2U * dx * dy;           // ∂²U/∂x∂y
-    cartesian_derivs[6] += d2U * dx * dz;           // ∂²U/∂x∂z
-    cartesian_derivs[7] += d2U * dy * dy + dU;      // ∂²U/∂y²
-    cartesian_derivs[8] += d2U * dy * dz;           // ∂²U/∂y∂z
-    cartesian_derivs[9] += d2U * dz * dz + dU;      // ∂²U/∂z²
+    // Formula: ∂²U/∂xi∂xj = A2*ni*nj + (dU/r)*δij
+    cartesian_derivs[4] += A2 * nx2 + dU * invr;  // ∂²U/∂x²
+    cartesian_derivs[5] += A2 * nx * ny;          // ∂²U/∂x∂y
+    cartesian_derivs[6] += A2 * nx * nz;          // ∂²U/∂x∂z
+    cartesian_derivs[7] += A2 * ny2 + dU * invr;  // ∂²U/∂y²
+    cartesian_derivs[8] += A2 * ny * nz;          // ∂²U/∂y∂z
+    cartesian_derivs[9] += A2 * nz2 + dU * invr;  // ∂²U/∂z²
 
     // Indices 10-16: Third derivatives (7 unique)
-    // Formula: ∂³U/∂x_i∂x_j∂x_k = (d³U/dr³) * dr[i] * dr[j] * dr[k]
-    //                            + δ_jk * (d²U/dr²) * dr[i]
-    //                            + δ_ik * (d²U/dr²) * dr[j]
-    //                            + δ_ij * (d²U/dr²) * dr[k]
-    cartesian_derivs[10] += d3U * dx * dx * dy + d2U * dy;              // ∂³U/∂x²∂y (i=0,j=0,k=1: δ_ij=1)
-    cartesian_derivs[11] += d3U * dx * dx * dz + d2U * dz;              // ∂³U/∂x²∂z (i=0,j=0,k=2: δ_ij=1)
-    cartesian_derivs[12] += d3U * dx * dy * dy + d2U * dx;              // ∂³U/∂x∂y² (i=0,j=1,k=1: δ_jk=1)
-    cartesian_derivs[13] += d3U * dx * dy * dz;                         // ∂³U/∂x∂y∂z (i=0,j=1,k=2: no deltas)
-    cartesian_derivs[14] += d3U * dy * dy * dz + d2U * dz;              // ∂³U/∂y²∂z (i=1,j=1,k=2: δ_ij=1)
-    cartesian_derivs[15] += d3U * dx * dz * dz + d2U * dx;              // ∂³U/∂x∂z² (i=0,j=2,k=2: δ_jk=1)
-    cartesian_derivs[16] += d3U * dy * dz * dz + d2U * dy;              // ∂³U/∂y∂z² (i=1,j=2,k=2: δ_jk=1)
+    // Formula: ∂³U/∂xi∂xj∂xk = A3*ni*nj*nk + B3*(δij*nk + δik*nj + δjk*ni)
+    cartesian_derivs[10] += A3 * nx2 * ny + B3 * ny;       // ∂³U/∂x²∂y (δij=1)
+    cartesian_derivs[11] += A3 * nx2 * nz + B3 * nz;       // ∂³U/∂x²∂z (δij=1)
+    cartesian_derivs[12] += A3 * nx * ny2 + B3 * nx;       // ∂³U/∂x∂y² (δjk=1)
+    cartesian_derivs[13] += A3 * nx * ny * nz;             // ∂³U/∂x∂y∂z (no deltas)
+    cartesian_derivs[14] += A3 * ny2 * nz + B3 * nz;       // ∂³U/∂y²∂z (δij=1)
+    cartesian_derivs[15] += A3 * nx * nz2 + B3 * nx;       // ∂³U/∂x∂z² (δjk=1)
+    cartesian_derivs[16] += A3 * ny * nz2 + B3 * ny;       // ∂³U/∂y∂z² (δjk=1)
 
     // Indices 17-22: Fourth derivatives (6 unique)
-    // Formula: ∂⁴U/∂x_i∂x_j∂x_k∂x_l = (d⁴U/dr⁴) * dr[i] * dr[j] * dr[k] * dr[l]
-    //                                + δ_ij * (d³U/dr³) * dr[k] * dr[l]
-    //                                + δ_ik * (d³U/dr³) * dr[j] * dr[l]
-    //                                + δ_il * (d³U/dr³) * dr[j] * dr[k]
-    //                                + δ_jk * (d³U/dr³) * dr[i] * dr[l]
-    //                                + δ_jl * (d³U/dr³) * dr[i] * dr[k]
-    //                                + δ_kl * (d³U/dr³) * dr[i] * dr[j]
-    //                                + δ_ij*δ_kl * (d²U/dr²)
-    //                                + δ_il*δ_jk * (d²U/dr²)
-    //                                + δ_ik*δ_jl * (d²U/dr²)
-    cartesian_derivs[17] += d4U * dx * dx * dy * dy + d3U * dy * dy + d3U * dx * dx + d2U;  // ∂⁴U/∂x²∂y² (0,0,1,1)
-    cartesian_derivs[18] += d4U * dx * dx * dz * dz + d3U * dz * dz + d3U * dx * dx + d2U;  // ∂⁴U/∂x²∂z² (0,0,2,2)
-    cartesian_derivs[19] += d4U * dy * dy * dz * dz + d3U * dz * dz + d3U * dy * dy + d2U;  // ∂⁴U/∂y²∂z² (1,1,2,2)
-    cartesian_derivs[20] += d4U * dx * dx * dy * dz + d3U * dy * dz;                        // ∂⁴U/∂x²∂y∂z (0,0,1,2)
-    cartesian_derivs[21] += d4U * dx * dy * dy * dz + d3U * dx * dz;                        // ∂⁴U/∂x∂y²∂z (0,1,1,2)
-    cartesian_derivs[22] += d4U * dx * dy * dz * dz + d3U * dx * dy;                        // ∂⁴U/∂x∂y∂z² (0,1,2,2)
+    // Formula: ∂⁴U/∂xi∂xj∂xk∂xl = A4*ni*nj*nk*nl + B4*(delta-nn sums) + C4*(double-delta)
+    cartesian_derivs[17] += A4 * nx2 * ny2 + B4 * (nx2 + ny2) + C4;  // ∂⁴U/∂x²∂y²
+    cartesian_derivs[18] += A4 * nx2 * nz2 + B4 * (nx2 + nz2) + C4;  // ∂⁴U/∂x²∂z²
+    cartesian_derivs[19] += A4 * ny2 * nz2 + B4 * (ny2 + nz2) + C4;  // ∂⁴U/∂y²∂z²
+    cartesian_derivs[20] += A4 * nx2 * ny * nz + B4 * ny * nz;       // ∂⁴U/∂x²∂y∂z
+    cartesian_derivs[21] += A4 * nx * ny2 * nz + B4 * nx * nz;       // ∂⁴U/∂x∂y²∂z
+    cartesian_derivs[22] += A4 * nx * ny * nz2 + B4 * nx * ny;       // ∂⁴U/∂x∂y∂z²
 
     // Indices 23-25: Fifth derivatives (3 unique)
-    // Formula follows similar pattern with 5th order main term + 4th order single-delta terms + 3rd order double-delta terms
-    cartesian_derivs[23] += d5U * dx * dx * dy * dy * dz + d4U * dy * dy * dz + d4U * dx * dx * dz + d3U * dz;  // ∂⁵U/∂x²∂y²∂z (0,0,1,1,2)
-    cartesian_derivs[24] += d5U * dx * dx * dy * dz * dz + d4U * dy * dz * dz + d4U * dx * dx * dy + d3U * dy;  // ∂⁵U/∂x²∂y∂z² (0,0,1,2,2)
-    cartesian_derivs[25] += d5U * dx * dy * dy * dz * dz + d4U * dx * dz * dz + d4U * dx * dy * dy + d3U * dx;  // ∂⁵U/∂x∂y²∂z² (0,1,1,2,2)
+    cartesian_derivs[23] += A5 * nx2 * ny2 * nz + B5 * ((nx2 + ny2) * nz) + C5 * nz;  // ∂⁵U/∂x²∂y²∂z
+    cartesian_derivs[24] += A5 * nx2 * ny * nz2 + B5 * (ny * nz2 + nx2 * ny) + C5 * ny;  // ∂⁵U/∂x²∂y∂z²
+    cartesian_derivs[25] += A5 * nx * ny2 * nz2 + B5 * (nx * nz2 + nx * ny2) + C5 * nx;  // ∂⁵U/∂x∂y²∂z²
 
     // Index 26: Sixth derivative (1 unique)
-    // Formula: ∂⁶U/∂x²∂y²∂z² with full tensor expansion
-    cartesian_derivs[26] += d6U * dx * dx * dy * dy * dz * dz
-                          + d5U * dy * dy * dz * dz
-                          + d5U * dx * dx * dz * dz
-                          + d5U * dx * dx * dy * dy
-                          + d4U * dz * dz
-                          + d4U * dy * dy
-                          + d4U * dx * dx
-                          + d3U;  // ∂⁶U/∂x²∂y²∂z² (0,0,1,1,2,2)
+    cartesian_derivs[26] += A6 * nx2 * ny2 * nz2 + B6 * (nx2 * ny2 + nx2 * nz2 + ny2 * nz2) + C6 * (nx2 + ny2 + nz2) + D6;  // ∂⁶U/∂x²∂y²∂z²
 }
 
 #endif  // OPENMM_GRIDFORCE_LJ_ANALYTICAL_DERIVATIVES_H_

@@ -3,7 +3,7 @@
  * Generates energy grids from receptor atoms using direct LJ/electrostatic calculations.
  */
 
-#include "include/TanhCappingGenerated.cuh"
+#include "include/TanhChainRule.cuh"
 #include "include/InvPowerChainRule.cuh"
 
 /**
@@ -112,7 +112,7 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
     // Apply exact tanh capping using Faà di Bruno formula
     // This properly computes all 27 derivatives of V = U_max * tanh(U/U_max)
     float capped_derivs[27];
-    applyTanhCapping(cartesian_derivs, gridCap, capped_derivs);
+    applyTanhChainRule(cartesian_derivs, gridCap, capped_derivs);
 
     // Copy capped values back
     for (int i = 0; i < 27; i++) {

@@ -110,52 +110,66 @@ __device__ inline void applyInvPowerChainRule(
                  + f4_3*(d2Udyy*d2Udzz + 2.0f*d2Udyz*d2Udyz)
                  + f4_4*U_derivs[19];  // ∂⁴U/∂y²∂z²
 
-    // ∂⁴V/∂x²∂y∂z (index 20)
+    // ∂⁴V/∂x²∂y∂z (index 20) - CORRECTED: includes 3rd*1st derivative terms
     V_derivs[20] = f4_1*dUdx*dUdx*dUdy*dUdz
-                 + f4_2*(dUdx*dUdx*d2Udyz + 2.0f*dUdx*dUdy*d2Udxz + 2.0f*dUdx*dUdz*d2Udxy + dUdy*dUdz*d2Udxx)
-                 + f4_3*(d2Udxx*d2Udyz + 2.0f*d2Udxy*d2Udxz)
+                 + f4_2*(d2Udxx*dUdy*dUdz + 2.0f*d2Udxy*dUdx*dUdz + 2.0f*d2Udxz*dUdx*dUdy + d2Udyz*dUdx*dUdx)
+                 + f4_3*(d2Udxx*d2Udyz + 2.0f*d2Udxy*d2Udxz + d3Uxxy*dUdz + d3Uxxz*dUdy + 2.0f*d3Uxyz*dUdx)
                  + f4_4*U_derivs[20];  // ∂⁴U/∂x²∂y∂z
 
-    // ∂⁴V/∂x∂y²∂z (index 21)
+    // ∂⁴V/∂x∂y²∂z (index 21) - CORRECTED: includes 3rd*1st derivative terms
     V_derivs[21] = f4_1*dUdx*dUdy*dUdy*dUdz
-                 + f4_2*(dUdy*dUdy*d2Udxz + 2.0f*dUdx*dUdy*d2Udyz + 2.0f*dUdy*dUdz*d2Udxy + dUdx*dUdz*d2Udyy)
-                 + f4_3*(d2Udyy*d2Udxz + 2.0f*d2Udxy*d2Udyz)
+                 + f4_2*(2.0f*d2Udxy*dUdy*dUdz + d2Udxz*dUdy*dUdy + d2Udyy*dUdx*dUdz + 2.0f*d2Udyz*dUdx*dUdy)
+                 + f4_3*(2.0f*d2Udxy*d2Udyz + d2Udxz*d2Udyy + d3Uxyy*dUdz + 2.0f*d3Uxyz*dUdy + d3Uyyz*dUdx)
                  + f4_4*U_derivs[21];  // ∂⁴U/∂x∂y²∂z
 
-    // ∂⁴V/∂x∂y∂z² (index 22)
+    // ∂⁴V/∂x∂y∂z² (index 22) - CORRECTED: includes 3rd*1st derivative terms
     V_derivs[22] = f4_1*dUdx*dUdy*dUdz*dUdz
-                 + f4_2*(dUdz*dUdz*d2Udxy + 2.0f*dUdx*dUdz*d2Udyz + 2.0f*dUdy*dUdz*d2Udxz + dUdx*dUdy*d2Udzz)
-                 + f4_3*(d2Udzz*d2Udxy + 2.0f*d2Udxz*d2Udyz)
+                 + f4_2*(d2Udxy*dUdz*dUdz + 2.0f*d2Udxz*dUdy*dUdz + 2.0f*d2Udyz*dUdx*dUdz + d2Udzz*dUdx*dUdy)
+                 + f4_3*(d2Udxy*d2Udzz + 2.0f*d2Udxz*d2Udyz + 2.0f*d3Uxyz*dUdz + d3Uxzz*dUdy + d3Uyzz*dUdx)
                  + f4_4*U_derivs[22];  // ∂⁴U/∂x∂y∂z²
 
-    // 23-25: Fifth derivatives
+    // 23-25: Fifth derivatives - CORRECTED: includes ALL five factor levels
     float f5_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * absU_pm5;
+    float f5_2 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
     float f5_3 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    float f5_4 = p * (p - 1.0f) * absU_pm2;
     float f5_5 = p * absU_pm1;
 
-    // ∂⁵V/∂x²∂y²∂z (index 23) - simplified formula
+    // ∂⁵V/∂x²∂y²∂z (index 23) - CORRECTED full formula
     V_derivs[23] = f5_1*dUdx*dUdx*dUdy*dUdy*dUdz
-                 + f5_3*(d2Udxx*d2Udyy*dUdz + d2Udxx*d2Udyz*dUdy + d2Udyy*d2Udxz*dUdx + 4.0f*d2Udxy*d2Udxy*dUdz + 4.0f*d2Udxy*d2Udyz*dUdx + 4.0f*d2Udxy*d2Udxz*dUdy)
+                 + f5_2*(d2Udxx*dUdy*dUdy*dUdz + 4.0f*d2Udxy*dUdx*dUdy*dUdz + 2.0f*d2Udxz*dUdx*dUdy*dUdy + d2Udyy*dUdx*dUdx*dUdz + 2.0f*d2Udyz*dUdx*dUdx*dUdy)
+                 + f5_3*(d2Udxx*d2Udyy*dUdz + 2.0f*d2Udxx*d2Udyz*dUdy + 2.0f*d2Udxy*d2Udxy*dUdz + 4.0f*d2Udxy*d2Udxz*dUdy + 4.0f*d2Udxy*d2Udyz*dUdx + 2.0f*d2Udxz*d2Udyy*dUdx + 2.0f*d3Uxxy*dUdy*dUdz + d3Uxxz*dUdy*dUdy + 2.0f*d3Uxyy*dUdx*dUdz + 4.0f*d3Uxyz*dUdx*dUdy + d3Uyyz*dUdx*dUdx)
+                 + f5_4*(U_derivs[17]*dUdz + 2.0f*U_derivs[20]*dUdy + 2.0f*U_derivs[21]*dUdx + d2Udxx*d3Uyyz + 4.0f*d2Udxy*d3Uxyz + 2.0f*d2Udxz*d3Uxyy + d2Udyy*d3Uxxz + 2.0f*d2Udyz*d3Uxxy)
                  + f5_5*U_derivs[23];  // ∂⁵U/∂x²∂y²∂z
 
-    // ∂⁵V/∂x²∂y∂z² (index 24) - simplified formula
+    // ∂⁵V/∂x²∂y∂z² (index 24) - CORRECTED full formula
     V_derivs[24] = f5_1*dUdx*dUdx*dUdy*dUdz*dUdz
-                 + f5_3*(d2Udxx*d2Udzz*dUdy + d2Udxx*d2Udyz*dUdz + d2Udzz*d2Udxy*dUdx + 4.0f*d2Udxz*d2Udxz*dUdy + 4.0f*d2Udxz*d2Udyz*dUdx + 4.0f*d2Udxz*d2Udxy*dUdz)
+                 + f5_2*(d2Udxx*dUdy*dUdz*dUdz + 2.0f*d2Udxy*dUdx*dUdz*dUdz + 4.0f*d2Udxz*dUdx*dUdy*dUdz + 2.0f*d2Udyz*dUdx*dUdx*dUdz + d2Udzz*dUdx*dUdx*dUdy)
+                 + f5_3*(2.0f*d2Udxx*d2Udyz*dUdz + d2Udxx*d2Udzz*dUdy + 4.0f*d2Udxy*d2Udxz*dUdz + 2.0f*d2Udxy*d2Udzz*dUdx + 2.0f*d2Udxz*d2Udxz*dUdy + 4.0f*d2Udxz*d2Udyz*dUdx + d3Uxxy*dUdz*dUdz + 2.0f*d3Uxxz*dUdy*dUdz + 4.0f*d3Uxyz*dUdx*dUdz + 2.0f*d3Uxzz*dUdx*dUdy + d3Uyzz*dUdx*dUdx)
+                 + f5_4*(U_derivs[18]*dUdy + 2.0f*U_derivs[20]*dUdz + 2.0f*U_derivs[22]*dUdx + d2Udxx*d3Uyzz + 2.0f*d2Udxy*d3Uxzz + 4.0f*d2Udxz*d3Uxyz + 2.0f*d2Udyz*d3Uxxz + d2Udzz*d3Uxxy)
                  + f5_5*U_derivs[24];  // ∂⁵U/∂x²∂y∂z²
 
-    // ∂⁵V/∂x∂y²∂z² (index 25) - simplified formula
+    // ∂⁵V/∂x∂y²∂z² (index 25) - CORRECTED full formula
     V_derivs[25] = f5_1*dUdx*dUdy*dUdy*dUdz*dUdz
-                 + f5_3*(d2Udyy*d2Udzz*dUdx + d2Udyy*d2Udxz*dUdz + d2Udzz*d2Udxy*dUdy + 4.0f*d2Udyz*d2Udyz*dUdx + 4.0f*d2Udyz*d2Udxz*dUdy + 4.0f*d2Udyz*d2Udxy*dUdz)
+                 + f5_2*(2.0f*d2Udxy*dUdy*dUdz*dUdz + 2.0f*d2Udxz*dUdy*dUdy*dUdz + d2Udyy*dUdx*dUdz*dUdz + 4.0f*d2Udyz*dUdx*dUdy*dUdz + d2Udzz*dUdx*dUdy*dUdy)
+                 + f5_3*(4.0f*d2Udxy*d2Udyz*dUdz + 2.0f*d2Udxy*d2Udzz*dUdy + 2.0f*d2Udxz*d2Udyy*dUdz + 4.0f*d2Udxz*d2Udyz*dUdy + d2Udyy*d2Udzz*dUdx + 2.0f*d2Udyz*d2Udyz*dUdx + d3Uxyy*dUdz*dUdz + 4.0f*d3Uxyz*dUdy*dUdz + d3Uxzz*dUdy*dUdy + 2.0f*d3Uyyz*dUdx*dUdz + 2.0f*d3Uyzz*dUdx*dUdy)
+                 + f5_4*(U_derivs[19]*dUdx + 2.0f*U_derivs[21]*dUdz + 2.0f*U_derivs[22]*dUdy + 2.0f*d2Udxy*d3Uyzz + 2.0f*d2Udxz*d3Uyyz + d2Udyy*d3Uxzz + 4.0f*d2Udyz*d3Uxyz + d2Udzz*d3Uxyy)
                  + f5_5*U_derivs[25];  // ∂⁵U/∂x∂y²∂z²
 
-    // 26: Sixth derivative ∂⁶V/∂x²∂y²∂z²
+    // 26: Sixth derivative ∂⁶V/∂x²∂y²∂z² - CORRECTED: includes ALL six factor levels
     float f6_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * (p - 5.0f) * absU_pm6;
-    float f6_4 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
+    float f6_2 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * absU_pm5;
+    float f6_3 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
+    float f6_4 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    float f6_5 = p * (p - 1.0f) * absU_pm2;
     float f6_6 = p * absU_pm1;
 
-    // Simplified 6th derivative formula
+    // CORRECTED full 6th derivative formula
     V_derivs[26] = f6_1*dUdx*dUdx*dUdy*dUdy*dUdz*dUdz
-                 + f6_4*(d2Udxx*d2Udyy*d2Udzz + 8.0f*d2Udxy*d2Udxy*d2Udzz + 8.0f*d2Udxz*d2Udxz*d2Udyy + 8.0f*d2Udyz*d2Udyz*d2Udxx + 16.0f*d2Udxy*d2Udxz*d2Udyz)
+                 + f6_2*(d2Udxx*dUdy*dUdy*dUdz*dUdz + 4.0f*d2Udxy*dUdx*dUdy*dUdz*dUdz + 4.0f*d2Udxz*dUdx*dUdy*dUdy*dUdz + d2Udyy*dUdx*dUdx*dUdz*dUdz + 4.0f*d2Udyz*dUdx*dUdx*dUdy*dUdz + d2Udzz*dUdx*dUdx*dUdy*dUdy)
+                 + f6_3*(d2Udxx*d2Udyy*dUdz*dUdz + 4.0f*d2Udxx*d2Udyz*dUdy*dUdz + d2Udxx*d2Udzz*dUdy*dUdy + 2.0f*d2Udxy*d2Udxy*dUdz*dUdz + 8.0f*d2Udxy*d2Udxz*dUdy*dUdz + 8.0f*d2Udxy*d2Udyz*dUdx*dUdz + 4.0f*d2Udxy*d2Udzz*dUdx*dUdy + 2.0f*d2Udxz*d2Udxz*dUdy*dUdy + 4.0f*d2Udxz*d2Udyy*dUdx*dUdz + 8.0f*d2Udxz*d2Udyz*dUdx*dUdy + d2Udyy*d2Udzz*dUdx*dUdx + 2.0f*d2Udyz*d2Udyz*dUdx*dUdx + 2.0f*d3Uxxy*dUdy*dUdz*dUdz + 2.0f*d3Uxxz*dUdy*dUdy*dUdz + 2.0f*d3Uxyy*dUdx*dUdz*dUdz + 8.0f*d3Uxyz*dUdx*dUdy*dUdz + 2.0f*d3Uxzz*dUdx*dUdy*dUdy + 2.0f*d3Uyyz*dUdx*dUdx*dUdz + 2.0f*d3Uyzz*dUdx*dUdx*dUdy)
+                 + f6_4*(U_derivs[17]*dUdz*dUdz + U_derivs[18]*dUdy*dUdy + U_derivs[19]*dUdx*dUdx + 4.0f*U_derivs[20]*dUdy*dUdz + 4.0f*U_derivs[21]*dUdx*dUdz + 4.0f*U_derivs[22]*dUdx*dUdy + d2Udxx*d2Udyy*d2Udzz + 2.0f*d2Udxx*d2Udyz*d2Udyz + 2.0f*d2Udxx*d3Uyyz*dUdz + 2.0f*d2Udxx*d3Uyzz*dUdy + 2.0f*d2Udxy*d2Udxy*d2Udzz + 8.0f*d2Udxy*d2Udxz*d2Udyz + 8.0f*d2Udxy*d3Uxyz*dUdz + 4.0f*d2Udxy*d3Uxzz*dUdy + 4.0f*d2Udxy*d3Uyzz*dUdx + 2.0f*d2Udxz*d2Udxz*d2Udyy + 4.0f*d2Udxz*d3Uxyy*dUdz + 8.0f*d2Udxz*d3Uxyz*dUdy + 4.0f*d2Udxz*d3Uyyz*dUdx + 2.0f*d2Udyy*d3Uxxz*dUdz + 2.0f*d2Udyy*d3Uxzz*dUdx + 4.0f*d2Udyz*d3Uxxy*dUdz + 4.0f*d2Udyz*d3Uxxz*dUdy + 8.0f*d2Udyz*d3Uxyz*dUdx + 2.0f*d2Udzz*d3Uxxy*dUdy + 2.0f*d2Udzz*d3Uxyy*dUdx)
+                 + f6_5*(U_derivs[17]*d2Udzz + U_derivs[18]*d2Udyy + U_derivs[19]*d2Udxx + 4.0f*U_derivs[20]*d2Udyz + 4.0f*U_derivs[21]*d2Udxz + 4.0f*U_derivs[22]*d2Udxy + 2.0f*U_derivs[23]*dUdz + 2.0f*U_derivs[24]*dUdy + 2.0f*U_derivs[25]*dUdx + 2.0f*d3Uxxy*d3Uyzz + 2.0f*d3Uxxz*d3Uyyz + 2.0f*d3Uxyy*d3Uxzz + 4.0f*d3Uxyz*d3Uxyz)
                  + f6_6*U_derivs[26];  // ∂⁶U/∂x²∂y²∂z²
 }
 
