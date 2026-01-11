@@ -31,6 +31,7 @@ extern "C" __global__ void computeGridForce(
     const int* __restrict__ particleIndices,  // Filtered particle indices (null = all particles)
     const int* __restrict__ particleToGroupMap,  // Map particle index to group index (null = no groups)
     float* __restrict__ groupEnergyBuffer,  // Per-group energy buffer (null = no groups)
+    float* __restrict__ atomEnergyBuffer,   // Per-atom energy buffer (null = don't store)
     const int numGroups) {  // Number of particle groups
 
     // Get thread index
@@ -144,10 +145,10 @@ extern "C" __global__ void computeGridForce(
             dy = dvdy / gridSpacing[1];
             dz = dvdz / gridSpacing[2];
 
-        } else if (interpolationMethod == 2) {
+        } else if (interpolationMethod == 2 && gridDerivatives != nullptr) {
             // LEKIEN-MARSDEN TRICUBIC INTERPOLATION (as used in RASPA3)
             // Uses 64x64 transformation matrix to compute polynomial coefficients
-            // Can use either analytical derivatives (if available) or finite differences
+            // Requires precomputed analytical derivatives
             // Debug output removed - feature now working correctly
             // if (index == 0) {
             //     if (gridDerivatives != nullptr) {
@@ -167,110 +168,19 @@ extern "C" __global__ void computeGridForce(
             // Derivatives: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
             float X[64];
 
-            if (gridDerivatives != nullptr) {
-                // USE ANALYTICAL DERIVATIVES (high precision, eliminates finite difference errors)
-                int totalPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
+            // Load analytical derivatives from precomputed grid
+            int totalPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
 
-                // Map tricubic derivative order to gridDerivatives storage order
-                // Tricubic needs: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
-                // gridDerivatives (RASPA3 order): 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dxy, 6=dxz, 7=dyy, 8=dyz, 9=dzz, ..., 13=dxyz
-                const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
+            // Map tricubic derivative order to gridDerivatives storage order
+            // Tricubic needs: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
+            // gridDerivatives (RASPA3 order): 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dxy, 6=dxz, 7=dyy, 8=dyz, 9=dzz, ..., 13=dxyz
+            const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
 
-                for (int d = 0; d < 8; d++) {
-                    for (int c = 0; c < 8; c++) {
-                        int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
-                        X[d*8 + c] = gridDerivatives[derivMap[d] * totalPoints + point_idx];
-                        // Debug output removed - feature now working correctly
-                        // if (index == 0 && d == 0 && c == 0) {
-                        //     printf("DEBUG: X[0] = gridDerivatives[%d] = %f (deriv=%d, corner=%d, point_idx=%d)\n",
-                        //            derivMap[d] * totalPoints + point_idx, X[d*8 + c], d, c, point_idx);
-                        // }
-                    }
-                }
-            } else {
-                // USE FINITE DIFFERENCES (fallback when analytical derivatives not available)
-                int im = ix * nyz + iy * gridCounts[2] + iz;
-                int imp = im + gridCounts[2];
-                int ip = im + nyz;
-                int ipp = ip + gridCounts[2];
-
-                // Get grid corner values
-                float f[8];
-                f[0] = gridValues[im];      // (0,0,0)
-                f[1] = gridValues[ip];      // (1,0,0)
-                f[2] = gridValues[imp];     // (0,1,0)
-                f[3] = gridValues[ipp];     // (1,1,0)
-                f[4] = gridValues[im + 1];  // (0,0,1)
-                f[5] = gridValues[ip + 1];  // (1,0,1)
-                f[6] = gridValues[imp + 1]; // (0,1,1)
-                f[7] = gridValues[ipp + 1]; // (1,1,1)
-
-                // Helper macros for grid indexing
-                #define GRID(dx, dy, dz) gridValues[((ix+(dx))*nyz + (iy+(dy))*gridCounts[2] + (iz+(dz)))]
-
-                // For each corner, compute function value and all derivatives using finite differences
-                // Store in derivative-major layout: X[deriv*8 + corner]
+            for (int d = 0; d < 8; d++) {
                 for (int c = 0; c < 8; c++) {
-                    int cx = (c & 1);  // x offset (0 or 1)
-                    int cy = (c >> 1) & 1;  // y offset (0 or 1)
-                    int cz = (c >> 2) & 1;  // z offset (0 or 1)
-
-                    // Function value
-                    X[0*8 + c] = f[c];
-
-                    // fx - x derivative (centered finite difference)
-                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1) {
-                        X[1*8 + c] = (GRID(cx+1, cy, cz) - GRID(cx-1, cy, cz)) / (2.0f * gridSpacing[0]);
-                    } else {
-                        X[1*8 + c] = 0.0f;
-                    }
-
-                    // fy - y derivative
-                    if (iy + cy > 0 && iy + cy < gridCounts[1] - 1) {
-                        X[2*8 + c] = (GRID(cx, cy+1, cz) - GRID(cx, cy-1, cz)) / (2.0f * gridSpacing[1]);
-                    } else {
-                        X[2*8 + c] = 0.0f;
-                    }
-
-                    // fz - z derivative
-                    if (iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
-                        X[3*8 + c] = (GRID(cx, cy, cz+1) - GRID(cx, cy, cz-1)) / (2.0f * gridSpacing[2]);
-                    } else {
-                        X[3*8 + c] = 0.0f;
-                    }
-
-                    // fxy - xy cross derivative
-                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1 && iy + cy > 0 && iy + cy < gridCounts[1] - 1) {
-                        X[4*8 + c] = (GRID(cx+1, cy+1, cz) - GRID(cx+1, cy-1, cz) - GRID(cx-1, cy+1, cz) + GRID(cx-1, cy-1, cz)) / (4.0f * gridSpacing[0] * gridSpacing[1]);
-                    } else {
-                        X[4*8 + c] = 0.0f;
-                    }
-
-                    // fxz - xz cross derivative
-                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1 && iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
-                        X[5*8 + c] = (GRID(cx+1, cy, cz+1) - GRID(cx+1, cy, cz-1) - GRID(cx-1, cy, cz+1) + GRID(cx-1, cy, cz-1)) / (4.0f * gridSpacing[0] * gridSpacing[2]);
-                    } else {
-                        X[5*8 + c] = 0.0f;
-                    }
-
-                    // fyz - yz cross derivative
-                    if (iy + cy > 0 && iy + cy < gridCounts[1] - 1 && iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
-                        X[6*8 + c] = (GRID(cx, cy+1, cz+1) - GRID(cx, cy+1, cz-1) - GRID(cx, cy-1, cz+1) + GRID(cx, cy-1, cz-1)) / (4.0f * gridSpacing[1] * gridSpacing[2]);
-                    } else {
-                        X[6*8 + c] = 0.0f;
-                    }
-
-                    // fxyz - xyz mixed derivative
-                    if (ix + cx > 0 && ix + cx < gridCounts[0] - 1 && iy + cy > 0 && iy + cy < gridCounts[1] - 1 && iz + cz > 0 && iz + cz < gridCounts[2] - 1) {
-                        X[7*8 + c] = (GRID(cx+1, cy+1, cz+1) - GRID(cx+1, cy+1, cz-1) - GRID(cx+1, cy-1, cz+1) + GRID(cx+1, cy-1, cz-1)
-                                    - GRID(cx-1, cy+1, cz+1) + GRID(cx-1, cy+1, cz-1) + GRID(cx-1, cy-1, cz+1) - GRID(cx-1, cy-1, cz-1))
-                                    / (8.0f * gridSpacing[0] * gridSpacing[1] * gridSpacing[2]);
-                    } else {
-                        X[7*8 + c] = 0.0f;
-                    }
+                    int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
+                    X[d*8 + c] = gridDerivatives[derivMap[d] * totalPoints + point_idx];
                 }
-
-                #undef GRID
             }
 
             // Multiply X by TRICUBIC_COEFFICIENTS matrix to get polynomial coefficients
@@ -443,14 +353,6 @@ extern "C" __global__ void computeGridForce(
                 else vppm = 0.0f;
                 if (fabsf(vppp) >= 1e-10f) vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppp), invN);
                 else vppp = 0.0f;
-
-#if DEBUG_GRIDFORCE
-                if (index == 0) {
-                    printf("[KERNEL atom=0] Corner values AFTER RUNTIME transform (G -> G^(1/n)):\n");
-                    printf("  v000=%.6e, v001=%.6e, v010=%.6e, v011=%.6e\n", vmmm, vmmp, vmpm, vmpp);
-                    printf("  v100=%.6e, v101=%.6e, v110=%.6e, v111=%.6e\n", vpmm, vpmp, vppm, vppp);
-                }
-#endif
             }
 
             // Perform trilinear interpolation (in transformed space if RUNTIME mode)
@@ -465,17 +367,11 @@ extern "C" __global__ void computeGridForce(
             interpolated = ox * vm + fx * vp;
 
             // Calculate forces (gradients in transformed space)
-            dx = (vp - vm) / gridSpacing[0];
-            dy = (ox * (vmp - vmm) + fx * (vpp - vpm)) / gridSpacing[1];
+            // NOTE: Do NOT divide by spacing yet - must apply chain rule first!
+            dx = (vp - vm);
+            dy = (ox * (vmp - vmm) + fx * (vpp - vpm));
             dz = (ox * (oy * (vmmp - vmmm) + fy * (vmpp - vmpm)) +
-                   fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm))) / gridSpacing[2];
-
-#if DEBUG_GRIDFORCE
-            if (index == 0) {
-                printf("[KERNEL atom=0] Interpolated value (before back-convert): %.6e\n", interpolated);
-                printf("[KERNEL atom=0] Gradients (before back-convert): dx=%.6e, dy=%.6e, dz=%.6e\n", dx, dy, dz);
-            }
-#endif
+                   fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm)));
         }
 
         // Back-convert from transformed space to get final energy
@@ -485,14 +381,21 @@ extern "C" __global__ void computeGridForce(
             float absVal = fabsf(interpolated);
             if (absVal > 1e-10f) {
                 // Back-convert: val^(1/n) -> val^n recovers original energy
-                // Derivative chain rule: d/dx[val^n] = n * val^(n-1) * d(val)/dx
+                // Chain rule: if E = sign(v)*|v|^n, then dE/dx = n*|v|^(n-1) * dv/dx
+                // The sign cancels: d/dx[sign(v)*|v|^n] = sign(v) * n*|v|^(n-1) * sign(v) * d|v|/dx = n*|v|^(n-1) * dv/dx
                 float powerFactor = invPower * powf(absVal, invPower - 1.0f);
                 interpolated = sign * powf(absVal, invPower);
+                // Apply chain rule to gradients BEFORE dividing by spacing
                 dx *= powerFactor;
                 dy *= powerFactor;
                 dz *= powerFactor;
             }
         }
+
+        // Now convert gradients to forces by dividing by spacing
+        dx /= gridSpacing[0];
+        dy /= gridSpacing[1];
+        dz /= gridSpacing[2];
 
         threadEnergy = scalingFactor * interpolated;
 
@@ -500,14 +403,15 @@ extern "C" __global__ void computeGridForce(
         atomForce.y = -scalingFactor * dy;
         atomForce.z = -scalingFactor * dz;
 
-#if DEBUG_GRIDFORCE
-        if (index == 0) {
-            printf("[KERNEL atom=0] After back-convert: energy=%.6e\n", interpolated);
-            printf("[KERNEL atom=0] After back-convert: dx=%.6e, dy=%.6e, dz=%.6e\n", dx, dy, dz);
-            printf("[KERNEL atom=0] Final threadEnergy (scaled): %.6e\n", threadEnergy);
-            printf("[KERNEL atom=0] Final force: (%.6e, %.6e, %.6e)\n", atomForce.x, atomForce.y, atomForce.z);
-        }
-#endif
+        // Debug: Print if forces are abnormally large
+        // if (index == 0) {
+        //     float force_mag = sqrtf(atomForce.x*atomForce.x + atomForce.y*atomForce.y + atomForce.z*atomForce.z);
+        //     if (force_mag > 1e4f) {
+        //         printf("[FORCE DEBUG] atom=0: mag=%.6e kJ/mol/nm\n", force_mag);
+        //         printf("  Energy: %.6e, Force: (%.6e, %.6e, %.6e)\n",
+        //                threadEnergy, atomForce.x, atomForce.y, atomForce.z);
+        //     }
+        // }
     }
     else {
         // Apply harmonic restraint outside grid (if enabled)
@@ -551,6 +455,11 @@ extern "C" __global__ void computeGridForce(
     atomicAdd(&forceBuffers[particleIndex], fx_fixed);
     atomicAdd(&forceBuffers[particleIndex + paddedNumAtoms], fy_fixed);
     atomicAdd(&forceBuffers[particleIndex + 2 * paddedNumAtoms], fz_fixed);
+
+    // Store per-atom energy if buffer provided (for debugging/analysis)
+    if (atomEnergyBuffer != nullptr) {
+        atomEnergyBuffer[index] = threadEnergy;
+    }
 
     // Accumulate energy - EITHER to group OR to total, not both
     if (particleToGroupMap != nullptr && groupEnergyBuffer != nullptr) {

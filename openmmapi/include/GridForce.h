@@ -468,6 +468,16 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
 
     /**
+     * Get per-atom energies from the most recent evaluation.
+     * Only available after evaluating a Context with particle groups.
+     * Returns energies in the same order as particles were added to groups.
+     *
+     * @param context  the Context to query
+     * @return         vector of per-atom energies (empty if no groups)
+     */
+    std::vector<double> getParticleAtomEnergies(OpenMM::Context& context) const;
+
+    /**
      * Clear grid data from host memory (values and derivatives).
      * Call this after Context creation to free host memory when grid is cached on GPU.
      * Note: After calling this, saveToFile() will not work.

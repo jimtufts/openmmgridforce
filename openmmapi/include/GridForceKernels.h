@@ -83,6 +83,12 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
      * @return vector of energies, one per particle group (empty if no groups)
      */
     virtual std::vector<double> getParticleGroupEnergies() = 0;
+    /**
+     * Get per-atom energies for particles in groups.
+     *
+     * @return vector of energies, one per particle across all groups
+     */
+    virtual std::vector<double> getParticleAtomEnergies() = 0;
 };
 
 }  // namespace GridForcePlugin

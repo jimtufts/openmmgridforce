@@ -1131,4 +1131,9 @@ vector<double> ReferenceCalcGridForceKernel::getParticleGroupEnergies() {
     return vector<double>();
 }
 
+vector<double> ReferenceCalcGridForceKernel::getParticleAtomEnergies() {
+    // Reference platform does not support per-atom energy tracking yet
+    return vector<double>();
+}
+
 }  // namespace AlGDockPlugin

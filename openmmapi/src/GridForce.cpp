@@ -809,4 +809,8 @@ vector<double> GridForce::getParticleGroupEnergies(Context& context) const {
     return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleGroupEnergies();
 }
 
+vector<double> GridForce::getParticleAtomEnergies(Context& context) const {
+    return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleAtomEnergies();
+}
+
 }  // namespace GridForcePlugin

@@ -80,6 +80,7 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
                                 const GridForce &force);
 
     std::vector<double> getParticleGroupEnergies();
+    std::vector<double> getParticleAtomEnergies();
 
    private:
     /**

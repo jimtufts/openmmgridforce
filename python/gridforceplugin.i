@@ -32,6 +32,7 @@ namespace std {
 #include "GridData.h"
 #include "GridForce.h"
 #include "GridForceKernels.h"
+#include "CachedGridData.h"
 #include "IsolatedNonbondedForce.h"
 #include "IsolatedNonbondedForceKernels.h"
 #include "OpenMM.h"
@@ -219,6 +220,7 @@ public:
     void clearParticleGroups();
 
     std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
+    std::vector<double> getParticleAtomEnergies(OpenMM::Context& context) const;
 
     void clearGridData();
 
@@ -349,4 +351,20 @@ def castToGridForce(force):
 # been called, and are now unneeded by the user code, and only pollute the
 # namespace
 __all__ = [k for k in locals().keys() if not (k.endswith('_swigregister') or k.startswith('_'))]
+
+def clearGridCache():
+    """
+    Clear the global grid data cache to free host memory.
+
+    Call this after processing each system in batch workflows to prevent
+    memory accumulation from cached grid data.
+    """
+    _gridforceplugin.clearGridCache()
+%}
+
+// Expose cache clearing function
+%inline %{
+void clearGridCache() {
+    GridForcePlugin::GridDataCache::clearAll();
+}
 %}

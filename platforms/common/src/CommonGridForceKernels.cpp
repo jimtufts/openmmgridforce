@@ -465,3 +465,8 @@ vector<double> CommonCalcGridForceKernel::getParticleGroupEnergies() {
     // Common platform does not support per-group energy tracking yet
     return vector<double>();
 }
+
+vector<double> CommonCalcGridForceKernel::getParticleAtomEnergies() {
+    // Common platform does not support per-atom energy tracking yet
+    return vector<double>();
+}

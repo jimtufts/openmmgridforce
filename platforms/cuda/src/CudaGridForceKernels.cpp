@@ -30,6 +30,14 @@ static std::map<std::pair<void*, size_t>, std::weak_ptr<CudaArray>> derivativeCa
 static size_t nextContextId = 0;
 static std::map<void*, size_t> contextIds;
 
+// Clear GPU-side caches to free CUDA memory
+void clearCudaGridCaches() {
+    gridCache.clear();
+    derivativeCache.clear();
+    contextIds.clear();
+    nextContextId = 0;
+}
+
 // Helper to compute grid hash for caching
 static size_t computeGridHash(const vector<int>& counts, const vector<double>& spacing, const vector<double>& vals) {
     size_t hash = 0;
@@ -234,6 +242,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         // Create particle-to-group mapping for per-group energy tracking
         vector<int> particleToGroupMapHost(numAtoms, -1);  // -1 = no group
 
+        // Calculate totalGroupParticles first (needed for buffer allocation)
+        totalGroupParticles = 0;
+        for (int i = 0; i < numParticleGroups; i++) {
+            const ParticleGroup& group = force.getParticleGroup(i);
+            totalGroupParticles += group.particleIndices.size();
+        }
+
         // Populate from particle groups
         for (int i = 0; i < numParticleGroups; i++) {
             const ParticleGroup& group = force.getParticleGroup(i);
@@ -256,8 +271,15 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
         // Initialize per-group energy buffer
         groupEnergyBuffer.initialize<float>(cu, numParticleGroups, "groupEnergyBuffer");
+
+        // Initialize per-atom energy buffer (for debugging/analysis)
+        if (totalGroupParticles > 0) {
+            atomEnergyBuffer.initialize<float>(cu, totalGroupParticles, "atomEnergyBuffer");
+            lastAtomEnergies.resize(totalGroupParticles, 0.0f);
+        }
     } else {
         numParticleGroups = 0;
+        totalGroupParticles = 0;
     }
 
     // Auto-generate grid if enabled and grid values are empty
@@ -441,6 +463,15 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         }
     } else {
         // First instance with this grid - allocate and cache it
+        // First, clean up any expired entries to prevent unbounded cache growth
+        for (auto it = gridCache.begin(); it != gridCache.end(); ) {
+            if (it->second.expired()) {
+                it = gridCache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
         vector<float> valsFloat(vals.begin(), vals.end());
         g_vals_shared = std::make_shared<CudaArray>();
         g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
@@ -459,6 +490,11 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // Upload derivatives if they exist (for triquintic interpolation)
     if (force.hasDerivatives()) {
         vector<double> derivatives_vec = force.getDerivatives();
+
+        // Skip if derivatives vector is empty to avoid CUDA allocation errors
+        if (derivatives_vec.empty()) {
+            // hasDerivatives() returned true but vector is empty - skip derivative caching
+        } else {
 
         // Check cache for derivatives (same hash as grid values since they're from same source)
         auto derivCacheKey = std::make_pair((void*)&cu, gridHash);
@@ -491,6 +527,15 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             }
         } else {
             // First instance - allocate and cache derivatives
+            // First, clean up any expired entries to prevent unbounded cache growth
+            for (auto it = derivativeCache.begin(); it != derivativeCache.end(); ) {
+                if (it->second.expired()) {
+                    it = derivativeCache.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
             vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
             g_derivatives_shared = std::make_shared<CudaArray>();
             cu.setAsCurrent();
@@ -498,14 +543,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
                 g_derivatives_shared->upload(derivativesFloat);
                 derivativeCache[derivCacheKey] = g_derivatives_shared;
-//                 std::cout << "Caching new derivatives" << std::endl;
                 derivatives_vec.clear();
                 derivatives_vec.shrink_to_fit();
             } catch (const std::exception& e) {
                 std::cerr << "ERROR caching derivatives: " << e.what() << std::endl;
                 throw;
             }
-        }
+        } // end else (first instance - derivIt not found)
+        } // end if (!derivatives_vec.empty())
     }
 
     // Store out-of-bounds restraint and interpolation method (gridCap and invPower already set above)
@@ -591,7 +636,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
     // Compile kernel from .cu file
     map<string, string> defines;
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+#if DEBUG_GRIDFORCE
+    defines["DEBUG_GRIDFORCE"] = "1";
+#endif
+    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
     kernel = cu.getKernel(module, "computeGridForce");
     addGroupEnergiesKernel = cu.getKernel(module, "addGroupEnergiesToTotal");
 
@@ -626,11 +674,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 }
 
 double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces, bool includeEnergy) {
+#if DEBUG_GRIDFORCE
     // Diagnostic: Count kernel calls per instance
     static std::map<void*, int> callCounts;
     callCounts[this]++;
     printf("[FORCE DEBUG] execute() called: this=%p, call #%d, includeForces=%d, includeEnergy=%d\n",
            (void*)this, callCounts[this], includeForces, includeEnergy);
+#endif
 
     if (!hasInitializedKernel) {
         throw OpenMMException("CudaCalcGridForceKernel: Kernel not initialized before execution");
@@ -675,12 +725,21 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     // Clear group energy buffer if using particle groups
     CUdeviceptr particleToGroupMapPtr = 0;
     CUdeviceptr groupEnergyBufferPtr = 0;
+    CUdeviceptr atomEnergyBufferPtr = 0;
     if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
         // Zero out the group energy buffer
         vector<float> zeros(numParticleGroups, 0.0f);
         groupEnergyBuffer.upload(zeros);
         particleToGroupMapPtr = particleToGroupMap.getDevicePointer();
         groupEnergyBufferPtr = groupEnergyBuffer.getDevicePointer();
+
+        // Set up per-atom energy buffer if initialized
+        if (atomEnergyBuffer.isInitialized()) {
+            // Zero out the atom energy buffer before kernel execution
+            vector<float> atomZeros(totalGroupParticles, 0.0f);
+            atomEnergyBuffer.upload(atomZeros);
+            atomEnergyBufferPtr = atomEnergyBuffer.getDevicePointer();
+        }
     }
 
     void* args[] = {
@@ -704,6 +763,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &particleIndicesPtr,
         &particleToGroupMapPtr,
         &groupEnergyBufferPtr,
+        &atomEnergyBufferPtr,
         &numParticleGroups
     };
 
@@ -711,9 +771,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     std::cout << "[GRIDFORCE DEBUG] ========== EXECUTE ==========" << std::endl;
     std::cout << "[EXEC] Launching kernel with numAtoms=" << kernelNumAtoms << std::endl;
     std::cout << "[EXEC] invPower=" << invPower << ", invPowerMode=" << invPowerMode << std::endl;
+    printf("[FORCE DEBUG] Launching computeGridForce kernel (this=%p)\n", (void*)this);
 #endif
 
-    printf("[FORCE DEBUG] Launching computeGridForce kernel (this=%p)\n", (void*)this);
     cu.executeKernel(kernel, args, kernelNumAtoms);
 
 #if DEBUG_GRIDFORCE
@@ -726,6 +786,12 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         // Download and save group energies (buffer will be zeroed on next execute)
         lastGroupEnergies.resize(numParticleGroups);
         groupEnergyBuffer.download(lastGroupEnergies);
+
+        // Download per-atom energies if buffer is initialized
+        if (atomEnergyBuffer.isInitialized()) {
+            lastAtomEnergies.resize(totalGroupParticles);
+            atomEnergyBuffer.download(lastAtomEnergies);
+        }
 
         // Use a kernel to sum group energies and add to main energy buffer
         void* sumArgs[] = {
@@ -785,6 +851,20 @@ vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {
     }
 
     return groupEnergies;
+}
+
+vector<double> CudaCalcGridForceKernel::getParticleAtomEnergies() {
+    vector<double> atomEnergies;
+
+    // Return the saved per-atom energies from the last execute()
+    if (numParticleGroups > 0 && !lastAtomEnergies.empty()) {
+        atomEnergies.resize(lastAtomEnergies.size());
+        for (size_t i = 0; i < lastAtomEnergies.size(); i++) {
+            atomEnergies[i] = (double)lastAtomEnergies[i];
+        }
+    }
+
+    return atomEnergies;
 }
 
 void CudaCalcGridForceKernel::generateGrid(
@@ -881,29 +961,24 @@ void CudaCalcGridForceKernel::generateGrid(
     int gridSize = (totalPoints + blockSize - 1) / blockSize;
     CUresult result;
 
-    // Decide whether to use analytical derivatives (RASPA3 tensor method) for all grid types
-    bool useAnalyticalDerivatives = computeDerivatives;
-
-    if (useAnalyticalDerivatives) {
-        // Use RASPA3 tensor method with analytical derivatives for all grid types
-        // This generates energy AND all 27 derivatives in one pass
-//         std::cout << "Using analytical derivatives (RASPA3 tensor method) for " << gridType << " grid..." << std::endl;
-
+    if (computeDerivatives) {
         // Check if derivative array would exceed reasonable GPU memory limit (10 GB)
         size_t derivativeBytes = 27 * totalPoints * sizeof(float);
         const size_t MAX_DERIV_BYTES = 10LL * 1024 * 1024 * 1024;  // 10 GB
 
         if (derivativeBytes > MAX_DERIV_BYTES) {
-            std::cerr << "WARNING: Derivative array would require "
-                      << (derivativeBytes / (1024.0 * 1024 * 1024))
-                      << " GB GPU memory, exceeding limit of "
-                      << (MAX_DERIV_BYTES / (1024.0 * 1024 * 1024))
-                      << " GB. Falling back to energy-only generation." << std::endl;
-            useAnalyticalDerivatives = false;
+            throw OpenMMException(
+                "GridForce: Derivative array would require " +
+                std::to_string(derivativeBytes / (1024.0 * 1024 * 1024)) +
+                " GB GPU memory, exceeding limit of " +
+                std::to_string(MAX_DERIV_BYTES / (1024.0 * 1024 * 1024)) +
+                " GB. Grid size: " + std::to_string(counts[0]) + "x" +
+                std::to_string(counts[1]) + "x" + std::to_string(counts[2]) +
+                ". Consider using a smaller grid or disabling derivative computation.");
         }
-    }
 
-    if (useAnalyticalDerivatives) {
+        // Use RASPA3 tensor method with analytical derivatives
+        // This generates energy AND all 27 derivatives in one pass
         // Allocate GPU memory for grid data (27 values per point)
         CudaArray gridDataGPU;
         gridDataGPU.initialize<float>(cu, 27 * totalPoints, "gridDataWithDerivatives");
@@ -1049,75 +1124,5 @@ void CudaCalcGridForceKernel::generateGrid(
         for (int i = 0; i < totalPoints; i++) {
             vals[i] = gridValsFloat[i];
         }
-    }
-
-    // Compute derivatives using finite differences if needed (for non-LJ grids or if analytical failed)
-    if (computeDerivatives && !useAnalyticalDerivatives) {
-        // Check if derivative array would exceed reasonable GPU memory limit (10 GB)
-        size_t derivativeBytes = 27 * totalPoints * sizeof(float);
-        const size_t MAX_DERIV_BYTES = 10LL * 1024 * 1024 * 1024;  // 10 GB
-
-        if (derivativeBytes > MAX_DERIV_BYTES) {
-            std::cerr << "WARNING: Derivative array would require "
-                      << (derivativeBytes / (1024.0 * 1024 * 1024))
-                      << " GB GPU memory, exceeding limit of "
-                      << (MAX_DERIV_BYTES / (1024.0 * 1024 * 1024))
-                      << " GB. Skipping derivative computation." << std::endl;
-            std::cerr << "         Grid size: " << counts[0] << "×" << counts[1] << "×" << counts[2]
-                      << " = " << totalPoints << " points × 27 derivatives" << std::endl;
-            std::cerr << "         Consider using a smaller grid or Reference platform for derivative computation." << std::endl;
-            derivatives.clear();  // Clear derivatives so hasDerivatives() returns false
-            return;  // Skip derivative computation
-        }
-
-        // Allocate GPU memory for derivatives (27 values per grid point)
-        CudaArray derivsGPU;
-        try {
-            derivsGPU.initialize<float>(cu, 27 * totalPoints, "gridDerivatives");
-        } catch (const std::exception& e) {
-            std::cerr << "ERROR: Failed to allocate GPU memory for derivatives: " << e.what() << std::endl;
-            std::cerr << "       Requested: " << (derivativeBytes / (1024.0 * 1024 * 1024)) << " GB" << std::endl;
-            throw;
-        }
-
-        // Get derivative computation kernel
-        CUfunction derivKernel = cu.getKernel(module, "computeDerivativesKernel");
-
-        void* derivArgs[] = {
-            &derivsGPU.getDevicePointer(),
-            &gridVals.getDevicePointer(),
-            &d_gridCounts.getDevicePointer(),
-            &d_gridSpacing.getDevicePointer(),
-            &totalPoints
-        };
-
-        // Launch derivative kernel
-        result = cuLaunchKernel(derivKernel,
-            gridSize, 1, 1,
-            blockSize, 1, 1,
-            0,
-            cu.getCurrentStream(),
-            derivArgs,
-            NULL);
-
-        if (result != CUDA_SUCCESS) {
-            throw OpenMMException("Error launching derivative computation kernel");
-        }
-
-        // Synchronize to ensure kernel completes before downloading
-        cuStreamSynchronize(cu.getCurrentStream());
-
-        // Download derivatives
-        vector<float> derivsFloat(27 * totalPoints);
-        derivsGPU.download(derivsFloat);
-
-        // Convert to double and store in output parameter
-        derivatives.resize(27 * totalPoints);
-        for (int i = 0; i < 27 * totalPoints; i++) {
-            derivatives[i] = derivsFloat[i];
-        }
-
-//         std::cout << "Computed " << derivatives.size() << " derivative values on GPU (grid: "
-//                   << counts[0] << "×" << counts[1] << "×" << counts[2] << ")" << std::endl;
     }
 }

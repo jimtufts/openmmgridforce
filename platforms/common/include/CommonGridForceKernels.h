@@ -42,6 +42,7 @@ public:
     virtual void copyParametersToContext(OpenMM::ContextImpl& context, const GridForce& force);
 
     virtual std::vector<double> getParticleGroupEnergies();
+    virtual std::vector<double> getParticleAtomEnergies();
 
 protected:
     /**

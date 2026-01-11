@@ -46,6 +46,13 @@ public:
      * @return vector of energies, one per particle group (empty if no groups)
      */
     std::vector<double> getParticleGroupEnergies();
+    /**
+     * Get per-atom energies for particles in groups.
+     *
+     * @return vector of energies, one per particle across all groups
+     *         (in the same order as particles were added to groups)
+     */
+    std::vector<double> getParticleAtomEnergies();
 private:
     /**
      * Generate grid values from receptor atoms and NonbondedForce parameters.
@@ -94,7 +101,15 @@ private:
     OpenMM::CudaArray groupEnergyBuffer;        // Per-group energy accumulation (gets zeroed each execute)
     std::vector<float> lastGroupEnergies;        // Persistent copy of last group energies
     int numParticleGroups;                       // Number of particle groups
+
+    // Per-atom energy tracking (for debugging/analysis)
+    OpenMM::CudaArray atomEnergyBuffer;         // Per-atom energy storage
+    std::vector<float> lastAtomEnergies;         // Persistent copy of last atom energies
 };
+
+// Clear GPU-side grid caches to free CUDA memory
+// Call this between systems in batch workflows to prevent GPU memory exhaustion
+void clearCudaGridCaches();
 
 } // namespace GridForcePlugin
 
