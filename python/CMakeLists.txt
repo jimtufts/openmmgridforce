@@ -16,13 +16,18 @@ add_custom_command(
 )
 
 # Compile the Python module.
+# Note: PythonInstall depends on WRAP_FILE (SWIG generation) and implicitly on
+# the install target to ensure C++ libraries are installed before Python wrapper.
 
 add_custom_target(PythonInstall DEPENDS "${WRAP_FILE}")
 set(GRIDFORCEPLUGIN_HEADER_DIR "${CMAKE_SOURCE_DIR}/openmmapi/include")
 set(GRIDFORCEPLUGIN_LIBRARY_DIR "${CMAKE_BINARY_DIR}")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py ${CMAKE_CURRENT_BINARY_DIR}/setup.py)
 add_custom_command(TARGET PythonInstall
-    COMMAND "${PYTHON_EXECUTABLE}" -m pip install . 
+    # First install C++ libraries to ensure they're up-to-date in the target prefix
+    COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}"
+    # Then install Python wrapper
+    COMMAND "${PYTHON_EXECUTABLE}" -m pip install .
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 

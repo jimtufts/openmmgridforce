@@ -847,7 +847,6 @@ vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {
         for (int i = 0; i < numParticleGroups; i++) {
             groupEnergies[i] = (double)lastGroupEnergies[i];
         }
-        printf("[getParticleGroupEnergies] returning saved energy[0] = %f\n", groupEnergies[0]);
     }
 
     return groupEnergies;
