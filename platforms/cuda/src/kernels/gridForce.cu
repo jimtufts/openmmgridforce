@@ -9,6 +9,7 @@
 #include "include/HermiteBasis.cuh"
 #include "include/TricubicCoefficients.cuh"
 #include "include/TriquinticCoefficients.cuh"
+#include "include/InvPowerChainRule.cuh"
 
 extern "C" __global__ void computeGridForce(
     const float4* __restrict__ posq,
@@ -176,10 +177,27 @@ extern "C" __global__ void computeGridForce(
             // gridDerivatives (RASPA3 order): 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dxy, 6=dxz, 7=dyy, 8=dyz, 9=dzz, ..., 13=dxyz
             const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
 
-            for (int d = 0; d < 8; d++) {
+            if (invPowerMode == 1) {
+                // RUNTIME mode: transform all 27 derivatives per corner, then extract needed 8
+                float p = 1.0f / invPower;
                 for (int c = 0; c < 8; c++) {
                     int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
-                    X[d*8 + c] = gridDerivatives[derivMap[d] * totalPoints + point_idx];
+                    float U_derivs[27], V_derivs[27];
+                    for (int d = 0; d < 27; d++) {
+                        U_derivs[d] = gridDerivatives[d * totalPoints + point_idx];
+                    }
+                    applyInvPowerChainRule(U_derivs, p, V_derivs);
+                    for (int d = 0; d < 8; d++) {
+                        X[d*8 + c] = V_derivs[derivMap[d]];
+                    }
+                }
+            } else {
+                // STORED or NONE mode: load directly
+                for (int d = 0; d < 8; d++) {
+                    for (int c = 0; c < 8; c++) {
+                        int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
+                        X[d*8 + c] = gridDerivatives[derivMap[d] * totalPoints + point_idx];
+                    }
                 }
             }
 
@@ -239,12 +257,28 @@ extern "C" __global__ void computeGridForce(
 
             // Gather derivatives in DERIVATIVE-MAJOR layout: X[deriv_idx * 8 + corner_idx]
             // This matches RASPA3's layout expected by TRIQUINTIC_COEFFICIENTS matrix
-            // Derivatives are stored as RAW values (not logarithmic)
             float X[216];
-            for (int d = 0; d < 27; d++) {
+            if (invPowerMode == 1) {
+                // RUNTIME mode: transform all 27 derivatives per corner
+                float p = 1.0f / invPower;
                 for (int c = 0; c < 8; c++) {
                     int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
-                    X[d * 8 + c] = gridDerivatives[d * totalPoints + point_idx];
+                    float U_derivs[27], V_derivs[27];
+                    for (int d = 0; d < 27; d++) {
+                        U_derivs[d] = gridDerivatives[d * totalPoints + point_idx];
+                    }
+                    applyInvPowerChainRule(U_derivs, p, V_derivs);
+                    for (int d = 0; d < 27; d++) {
+                        X[d * 8 + c] = V_derivs[d];
+                    }
+                }
+            } else {
+                // STORED or NONE mode: load directly
+                for (int d = 0; d < 27; d++) {
+                    for (int c = 0; c < 8; c++) {
+                        int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
+                        X[d * 8 + c] = gridDerivatives[d * totalPoints + point_idx];
+                    }
                 }
             }
 

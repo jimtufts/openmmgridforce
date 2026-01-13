@@ -114,18 +114,6 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     invPowerMode = static_cast<int>(force.getInvPowerMode());
     interpolationMethod = interp_method;
 
-    // Validate RUNTIME mode requirements
-    if (invPowerMode == 1) {  // RUNTIME mode
-        // Check: RUNTIME mode only works with trilinear (0) or b-spline (1) for now
-        // Tricubic/triquintic support requires applying chain rule in evaluation kernel
-        if (interpolationMethod != 0 && interpolationMethod != 1) {
-            throw OpenMMException(
-                "GridForce: RUNTIME inv_power mode only supports trilinear (0) and b-spline (1) interpolation. "
-                "Tricubic (2) and triquintic (3) require STORED mode. "
-                "Current interpolation method: " + std::to_string(interpolationMethod));
-        }
-    }
-
     // Store ligand atoms and derivative computation flag
     ligandAtoms = force.getLigandAtoms();
     computeDerivatives = force.getComputeDerivatives();
