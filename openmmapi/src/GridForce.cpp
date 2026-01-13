@@ -55,7 +55,8 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
                          m_computeDerivatives(false),
                          m_systemPtr(nullptr),
                          m_vals(std::make_shared<std::vector<double>>()),
-                         m_derivatives(std::make_shared<std::vector<double>>()) {
+                         m_derivatives(std::make_shared<std::vector<double>>()),
+                         m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048) {
     //
 }
 
@@ -68,7 +69,8 @@ GridForce::GridForce(std::shared_ptr<GridData> gridData)
       m_systemPtr(nullptr),
       m_gridData(gridData),
       m_vals(std::make_shared<std::vector<double>>()),
-      m_derivatives(std::make_shared<std::vector<double>>()) {
+      m_derivatives(std::make_shared<std::vector<double>>()),
+      m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048) {
     if (gridData) {
         // Extract grid data to populate legacy members
         m_counts.clear();
@@ -306,6 +308,30 @@ void GridForce::setInterpolationMethod(int method) {
 
 int GridForce::getInterpolationMethod() const {
     return m_interpolationMethod;
+}
+
+void GridForce::setTiledMode(bool enable, int tileSize, int memoryBudgetMB) {
+    if (tileSize < 8 || tileSize > 256) {
+        throw OpenMMException("GridForce: Tile size must be between 8 and 256");
+    }
+    if (memoryBudgetMB < 64) {
+        throw OpenMMException("GridForce: Memory budget must be at least 64 MB");
+    }
+    m_tiledMode = enable;
+    m_tileSize = tileSize;
+    m_memoryBudgetMB = memoryBudgetMB;
+}
+
+bool GridForce::getTiledMode() const {
+    return m_tiledMode;
+}
+
+int GridForce::getTileSize() const {
+    return m_tileSize;
+}
+
+int GridForce::getMemoryBudgetMB() const {
+    return m_memoryBudgetMB;
 }
 
 void GridForce::getGridParameters(std::vector<int> &g_counts,

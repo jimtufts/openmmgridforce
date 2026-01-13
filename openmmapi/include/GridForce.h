@@ -296,6 +296,36 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     int getInterpolationMethod() const;
 
     /**
+     * Enable tiled grid mode for memory-efficient large grids.
+     * When enabled, the grid is divided into tiles that are streamed to
+     * GPU memory on demand, allowing arbitrarily large grids with bounded
+     * GPU memory usage.
+     *
+     * @param enable  if true, enable tiled mode
+     * @param tileSize  size of each tile in grid points (default: 64)
+     * @param memoryBudgetMB  GPU memory budget in MB (default: 2048)
+     */
+    void setTiledMode(bool enable, int tileSize = 64, int memoryBudgetMB = 2048);
+
+    /**
+     * Get whether tiled mode is enabled.
+     * @return  true if tiled mode is enabled
+     */
+    bool getTiledMode() const;
+
+    /**
+     * Get the tile size (only valid when tiled mode is enabled).
+     * @return  tile size in grid points
+     */
+    int getTileSize() const;
+
+    /**
+     * Get the GPU memory budget for tiled mode.
+     * @return  memory budget in MB
+     */
+    int getMemoryBudgetMB() const;
+
+    /**
      * Enable or disable automatic grid generation from the System.
      * When enabled, the grid will be generated from NonbondedForce parameters
      * and receptor positions during kernel initialization.
@@ -622,6 +652,11 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
 
     // Named particle groups for multi-ligand workflows
     std::vector<ParticleGroup> m_particleGroups;  // Named groups of particles with individual scaling
+
+    // Tiled mode parameters
+    bool m_tiledMode;            // Whether to use tiled grid storage
+    int m_tileSize;              // Tile size in grid points (default: 64)
+    int m_memoryBudgetMB;        // GPU memory budget in MB (default: 2048)
 };
 
 }  // namespace GridForcePlugin
