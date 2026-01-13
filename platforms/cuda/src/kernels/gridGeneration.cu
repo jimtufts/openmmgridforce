@@ -31,6 +31,7 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
     const int gridType,  // 0=charge, 1=ljr, 2=lja
     const float gridCap,  // Capping threshold U_max (kJ/mol)
     const float invPower,  // Inverse power transformation exponent (0 = disabled)
+    const int invPowerMode,  // 0=NONE, 1=RUNTIME (skip transform), 2=STORED (apply transform)
     const float originX,
     const float originY,
     const float originZ,
@@ -119,10 +120,11 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
         cartesian_derivs[i] = capped_derivs[i];
     }
 
-    // Apply inverse power transformation if specified
+    // Apply inverse power transformation if specified AND mode is STORED (mode=2)
+    // For RUNTIME mode (mode=1), raw values are stored and transformation happens at evaluation time
     // Transform U -> V = U^p where p = 1/invPower
     // Uses exact chain rule formulas for all 27 derivatives (see InvPowerChainRule.cuh)
-    if (invPower != 0.0f) {
+    if (invPower != 0.0f && invPowerMode == 2) {  // 2 = STORED mode
         float p = 1.0f / invPower;
         float transformed_derivs[27];
         applyInvPowerChainRule(cartesian_derivs, p, transformed_derivs);

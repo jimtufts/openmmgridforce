@@ -617,9 +617,6 @@ void GridForce::loadFromFile(const std::string& filename) {
     if (m_invPowerMode != InvPowerMode::NONE && inv_power == 0.0) {
         throw OpenMMException("GridForce: File has inv_power_mode enabled but invalid inv_power value");
     }
-    if (m_invPowerMode == InvPowerMode::RUNTIME && m_derivatives && !m_derivatives->empty()) {
-        throw OpenMMException("GridForce: File has RUNTIME mode but also has derivatives (incompatible)");
-    }
 
     // Decode grid type
     if (grid_type_code == 1) m_gridType = "charge";

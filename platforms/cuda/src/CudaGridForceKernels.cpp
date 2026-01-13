@@ -116,19 +116,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
     // Validate RUNTIME mode requirements
     if (invPowerMode == 1) {  // RUNTIME mode
-        // Check: RUNTIME mode only works with trilinear (0) or b-spline (1)
+        // Check: RUNTIME mode only works with trilinear (0) or b-spline (1) for now
+        // Tricubic/triquintic support requires applying chain rule in evaluation kernel
         if (interpolationMethod != 0 && interpolationMethod != 1) {
             throw OpenMMException(
                 "GridForce: RUNTIME inv_power mode only supports trilinear (0) and b-spline (1) interpolation. "
-                "Tricubic (2) and triquintic (3) require STORED mode with pre-transformed grids that include "
-                "chain-rule derivatives. Current interpolation method: " + std::to_string(interpolationMethod));
-        }
-
-        // Check: RUNTIME mode cannot be used with analytical derivatives
-        if (force.hasDerivatives()) {
-            throw OpenMMException(
-                "GridForce: RUNTIME inv_power mode cannot be used with grids that have analytical derivatives. "
-                "Use STORED mode instead, with grids pre-transformed during generation.");
+                "Tricubic (2) and triquintic (3) require STORED mode. "
+                "Current interpolation method: " + std::to_string(interpolationMethod));
         }
     }
 
@@ -359,11 +353,12 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             gridData->setDerivatives(derivatives);
         }
 
-        // Set invPowerMode based on whether transformation was applied
+        // Set invPowerMode on the generated grid
         if (invPower != 0.0f) {
             gridData->setInvPower(invPower);
-            gridData->setInvPowerMode(InvPowerMode::STORED);
-            const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::STORED, invPower);
+            InvPowerMode mode = static_cast<InvPowerMode>(invPowerMode);
+            gridData->setInvPowerMode(mode);
+            const_cast<GridForce&>(force).setInvPowerMode(mode, invPower);
         } else {
             gridData->setInvPower(0.0);
             gridData->setInvPowerMode(InvPowerMode::NONE);
@@ -989,6 +984,7 @@ void CudaCalcGridForceKernel::generateGrid(
         int analyticalGridType = gridTypeInt;  // Mapping is the same
         float gridCapF = gridCap;
         float invPowerF = invPower;
+        int invPowerModeInt = invPowerMode;  // 0=NONE, 1=RUNTIME, 2=STORED
 
         void* analyticalArgs[] = {
             &gridDataGPU.getDevicePointer(),
@@ -1000,6 +996,7 @@ void CudaCalcGridForceKernel::generateGrid(
             &analyticalGridType,
             &gridCapF,
             &invPowerF,
+            &invPowerModeInt,
             &originXf,
             &originYf,
             &originZf,
