@@ -222,6 +222,12 @@ public:
     std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
     std::vector<double> getParticleAtomEnergies(OpenMM::Context& context) const;
 
+    // Tiled grid streaming mode
+    void setTiledMode(bool enable, int tileSize = 64, int memoryBudgetMB = 2048);
+    bool getTiledMode() const;
+    int getTileSize() const;
+    int getMemoryBudgetMB() const;
+
     void clearGridData();
 
     void setReceptorPositions(const std::vector<OpenMM::Vec3>& positions);

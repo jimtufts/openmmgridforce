@@ -5,11 +5,6 @@
 
 #include "include/InterpolationBasis.cuh"
 
-// Tile configuration constants (must match TileConfig in TileManager.h)
-#define TILE_SIZE 64
-#define TILE_OVERLAP 4
-#define TILE_WITH_OVERLAP (TILE_SIZE + 2 * TILE_OVERLAP)  // 72
-
 /**
  * Find which tile contains a grid position.
  * Returns tile index or -1 if not found.
@@ -17,7 +12,8 @@
 __device__ int findTileForPosition(
     int gridX, int gridY, int gridZ,
     const int* __restrict__ tileOffsets,  // x,y,z for each tile
-    int numTiles
+    int numTiles,
+    int tileSize  // Core tile size (excluding overlap)
 ) {
     // Linear search for now - works for small number of tiles
     // TODO: Use spatial hash map for many tiles
@@ -27,10 +23,10 @@ __device__ int findTileForPosition(
         int tileStartZ = tileOffsets[t * 3 + 2];
 
         // Check if grid position falls within this tile's core region
-        // (The tile stores TILE_WITH_OVERLAP points, but its "ownership" is TILE_SIZE)
-        if (gridX >= tileStartX && gridX < tileStartX + TILE_SIZE &&
-            gridY >= tileStartY && gridY < tileStartY + TILE_SIZE &&
-            gridZ >= tileStartZ && gridZ < tileStartZ + TILE_SIZE) {
+        // (The tile stores tileSize + 2*overlap points, but its "ownership" is tileSize)
+        if (gridX >= tileStartX && gridX < tileStartX + tileSize &&
+            gridY >= tileStartY && gridY < tileStartY + tileSize &&
+            gridZ >= tileStartZ && gridZ < tileStartZ + tileSize) {
             return t;
         }
     }
@@ -46,11 +42,12 @@ __device__ void trilinearInterpolateTiled(
     float fx, float fy, float fz,        // Fractional position within cell
     float* energy,
     float* dEdx, float* dEdy, float* dEdz,
-    float spacingX, float spacingY, float spacingZ
+    float spacingX, float spacingY, float spacingZ,
+    int tileWithOverlap  // Total tile dimension including overlap
 ) {
     // Tile dimensions
-    const int tileNY = TILE_WITH_OVERLAP;
-    const int tileNZ = TILE_WITH_OVERLAP;
+    const int tileNY = tileWithOverlap;
+    const int tileNZ = tileWithOverlap;
     const int tileNYZ = tileNY * tileNZ;
 
     // Get 8 corner values from tile
@@ -109,8 +106,12 @@ extern "C" __global__ void computeGridForceTiled(
     const int* __restrict__ tileOffsets,           // Grid offsets for each tile (x,y,z,x,y,z,...)
     const unsigned long long* __restrict__ tileValuePtrs,   // Device pointers to tile values
     const unsigned long long* __restrict__ tileDerivPtrs,   // Device pointers to tile derivatives
-    const int numTiles
+    const int numTiles,
+    const int tileSize,                             // Core tile size (excluding overlap)
+    const int tileOverlap                           // Overlap for interpolation stencil
 ) {
+    // Compute tile dimensions
+    const int tileWithOverlap = tileSize + 2 * tileOverlap;
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= numAtoms) return;
 
@@ -153,21 +154,21 @@ extern "C" __global__ void computeGridForceTiled(
         fz = min(max(fz, 0.0f), 1.0f);
 
         // Find which tile contains this grid position
-        int tileIdx = findTileForPosition(ix, iy, iz, tileOffsets, numTiles);
+        int tileIdx = findTileForPosition(ix, iy, iz, tileOffsets, numTiles, tileSize);
 
         if (tileIdx >= 0) {
             // Get tile data pointer
             const float* tileValues = (const float*)tileValuePtrs[tileIdx];
 
             // Convert global grid coordinates to tile-local coordinates
-            // Add TILE_OVERLAP to account for the overlap region at the start
+            // Add tileOverlap to account for the overlap region at the start
             int tileStartX = tileOffsets[tileIdx * 3 + 0];
             int tileStartY = tileOffsets[tileIdx * 3 + 1];
             int tileStartZ = tileOffsets[tileIdx * 3 + 2];
 
-            int localX = (ix - tileStartX) + TILE_OVERLAP;
-            int localY = (iy - tileStartY) + TILE_OVERLAP;
-            int localZ = (iz - tileStartZ) + TILE_OVERLAP;
+            int localX = (ix - tileStartX) + tileOverlap;
+            int localY = (iy - tileStartY) + tileOverlap;
+            int localZ = (iz - tileStartZ) + tileOverlap;
 
             float interpolated = 0.0f;
             float dx = 0.0f, dy = 0.0f, dz = 0.0f;
@@ -178,7 +179,8 @@ extern "C" __global__ void computeGridForceTiled(
                     tileValues, localX, localY, localZ,
                     fx, fy, fz,
                     &interpolated, &dx, &dy, &dz,
-                    gridSpacing[0], gridSpacing[1], gridSpacing[2]
+                    gridSpacing[0], gridSpacing[1], gridSpacing[2],
+                    tileWithOverlap
                 );
             }
             // TODO: Add tricubic and triquintic tiled interpolation

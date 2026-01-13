@@ -5,6 +5,7 @@
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
 #include "openmm/NonbondedForce.h"
+#include "TileManager.h"
 
 namespace GridForcePlugin {
 
@@ -105,6 +106,13 @@ private:
     // Per-atom energy tracking (for debugging/analysis)
     OpenMM::CudaArray atomEnergyBuffer;         // Per-atom energy storage
     std::vector<float> lastAtomEnergies;         // Persistent copy of last atom energies
+
+    // Tiled grid streaming support
+    bool tiledMode;                              // Whether tiled streaming is enabled
+    std::unique_ptr<TileManager> tileManager;   // Manages tile loading and caching
+    CUfunction tiledKernel;                      // Kernel for tiled grid evaluation
+    std::vector<float> hostGridValues;          // Host-side copy of grid values (for tiling)
+    std::vector<float> hostGridDerivatives;     // Host-side copy of derivatives (for tiling)
 };
 
 // Clear GPU-side grid caches to free CUDA memory

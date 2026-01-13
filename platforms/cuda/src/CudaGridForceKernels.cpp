@@ -626,6 +626,63 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     kernel = cu.getKernel(module, "computeGridForce");
     addGroupEnergiesKernel = cu.getKernel(module, "addGroupEnergiesToTotal");
 
+    // Initialize tiled mode if enabled
+    tiledMode = force.getTiledMode();
+    if (tiledMode) {
+        // Compile tiled kernel (uses same module since all kernels are combined)
+        tiledKernel = cu.getKernel(module, "computeGridForceTiled");
+
+        // Get grid values for host-side storage (needed for tile extraction)
+        // We need to retrieve the original grid values since they may have been cleared
+        std::shared_ptr<GridData> gridData = force.getGridData();
+        std::shared_ptr<CachedGridData> cachedGridData = force.getCachedGridData();
+
+        if (gridData) {
+            hostGridValues.resize(counts[0] * counts[1] * counts[2]);
+            const auto& srcVals = gridData->getValues();
+            for (size_t i = 0; i < hostGridValues.size() && i < srcVals.size(); i++) {
+                hostGridValues[i] = (float)srcVals[i];
+            }
+            if (gridData->hasDerivatives()) {
+                const auto& srcDerivs = gridData->getDerivatives();
+                hostGridDerivatives.resize(srcDerivs.size());
+                for (size_t i = 0; i < hostGridDerivatives.size(); i++) {
+                    hostGridDerivatives[i] = (float)srcDerivs[i];
+                }
+            }
+        } else if (cachedGridData) {
+            hostGridValues.resize(counts[0] * counts[1] * counts[2]);
+            const auto& srcVals = cachedGridData->getOriginalValues();
+            for (size_t i = 0; i < hostGridValues.size() && i < srcVals.size(); i++) {
+                hostGridValues[i] = (float)srcVals[i];
+            }
+            if (cachedGridData->hasDerivatives()) {
+                const auto& srcDerivs = cachedGridData->getOriginalDerivatives();
+                hostGridDerivatives.resize(srcDerivs.size());
+                for (size_t i = 0; i < hostGridDerivatives.size(); i++) {
+                    hostGridDerivatives[i] = (float)srcDerivs[i];
+                }
+            }
+        } else {
+            throw OpenMMException("GridForce: Tiled mode requires GridData or CachedGridData");
+        }
+
+        // Initialize TileManager
+        TileConfig tileConfig;
+        tileConfig.tileSize = force.getTileSize();
+        tileConfig.memoryBudget = (size_t)force.getMemoryBudgetMB() * 1024 * 1024;
+
+        tileManager.reset(new TileManager(cu, tileConfig.memoryBudget));
+        tileManager->initFromGridData(
+            hostGridValues.data(),
+            hostGridDerivatives.empty() ? nullptr : hostGridDerivatives.data(),
+            counts[0], counts[1], counts[2],
+            (float)spacing[0], (float)spacing[1], (float)spacing[2],
+            originX, originY, originZ,
+            tileConfig
+        );
+    }
+
     hasInitializedKernel = true;
 
 #if DEBUG_GRIDFORCE
@@ -757,7 +814,98 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     printf("[FORCE DEBUG] Launching computeGridForce kernel (this=%p)\n", (void*)this);
 #endif
 
-    cu.executeKernel(kernel, args, kernelNumAtoms);
+    if (tiledMode && tileManager) {
+        // Tiled execution path: determine required tiles and launch tiled kernel
+
+        // Get particle positions from GPU
+        int totalParticles = cu.getNumAtoms();
+        std::vector<float4> posqHost(totalParticles);
+        cu.getPosq().download(posqHost);
+
+        // Extract positions for tile determination
+        std::vector<float> positions;
+        if (totalGroupParticles > 0) {
+            // Multi-ligand mode: use flattened group particle indices
+            std::vector<int> groupIndicesHost(totalGroupParticles);
+            allGroupParticleIndices.download(groupIndicesHost);
+            positions.reserve(totalGroupParticles * 3);
+            for (int i = 0; i < totalGroupParticles; i++) {
+                int idx = groupIndicesHost[i];
+                positions.push_back(posqHost[idx].x);
+                positions.push_back(posqHost[idx].y);
+                positions.push_back(posqHost[idx].z);
+            }
+        } else if (!particles.empty()) {
+            // Filtered particles mode
+            positions.reserve(particles.size() * 3);
+            for (int idx : particles) {
+                positions.push_back(posqHost[idx].x);
+                positions.push_back(posqHost[idx].y);
+                positions.push_back(posqHost[idx].z);
+            }
+        } else {
+            // All particles mode
+            positions.reserve(numAtoms * 3);
+            for (int i = 0; i < numAtoms; i++) {
+                positions.push_back(posqHost[i].x);
+                positions.push_back(posqHost[i].y);
+                positions.push_back(posqHost[i].z);
+            }
+        }
+
+        // Prepare tiles for force computation
+        if (!tileManager->prepareTiles(positions)) {
+            throw OpenMMException("GridForce: Failed to prepare tiles for force computation");
+        }
+
+        // Get tile lookup table (cast away const for CudaArray::getDevicePointer which is non-const)
+        TileLookupTable& lookup = const_cast<TileLookupTable&>(tileManager->getLookupTable());
+
+        // Launch tiled kernel
+        CUdeviceptr tileOffsetsPtr = lookup.tileOffsets.getDevicePointer();
+        CUdeviceptr tileValuePtrsPtr = lookup.tileValuePtrs.getDevicePointer();
+        CUdeviceptr tileDerivPtrsPtr = lookup.tileDerivPtrs.isInitialized() ? lookup.tileDerivPtrs.getDevicePointer() : 0;
+        int numTiles = lookup.numLoadedTiles;
+
+        // Get tile configuration from TileManager
+        const TileConfig& tileConfig = tileManager->getConfig();
+        int tileSizeParam = tileConfig.tileSize;
+        int tileOverlapParam = tileConfig.overlap;
+
+        void* tiledArgs[] = {
+            &posqPtr,
+            &forcePtr,
+            &countsPtr,
+            &spacingPtr,
+            &scalingPtr,
+            &invPower,
+            &invPowerMode,
+            &interpolationMethod,
+            &outOfBoundsRestraint,
+            &originX,
+            &originY,
+            &originZ,
+            &energyPtr,
+            &kernelNumAtoms,
+            &paddedNumAtoms,
+            &particleIndicesPtr,
+            &particleToGroupMapPtr,
+            &groupEnergyBufferPtr,
+            &atomEnergyBufferPtr,
+            &numParticleGroups,
+            &tileOffsetsPtr,
+            &tileValuePtrsPtr,
+            &tileDerivPtrsPtr,
+            &numTiles,
+            &tileSizeParam,
+            &tileOverlapParam
+        };
+
+        cu.executeKernel(tiledKernel, tiledArgs, kernelNumAtoms);
+    } else {
+        // Standard (non-tiled) execution path
+        cu.executeKernel(kernel, args, kernelNumAtoms);
+    }
 
 #if DEBUG_GRIDFORCE
     cudaDeviceSynchronize();  // Ensure kernel printf output is flushed
