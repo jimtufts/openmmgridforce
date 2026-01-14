@@ -406,6 +406,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     g_spacing.upload(spacingVec);
     g_scaling_factors.upload(scalingFloat);
 
+    // Check tiled mode early - if enabled, we skip GPU caching of full grid
+    // (TileManager will handle streaming tiles to GPU on demand)
+    bool willUseTiledMode = force.getTiledMode();
+
     // Grid values: check cache first to enable sharing across multiple GridForce instances
     // Priority: GridData > CachedGridData > vals.data()
     std::shared_ptr<GridData> sharedGridData = force.getGridData();
@@ -423,19 +427,42 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     } else {
         throw OpenMMException("GridForce: No grid values or GridData provided");
     }
-    auto cacheKey = std::make_pair((void*)&cu, gridHash);
-    auto it = gridCache.find(cacheKey);
 
-    if (it != gridCache.end()) {
-        // Try to lock weak_ptr to get shared_ptr
-        g_vals_shared = it->second.lock();
-        if (g_vals_shared) {
-            // Successfully reused cached grid
-            vals.clear();
-            vals.shrink_to_fit();
+    // Only upload full grid to GPU if NOT using tiled mode
+    // (Tiled mode streams tiles on demand via TileManager)
+    if (!willUseTiledMode) {
+        auto cacheKey = std::make_pair((void*)&cu, gridHash);
+        auto it = gridCache.find(cacheKey);
+
+        if (it != gridCache.end()) {
+            // Try to lock weak_ptr to get shared_ptr
+            g_vals_shared = it->second.lock();
+            if (g_vals_shared) {
+                // Successfully reused cached grid
+                vals.clear();
+                vals.shrink_to_fit();
+            } else {
+                // Cached entry expired - remove it and create new one
+                gridCache.erase(it);
+                vector<float> valsFloat(vals.begin(), vals.end());
+                g_vals_shared = std::make_shared<CudaArray>();
+                g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
+                g_vals_shared->upload(valsFloat);
+                gridCache[cacheKey] = g_vals_shared;
+                vals.clear();
+                vals.shrink_to_fit();
+            }
         } else {
-            // Cached entry expired - remove it and create new one
-            gridCache.erase(it);
+            // First instance with this grid - allocate and cache it
+            // First, clean up any expired entries to prevent unbounded cache growth
+            for (auto it = gridCache.begin(); it != gridCache.end(); ) {
+                if (it->second.expired()) {
+                    it = gridCache.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
             vector<float> valsFloat(vals.begin(), vals.end());
             g_vals_shared = std::make_shared<CudaArray>();
             g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
@@ -444,25 +471,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             vals.clear();
             vals.shrink_to_fit();
         }
-    } else {
-        // First instance with this grid - allocate and cache it
-        // First, clean up any expired entries to prevent unbounded cache growth
-        for (auto it = gridCache.begin(); it != gridCache.end(); ) {
-            if (it->second.expired()) {
-                it = gridCache.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        vector<float> valsFloat(vals.begin(), vals.end());
-        g_vals_shared = std::make_shared<CudaArray>();
-        g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
-        g_vals_shared->upload(valsFloat);
-        gridCache[cacheKey] = g_vals_shared;
-        vals.clear();
-        vals.shrink_to_fit();
-    }
+    } // end if (!willUseTiledMode)
 
     // Upload particle indices if filtering is enabled
     if (!particles.empty()) {
@@ -470,30 +479,52 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         particleIndices.upload(particles);
     }
 
-    // Upload derivatives if they exist (for triquintic interpolation)
-    if (force.hasDerivatives()) {
+    // Upload derivatives if they exist (for tricubic/triquintic interpolation)
+    // Skip if using tiled mode - TileManager handles derivative streaming
+    if (!willUseTiledMode && force.hasDerivatives()) {
         vector<double> derivatives_vec = force.getDerivatives();
 
         // Skip if derivatives vector is empty to avoid CUDA allocation errors
-        if (derivatives_vec.empty()) {
-            // hasDerivatives() returned true but vector is empty - skip derivative caching
-        } else {
+        if (!derivatives_vec.empty()) {
+            // Check cache for derivatives (same hash as grid values since they're from same source)
+            auto derivCacheKey = std::make_pair((void*)&cu, gridHash);
+            auto derivIt = derivativeCache.find(derivCacheKey);
 
-        // Check cache for derivatives (same hash as grid values since they're from same source)
-        auto derivCacheKey = std::make_pair((void*)&cu, gridHash);
-        auto derivIt = derivativeCache.find(derivCacheKey);
-
-        if (derivIt != derivativeCache.end()) {
-            // Try to lock weak_ptr
-            g_derivatives_shared = derivIt->second.lock();
-            if (g_derivatives_shared) {
-                // Successfully reused cached derivatives
-//                 std::cout << "Reusing cached derivatives" << std::endl;
-                derivatives_vec.clear();
-                derivatives_vec.shrink_to_fit();
+            if (derivIt != derivativeCache.end()) {
+                // Try to lock weak_ptr
+                g_derivatives_shared = derivIt->second.lock();
+                if (g_derivatives_shared) {
+                    // Successfully reused cached derivatives
+                    derivatives_vec.clear();
+                    derivatives_vec.shrink_to_fit();
+                } else {
+                    // Cached entry expired - remove and create new
+                    derivativeCache.erase(derivIt);
+                    vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
+                    g_derivatives_shared = std::make_shared<CudaArray>();
+                    cu.setAsCurrent();
+                    try {
+                        g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
+                        g_derivatives_shared->upload(derivativesFloat);
+                        derivativeCache[derivCacheKey] = g_derivatives_shared;
+                        derivatives_vec.clear();
+                        derivatives_vec.shrink_to_fit();
+                    } catch (const std::exception& e) {
+                        std::cerr << "ERROR caching derivatives: " << e.what() << std::endl;
+                        throw;
+                    }
+                }
             } else {
-                // Cached entry expired - remove and create new
-                derivativeCache.erase(derivIt);
+                // First instance - allocate and cache derivatives
+                // First, clean up any expired entries to prevent unbounded cache growth
+                for (auto it = derivativeCache.begin(); it != derivativeCache.end(); ) {
+                    if (it->second.expired()) {
+                        it = derivativeCache.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+
                 vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
                 g_derivatives_shared = std::make_shared<CudaArray>();
                 cu.setAsCurrent();
@@ -508,32 +539,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                     throw;
                 }
             }
-        } else {
-            // First instance - allocate and cache derivatives
-            // First, clean up any expired entries to prevent unbounded cache growth
-            for (auto it = derivativeCache.begin(); it != derivativeCache.end(); ) {
-                if (it->second.expired()) {
-                    it = derivativeCache.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-
-            vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
-            g_derivatives_shared = std::make_shared<CudaArray>();
-            cu.setAsCurrent();
-            try {
-                g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
-                g_derivatives_shared->upload(derivativesFloat);
-                derivativeCache[derivCacheKey] = g_derivatives_shared;
-                derivatives_vec.clear();
-                derivatives_vec.shrink_to_fit();
-            } catch (const std::exception& e) {
-                std::cerr << "ERROR caching derivatives: " << e.what() << std::endl;
-                throw;
-            }
-        } // end else (first instance - derivIt not found)
-        } // end if (!derivatives_vec.empty())
+        }
     }
 
     // Store out-of-bounds restraint and interpolation method (gridCap and invPower already set above)
