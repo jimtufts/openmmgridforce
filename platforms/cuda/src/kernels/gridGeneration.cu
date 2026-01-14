@@ -37,15 +37,20 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
     const float originZ,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    const int totalGridPoints) {
+    const int totalGridPoints,
+    const int chunkSize,        // Number of points in this chunk (for bounds checking)
+    const int chunkOffset) {    // Global grid index offset for this chunk
 
-    // Get grid point index
-    const unsigned int gridIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Get local index within this chunk
+    const unsigned int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (gridIdx >= totalGridPoints)
+    if (localIdx >= chunkSize)
         return;
 
-    // Convert linear index to 3D grid coordinates
+    // Get global grid point index
+    const unsigned int gridIdx = localIdx + chunkOffset;
+
+    // Convert global index to 3D grid coordinates
     const int nyz = gridCounts[1] * gridCounts[2];
     const int i = gridIdx / nyz;
     const int remainder = gridIdx % nyz;
@@ -179,14 +184,14 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
     // Scale sixth derivative
     cartesian_derivs[26] *= dx * dx * dy * dy * dz * dz;  // ∂⁶U/∂x²∂y²∂z²
 
-    // Store in layout [deriv_idx * totalGridPoints + gridIdx]
+    // Store in layout [deriv_idx * chunkSize + localIdx]
     // Keep RASPA3 order for compatibility with TRIQUINTIC_COEFFICIENTS matrix
     // Order: f, dx, dy, dz, dxx, dxy, dxz, dyy, dyz, dzz, dxxy, ...
     //
     // IMPORTANT: RASPA3 triquintic uses RAW derivatives, not logarithmic!
     // Store derivatives as-is for standard triquintic interpolation.
     for (int idx = 0; idx < 27; idx++) {
-        gridData[idx * totalGridPoints + gridIdx] = cartesian_derivs[idx];
+        gridData[idx * chunkSize + localIdx] = cartesian_derivs[idx];
     }
 }
 
@@ -205,15 +210,20 @@ extern "C" __global__ void generateGridKernel(
     const float originZ,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    const int totalGridPoints) {
+    const int totalGridPoints,
+    const int chunkSize,        // Number of points in this chunk (for bounds checking)
+    const int chunkOffset) {    // Global grid index offset for this chunk
 
-    // Get grid point index
-    const unsigned int gridIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Get local index within this chunk
+    const unsigned int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (gridIdx >= totalGridPoints)
+    if (localIdx >= chunkSize)
         return;
 
-    // Convert linear index to 3D grid coordinates
+    // Get global grid point index
+    const unsigned int gridIdx = localIdx + chunkOffset;
+
+    // Convert global index to 3D grid coordinates
     const int nyz = gridCounts[1] * gridCounts[2];
     const int i = gridIdx / nyz;
     const int remainder = gridIdx % nyz;
@@ -356,7 +366,254 @@ extern "C" __global__ void generateGridKernel(
     }
 #endif
 
-    // Store result
-    gridValues[gridIdx] = gridValue;
+    // Store result (localIdx for chunk-sized output array)
+    gridValues[localIdx] = gridValue;
+}
+
+/**
+ * Generate a 3D tile region with analytical derivatives.
+ * Used for tile-by-tile generation to avoid holding full grid in memory.
+ *
+ * Output layout: [deriv_idx * tilePoints + localIdx] where localIdx is z-fastest
+ */
+extern "C" __global__ void generateTileWithAnalyticalDerivatives(
+    float* __restrict__ tileData,           // Output: 27 values per tile point
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorSigmas,
+    const float* __restrict__ receptorEpsilons,
+    const int numReceptorAtoms,
+    const int gridType,  // 0=charge, 1=ljr, 2=lja
+    const float gridCap,
+    const float invPower,
+    const int invPowerMode,
+    const float originX,
+    const float originY,
+    const float originZ,
+    const float spacingX,
+    const float spacingY,
+    const float spacingZ,
+    const int tileStartX,   // Global grid coordinates where tile starts
+    const int tileStartY,
+    const int tileStartZ,
+    const int tileSizeX,    // Actual tile dimensions (may be smaller at boundaries)
+    const int tileSizeY,
+    const int tileSizeZ) {
+
+    // Get local index within tile
+    const unsigned int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int tilePoints = tileSizeX * tileSizeY * tileSizeZ;
+
+    if (localIdx >= tilePoints)
+        return;
+
+    // Convert local index to local 3D coordinates within tile (z-fastest)
+    const int localX = localIdx / (tileSizeY * tileSizeZ);
+    const int remainder = localIdx % (tileSizeY * tileSizeZ);
+    const int localY = remainder / tileSizeZ;
+    const int localZ = remainder % tileSizeZ;
+
+    // Convert to global grid coordinates
+    const int globalX = tileStartX + localX;
+    const int globalY = tileStartY + localY;
+    const int globalZ = tileStartZ + localZ;
+
+    // Calculate grid point position (in nm)
+    const float gridPos[3] = {
+        originX + globalX * spacingX,
+        originY + globalY * spacingY,
+        originZ + globalZ * spacingZ
+    };
+
+    // Initialize accumulator for 27 Cartesian derivatives
+    float cartesian_derivs[27];
+    for (int idx = 0; idx < 27; idx++) {
+        cartesian_derivs[idx] = 0.0f;
+    }
+
+    // Loop over all receptor atoms and accumulate contributions
+    for (int atomIdx = 0; atomIdx < numReceptorAtoms; atomIdx++) {
+        float3 atomPos = receptorPositions[atomIdx];
+
+        float dr[3] = {
+            gridPos[0] - atomPos.x,
+            gridPos[1] - atomPos.y,
+            gridPos[2] - atomPos.z
+        };
+
+        float r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2];
+
+        const float r2_min = 0.0004f;
+        if (r2 < r2_min) {
+            r2 = r2_min;
+        }
+
+        float radial_derivs[7];
+
+        if (gridType == 0) {
+            float charge = receptorCharges[atomIdx];
+            computeCoulombRadialDerivatives(r2, charge, radial_derivs);
+        } else if (gridType == 1) {
+            float epsilon = receptorEpsilons[atomIdx];
+            float sigma = receptorSigmas[atomIdx];
+            computeGeometricLJRepulsionRadialDerivatives(r2, epsilon, sigma, radial_derivs);
+        } else if (gridType == 2) {
+            float epsilon = receptorEpsilons[atomIdx];
+            float sigma = receptorSigmas[atomIdx];
+            computeGeometricLJAttractionRadialDerivatives(r2, epsilon, sigma, radial_derivs);
+        }
+
+        accumulateCartesianDerivatives(dr, radial_derivs, cartesian_derivs);
+    }
+
+    // Apply tanh capping
+    float capped_derivs[27];
+    applyTanhChainRule(cartesian_derivs, gridCap, capped_derivs);
+
+    for (int i = 0; i < 27; i++) {
+        cartesian_derivs[i] = capped_derivs[i];
+    }
+
+    // Apply inverse power transformation if STORED mode
+    if (invPower != 0.0f && invPowerMode == 2) {
+        float p = 1.0f / invPower;
+        float transformed_derivs[27];
+        applyInvPowerChainRule(cartesian_derivs, p, transformed_derivs);
+
+        for (int i = 0; i < 27; i++) {
+            cartesian_derivs[i] = transformed_derivs[i];
+        }
+    }
+
+    // Scale derivatives to cell-fractional coordinates
+    const float dx = spacingX, dy = spacingY, dz = spacingZ;
+
+    cartesian_derivs[1] *= dx;
+    cartesian_derivs[2] *= dy;
+    cartesian_derivs[3] *= dz;
+
+    cartesian_derivs[4] *= dx * dx;
+    cartesian_derivs[5] *= dx * dy;
+    cartesian_derivs[6] *= dx * dz;
+    cartesian_derivs[7] *= dy * dy;
+    cartesian_derivs[8] *= dy * dz;
+    cartesian_derivs[9] *= dz * dz;
+
+    cartesian_derivs[10] *= dx * dx * dy;
+    cartesian_derivs[11] *= dx * dx * dz;
+    cartesian_derivs[12] *= dx * dy * dy;
+    cartesian_derivs[13] *= dx * dy * dz;
+    cartesian_derivs[14] *= dy * dy * dz;
+    cartesian_derivs[15] *= dx * dz * dz;
+    cartesian_derivs[16] *= dy * dz * dz;
+
+    cartesian_derivs[17] *= dx * dx * dy * dy;
+    cartesian_derivs[18] *= dx * dx * dz * dz;
+    cartesian_derivs[19] *= dy * dy * dz * dz;
+    cartesian_derivs[20] *= dx * dx * dy * dz;
+    cartesian_derivs[21] *= dx * dy * dy * dz;
+    cartesian_derivs[22] *= dx * dy * dz * dz;
+
+    cartesian_derivs[23] *= dx * dx * dy * dy * dz;
+    cartesian_derivs[24] *= dx * dx * dy * dz * dz;
+    cartesian_derivs[25] *= dx * dy * dy * dz * dz;
+
+    cartesian_derivs[26] *= dx * dx * dy * dy * dz * dz;
+
+    // Store in layout [deriv_idx * tilePoints + localIdx]
+    for (int idx = 0; idx < 27; idx++) {
+        tileData[idx * tilePoints + localIdx] = cartesian_derivs[idx];
+    }
+}
+
+/**
+ * Generate a 3D tile region (values only, no derivatives).
+ */
+extern "C" __global__ void generateTileKernel(
+    float* __restrict__ tileValues,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorSigmas,
+    const float* __restrict__ receptorEpsilons,
+    const int numReceptorAtoms,
+    const int gridType,
+    const float gridCap,
+    const float invPower,
+    const float originX,
+    const float originY,
+    const float originZ,
+    const float spacingX,
+    const float spacingY,
+    const float spacingZ,
+    const int tileStartX,
+    const int tileStartY,
+    const int tileStartZ,
+    const int tileSizeX,
+    const int tileSizeY,
+    const int tileSizeZ) {
+
+    const unsigned int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int tilePoints = tileSizeX * tileSizeY * tileSizeZ;
+
+    if (localIdx >= tilePoints)
+        return;
+
+    // Convert local index to global grid coordinates
+    const int localX = localIdx / (tileSizeY * tileSizeZ);
+    const int remainder = localIdx % (tileSizeY * tileSizeZ);
+    const int localY = remainder / tileSizeZ;
+    const int localZ = remainder % tileSizeZ;
+
+    const int globalX = tileStartX + localX;
+    const int globalY = tileStartY + localY;
+    const int globalZ = tileStartZ + localZ;
+
+    const float gx = originX + globalX * spacingX;
+    const float gy = originY + globalY * spacingY;
+    const float gz = originZ + globalZ * spacingZ;
+
+    const float COULOMB_CONST = 138.935456f;
+    const float U_MAX = gridCap;
+
+    float gridValue = 0.0f;
+
+    for (int atomIdx = 0; atomIdx < numReceptorAtoms; atomIdx++) {
+        float3 atomPos = receptorPositions[atomIdx];
+
+        const float dx = gx - atomPos.x;
+        const float dy = gy - atomPos.y;
+        const float dz = gz - atomPos.z;
+        const float r2 = dx*dx + dy*dy + dz*dz;
+        float r = sqrtf(r2);
+
+        if (r < 1e-6f) {
+            r = 1e-6f;
+        }
+
+        float contrib = 0.0f;
+        if (gridType == 0) {
+            contrib = COULOMB_CONST * receptorCharges[atomIdx] / r;
+        } else if (gridType == 1) {
+            const float rmin = powf(2.0f, 1.0f/6.0f) * receptorSigmas[atomIdx];
+            const float r6 = rmin * rmin * rmin * rmin * rmin * rmin;
+            const float r12 = r2 * r2 * r2 * r2 * r2 * r2;
+            contrib = sqrtf(receptorEpsilons[atomIdx]) * r6 / r12;
+        } else if (gridType == 2) {
+            const float rmin = powf(2.0f, 1.0f/6.0f) * receptorSigmas[atomIdx];
+            const float r3 = rmin * rmin * rmin;
+            const float r6 = r2 * r2 * r2;
+            contrib = -2.0f * sqrtf(receptorEpsilons[atomIdx]) * r3 / r6;
+        }
+        gridValue += contrib;
+    }
+
+    gridValue = U_MAX * tanhf(gridValue / U_MAX);
+
+    if (invPower != 0.0f) {
+        float sign = (gridValue >= 0.0f) ? 1.0f : -1.0f;
+        gridValue = sign * powf(fabsf(gridValue), 1.0f / invPower);
+    }
+
+    tileValues[localIdx] = gridValue;
 }
 

@@ -6,6 +6,7 @@
 #include "openmm/cuda/CudaArray.h"
 #include "openmm/NonbondedForce.h"
 #include "TileManager.h"
+#include "TiledGridData.h"
 
 namespace GridForcePlugin {
 
@@ -66,6 +67,20 @@ private:
                      double originX, double originY, double originZ,
                      std::vector<double>& vals,
                      std::vector<double>& derivatives);
+
+    /**
+     * Generate grid directly to a tiled file, tile-by-tile.
+     * This avoids holding the full grid in memory - suitable for very large grids.
+     */
+    void generateGridToTiledFile(const OpenMM::System& system,
+                                 const OpenMM::NonbondedForce* nonbondedForce,
+                                 const std::string& gridType,
+                                 const std::vector<int>& receptorAtoms,
+                                 const std::vector<OpenMM::Vec3>& receptorPositions,
+                                 double originX, double originY, double originZ,
+                                 const std::string& outputFilename,
+                                 bool computeDerivatives,
+                                 int tileSize = 32);
 
     bool hasInitializedKernel;
     int numAtoms;

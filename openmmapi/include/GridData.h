@@ -133,6 +133,7 @@ public:
      * Set derivatives (for construction/builder pattern).
      */
     void setDerivatives(const std::vector<double>& derivs);
+    void setDerivatives(std::vector<double>&& derivs);  // Move overload for large arrays
     void setDerivatives(std::shared_ptr<std::vector<double>> derivs) { m_derivatives = derivs; }
 
 private:

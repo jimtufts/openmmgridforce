@@ -586,6 +586,48 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      */
     void saveToFile(const std::string& filename) const;
 
+    /**
+     * Set output file for tiled grid generation.
+     * When set and auto-generation is enabled, the grid will be generated
+     * tile-by-tile directly to this file, avoiding the need to hold the
+     * full grid in memory. This is useful for very large grids.
+     *
+     * @param filename  path to output tiled grid file
+     * @param tileSize  size of tiles (default 32)
+     */
+    void setTiledOutputFile(const std::string& filename, int tileSize = 32);
+
+    /**
+     * Get the tiled output filename, or empty string if not set.
+     */
+    const std::string& getTiledOutputFile() const { return m_tiledOutputFile; }
+
+    /**
+     * Get the tile size for tiled output.
+     */
+    int getTiledOutputTileSize() const { return m_tiledOutputTileSize; }
+
+    /**
+     * Set input file for tiled grid evaluation.
+     * When set, the grid will be loaded from this tiled file on demand
+     * rather than from memory. This is useful for very large grids
+     * that don't fit in GPU or host memory.
+     *
+     * When a tiled input file is specified:
+     * - Tiles are loaded on-demand during force evaluation
+     * - Only tiles containing particles are loaded to GPU
+     * - LRU caching is used to manage GPU memory
+     * - Tiled mode is automatically enabled
+     *
+     * @param filename  path to input tiled grid file (TiledGridData format)
+     */
+    void setTiledInputFile(const std::string& filename);
+
+    /**
+     * Get the tiled input filename, or empty string if not set.
+     */
+    const std::string& getTiledInputFile() const { return m_tiledInputFile; }
+
     void getGridParameters(std::vector<int> &g_counts,
                            std::vector<double> &g_spacing,
                            std::vector<double> &g_vals,
@@ -657,6 +699,13 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     bool m_tiledMode;            // Whether to use tiled grid storage
     int m_tileSize;              // Tile size in grid points (default: 64)
     int m_memoryBudgetMB;        // GPU memory budget in MB (default: 2048)
+
+    // Tiled file output (for generating directly to file)
+    std::string m_tiledOutputFile;   // Output file for tiled generation
+    int m_tiledOutputTileSize;       // Tile size for tiled output (default: 32)
+
+    // Tiled file input (for loading tiles on demand during evaluation)
+    std::string m_tiledInputFile;    // Input tiled grid file
 };
 
 }  // namespace GridForcePlugin

@@ -42,6 +42,11 @@ void GridData::setDerivatives(const vector<double>& derivs) {
     *m_derivatives = derivs;
 }
 
+void GridData::setDerivatives(vector<double>&& derivs) {
+    // Move overload - avoids copying large derivative arrays (can be 45+ GB)
+    m_derivatives = make_shared<vector<double>>(std::move(derivs));
+}
+
 shared_ptr<GridData> GridData::loadFromFile(const string& filename) {
     auto gridData = make_shared<GridData>();
 

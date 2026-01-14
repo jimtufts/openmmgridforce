@@ -1,6 +1,7 @@
 #include "TileManager.h"
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 
 using namespace OpenMM;
@@ -12,11 +13,16 @@ using namespace GridForcePlugin;
 
 TiledGrid::TiledGrid()
     : values_(nullptr), derivatives_(nullptr),
+      fileBacked_(false),
       nx_(0), ny_(0), nz_(0),
       spacingX_(0), spacingY_(0), spacingZ_(0),
       originX_(0), originY_(0), originZ_(0),
       numTilesX_(0), numTilesY_(0), numTilesZ_(0),
-      initialized_(false) {
+      initialized_(false), hasDerivatives_(false) {
+}
+
+TiledGrid::~TiledGrid() {
+    // unique_ptr handles cleanup of tiledFile_
 }
 
 void TiledGrid::initFromGridData(const float* values, const float* derivatives,
@@ -26,6 +32,8 @@ void TiledGrid::initFromGridData(const float* values, const float* derivatives,
                                   const TileConfig& config) {
     values_ = values;
     derivatives_ = derivatives;
+    fileBacked_ = false;
+    tiledFile_.reset();
     nx_ = nx;
     ny_ = ny;
     nz_ = nz;
@@ -36,12 +44,51 @@ void TiledGrid::initFromGridData(const float* values, const float* derivatives,
     originY_ = originY;
     originZ_ = originZ;
     config_ = config;
+    hasDerivatives_ = (derivatives != nullptr);
 
     // Calculate number of tiles in each dimension
     // Tiles cover the grid with overlap at boundaries
     numTilesX_ = (nx + config.tileSize - 1) / config.tileSize;
     numTilesY_ = (ny + config.tileSize - 1) / config.tileSize;
     numTilesZ_ = (nz + config.tileSize - 1) / config.tileSize;
+
+    initialized_ = true;
+}
+
+void TiledGrid::initFromTiledFile(const std::string& filename, const TileConfig& config) {
+    // Clear any previous memory-backed data
+    values_ = nullptr;
+    derivatives_ = nullptr;
+    fileBacked_ = true;
+
+    // Open the tiled grid file
+    tiledFile_.reset(new TiledGridData());
+    tiledFile_->openForReading(filename);
+
+    // Get grid metadata from file
+    const auto& counts = tiledFile_->getCounts();
+    const auto& spacing = tiledFile_->getSpacing();
+    const auto& origin = tiledFile_->getOrigin();
+
+    nx_ = counts[0];
+    ny_ = counts[1];
+    nz_ = counts[2];
+    spacingX_ = (float)spacing[0];
+    spacingY_ = (float)spacing[1];
+    spacingZ_ = (float)spacing[2];
+    originX_ = (float)origin[0];
+    originY_ = (float)origin[1];
+    originZ_ = (float)origin[2];
+    hasDerivatives_ = tiledFile_->hasDerivatives();
+
+    // Use config from file for tile size (should match)
+    config_ = config;
+    config_.tileSize = tiledFile_->getTileSize();
+
+    // Get tile counts from file
+    numTilesX_ = tiledFile_->getNumTilesX();
+    numTilesY_ = tiledFile_->getNumTilesY();
+    numTilesZ_ = tiledFile_->getNumTilesZ();
 
     initialized_ = true;
 }
@@ -84,6 +131,16 @@ void TiledGrid::getTileData(const TileID& id,
         throw std::runtime_error("TiledGrid not initialized");
     }
 
+    if (fileBacked_) {
+        getTileDataFromFile(id, tileValues, tileDerivatives);
+    } else {
+        getTileDataFromMemory(id, tileValues, tileDerivatives);
+    }
+}
+
+void TiledGrid::getTileDataFromMemory(const TileID& id,
+                                      std::vector<float>& tileValues,
+                                      std::vector<float>* tileDerivatives) const {
     int tileWithOverlap = config_.getTileWithOverlap();
     int overlap = config_.overlap;
 
@@ -125,6 +182,142 @@ void TiledGrid::getTileData(const TileID& id,
                     for (int d = 0; d < 27; d++) {
                         (*tileDerivatives)[d * tilePoints + tileIdx] =
                             derivatives_[d * (nx_ * ny_ * nz_) + gridIdx];
+                    }
+                }
+            }
+        }
+    }
+}
+
+void TiledGrid::getTileDataFromFile(const TileID& id,
+                                    std::vector<float>& tileValues,
+                                    std::vector<float>* tileDerivatives) const {
+    if (!tiledFile_) {
+        throw std::runtime_error("TiledGrid: No tiled file open");
+    }
+
+    // The TiledGridData format stores tiles without overlap - we need to
+    // read the core tile data plus neighboring tiles to build the overlap region
+
+    int tileWithOverlap = config_.getTileWithOverlap();
+    int overlap = config_.overlap;
+
+    // Allocate output arrays
+    size_t tilePoints = tileWithOverlap * tileWithOverlap * tileWithOverlap;
+    tileValues.resize(tilePoints);
+    if (tileDerivatives && hasDerivatives_) {
+        tileDerivatives->resize(27 * tilePoints);
+    }
+
+    // We need to read tile data from potentially 27 neighboring tiles
+    // (3x3x3 block centered on the requested tile) to build the overlap region
+
+    // First, determine the range of tiles we need
+    int minTileX = std::max(0, id.tx - 1);
+    int maxTileX = std::min(numTilesX_ - 1, id.tx + 1);
+    int minTileY = std::max(0, id.ty - 1);
+    int maxTileY = std::min(numTilesY_ - 1, id.ty + 1);
+    int minTileZ = std::max(0, id.tz - 1);
+    int maxTileZ = std::min(numTilesZ_ - 1, id.tz + 1);
+
+    // Calculate the grid offset for this tile (where it starts in full grid)
+    int3 offset = getTileGridOffset(id);
+    int srcStartX = offset.x - overlap;
+    int srcStartY = offset.y - overlap;
+    int srcStartZ = offset.z - overlap;
+
+    // Read each potentially relevant tile and copy the needed data
+    for (int ntx = minTileX; ntx <= maxTileX; ntx++) {
+        for (int nty = minTileY; nty <= maxTileY; nty++) {
+            for (int ntz = minTileZ; ntz <= maxTileZ; ntz++) {
+                // Read this neighbor tile
+                std::vector<float> neighborValues;
+                std::vector<float> neighborDerivs;
+                tiledFile_->readTile(ntx, nty, ntz, neighborValues, neighborDerivs);
+
+                // Get the grid range covered by this neighbor tile
+                auto range = tiledFile_->getTileGridRange(ntx, nty, ntz);
+                int nStartX = range[0], nStartY = range[1], nStartZ = range[2];
+                int nEndX = range[3], nEndY = range[4], nEndZ = range[5];
+                int nSizeX = nEndX - nStartX;
+                int nSizeY = nEndY - nStartY;
+                int nSizeZ = nEndZ - nStartZ;
+
+                // Copy relevant portions to our output tile
+                for (int gx = nStartX; gx < nEndX; gx++) {
+                    // Where does this fall in our output tile (with overlap)?
+                    int lx = gx - srcStartX;
+                    if (lx < 0 || lx >= tileWithOverlap) continue;
+
+                    for (int gy = nStartY; gy < nEndY; gy++) {
+                        int ly = gy - srcStartY;
+                        if (ly < 0 || ly >= tileWithOverlap) continue;
+
+                        for (int gz = nStartZ; gz < nEndZ; gz++) {
+                            int lz = gz - srcStartZ;
+                            if (lz < 0 || lz >= tileWithOverlap) continue;
+
+                            // Index in output tile
+                            int tileIdx = lx * tileWithOverlap * tileWithOverlap + ly * tileWithOverlap + lz;
+
+                            // Index in neighbor tile (z-fastest layout matching TiledGridData)
+                            int nx = gx - nStartX;
+                            int ny = gy - nStartY;
+                            int nz = gz - nStartZ;
+                            int neighborIdx = nx * nSizeY * nSizeZ + ny * nSizeZ + nz;
+
+                            tileValues[tileIdx] = neighborValues[neighborIdx];
+
+                            if (tileDerivatives && hasDerivatives_) {
+                                int neighborPoints = nSizeX * nSizeY * nSizeZ;
+                                for (int d = 0; d < 27; d++) {
+                                    (*tileDerivatives)[d * tilePoints + tileIdx] =
+                                        neighborDerivs[d * neighborPoints + neighborIdx];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle boundary clamping for points outside the grid
+    // (clamp to edge values)
+    for (int lx = 0; lx < tileWithOverlap; lx++) {
+        int gx = srcStartX + lx;
+        int clampedGx = std::max(0, std::min(nx_ - 1, gx));
+
+        for (int ly = 0; ly < tileWithOverlap; ly++) {
+            int gy = srcStartY + ly;
+            int clampedGy = std::max(0, std::min(ny_ - 1, gy));
+
+            for (int lz = 0; lz < tileWithOverlap; lz++) {
+                int gz = srcStartZ + lz;
+                int clampedGz = std::max(0, std::min(nz_ - 1, gz));
+
+                // Only need to copy if we're outside the grid
+                if (gx != clampedGx || gy != clampedGy || gz != clampedGz) {
+                    int tileIdx = lx * tileWithOverlap * tileWithOverlap + ly * tileWithOverlap + lz;
+
+                    // Find the source index (clamped position)
+                    int srcLx = clampedGx - srcStartX;
+                    int srcLy = clampedGy - srcStartY;
+                    int srcLz = clampedGz - srcStartZ;
+
+                    // Make sure source is valid (should be if we read tiles correctly)
+                    if (srcLx >= 0 && srcLx < tileWithOverlap &&
+                        srcLy >= 0 && srcLy < tileWithOverlap &&
+                        srcLz >= 0 && srcLz < tileWithOverlap) {
+                        int srcTileIdx = srcLx * tileWithOverlap * tileWithOverlap + srcLy * tileWithOverlap + srcLz;
+                        tileValues[tileIdx] = tileValues[srcTileIdx];
+
+                        if (tileDerivatives && hasDerivatives_) {
+                            for (int d = 0; d < 27; d++) {
+                                (*tileDerivatives)[d * tilePoints + tileIdx] =
+                                    (*tileDerivatives)[d * tilePoints + srcTileIdx];
+                            }
+                        }
                     }
                 }
             }
@@ -265,6 +458,11 @@ void TileManager::initFromGridData(const float* values, const float* derivatives
     initialized_ = true;
 }
 
+void TileManager::initFromTiledFile(const std::string& filename, const TileConfig& config) {
+    hostGrid_.initFromTiledFile(filename, config);
+    initialized_ = true;
+}
+
 bool TileManager::prepareTiles(const std::vector<float>& positions) {
     if (!initialized_) {
         throw std::runtime_error("TileManager not initialized");
@@ -272,6 +470,22 @@ bool TileManager::prepareTiles(const std::vector<float>& positions) {
 
     // Determine required tiles
     std::set<TileID> requiredTiles = hostGrid_.getRequiredTiles(positions);
+
+    // Validate that all required tiles fit in memory budget
+    // This prevents thrashing and dangling pointers in the lookup table
+    const TileConfig& config = hostGrid_.getConfig();
+    size_t tileMemory = config.getTileTotalMemory(hostGrid_.hasDerivatives());
+    size_t requiredMemory = requiredTiles.size() * tileMemory;
+    size_t maxMemory = cache_.getMaxMemory();
+
+    if (requiredMemory > maxMemory) {
+        std::ostringstream msg;
+        msg << "TileManager: Required tiles (" << requiredTiles.size()
+            << " tiles, " << (requiredMemory / (1024.0 * 1024.0)) << " MB) "
+            << "exceed memory budget (" << (maxMemory / (1024.0 * 1024.0)) << " MB). "
+            << "Increase tile_memory_mb or reduce the number of particle groups/positions.";
+        throw std::runtime_error(msg.str());
+    }
 
     // Load missing tiles
     std::vector<TileID> tilesToLoad;
@@ -286,6 +500,7 @@ bool TileManager::prepareTiles(const std::vector<float>& positions) {
     }
 
     // Build lookup table for kernel
+    // Safe now because we validated all tiles fit in memory
     buildLookupTable(requiredTiles);
 
     return true;

@@ -16,6 +16,7 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 using namespace GridForcePlugin;
 using namespace OpenMM;
@@ -319,48 +320,78 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         double ox, oy, oz;
         force.getGridOrigin(ox, oy, oz);
 
-        // Generate grid and derivatives (if enabled)
-        std::vector<double> derivatives;
-        generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
-                     ox, oy, oz, vals, derivatives);
+        // Check if tiled output is requested
+        std::string tiledOutputFile = force.getTiledOutputFile();
+        if (!tiledOutputFile.empty()) {
+            // Generate directly to tiled file - avoids holding full grid in memory
+            int tiledTileSize = force.getTiledOutputTileSize();
+            generateGridToTiledFile(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
+                                    ox, oy, oz, tiledOutputFile, computeDerivatives, tiledTileSize);
 
-        // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
-        const_cast<GridForce&>(force).setGridValues(vals);
-        if (!derivatives.empty()) {
-            const_cast<GridForce&>(force).setDerivatives(derivatives);
-        }
+            std::cout << "GridForce: Tiled grid saved to " << tiledOutputFile << std::endl;
 
-        // Create GridData object with auto-generated values so saveToFile() uses new format
-        std::shared_ptr<GridData> gridData = std::make_shared<GridData>(
-            counts[0], counts[1], counts[2],
-            spacing[0], spacing[1], spacing[2]
-        );
-        gridData->setOrigin(ox, oy, oz);  // Set the grid origin
-        gridData->setValues(vals);
-        if (!derivatives.empty()) {
-            gridData->setDerivatives(derivatives);
-        }
-
-        // Set invPowerMode on the generated grid
-        if (invPower != 0.0f) {
-            gridData->setInvPower(invPower);
-            InvPowerMode mode = static_cast<InvPowerMode>(invPowerMode);
-            gridData->setInvPowerMode(mode);
-            const_cast<GridForce&>(force).setInvPowerMode(mode, invPower);
+            // Automatically set up tiled input for evaluation if tiled mode is requested
+            // This allows generate-then-evaluate in one run
+            if (force.getTiledMode()) {
+                std::cout << "  Setting up tiled input from generated file for evaluation" << std::endl;
+                // Set the tiled input file to the generated output file
+                const_cast<GridForce&>(force).setTiledInputFile(tiledOutputFile);
+                // Skip normal grid generation - tiled file is ready for use
+                // Continue to tiled mode initialization below
+            } else {
+                std::cout << "  Use setTiledInputFile() with setTiledMode(true) to evaluate" << std::endl;
+                // Skip the normal grid setup - we're done
+                return;
+            }
         } else {
-            gridData->setInvPower(0.0);
-            gridData->setInvPowerMode(InvPowerMode::NONE);
-            const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::NONE, 0.0);
-        }
+            // Normal (non-tiled) grid generation
+            // Generate grid and derivatives (if enabled)
+            std::vector<double> derivatives;
+            generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
+                         ox, oy, oz, vals, derivatives);
 
-        const_cast<GridForce&>(force).setGridData(gridData);
+            // Create GridData object with auto-generated values so saveToFile() uses new format
+            // Use move semantics to avoid copying large derivative arrays (can be 45+ GB)
+            std::shared_ptr<GridData> gridData = std::make_shared<GridData>(
+                counts[0], counts[1], counts[2],
+                spacing[0], spacing[1], spacing[2]
+            );
+            gridData->setOrigin(ox, oy, oz);  // Set the grid origin
+            gridData->setValues(vals);  // vals is smaller, copy is fine
+            if (!derivatives.empty()) {
+                gridData->setDerivatives(std::move(derivatives));  // Move to avoid 45GB copy
+            }
+
+            // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
+            // Note: We deliberately skip setDerivatives() on GridForce to avoid another 45GB copy
+            // The derivatives are accessible through GridData which GridForce holds via setGridData()
+            const_cast<GridForce&>(force).setGridValues(vals);
+
+            // Set invPowerMode on the generated grid
+            if (invPower != 0.0f) {
+                gridData->setInvPower(invPower);
+                InvPowerMode mode = static_cast<InvPowerMode>(invPowerMode);
+                gridData->setInvPowerMode(mode);
+                const_cast<GridForce&>(force).setInvPowerMode(mode, invPower);
+            } else {
+                gridData->setInvPower(0.0);
+                gridData->setInvPowerMode(InvPowerMode::NONE);
+                const_cast<GridForce&>(force).setInvPowerMode(InvPowerMode::NONE, 0.0);
+            }
+
+            const_cast<GridForce&>(force).setGridData(gridData);
+        }
     }
 
     if (spacing.size() != 3 || counts.size() != 3) {
         throw OpenMMException("GridForce: Grid dimensions must be 3D");
     }
 
-    if (vals.size() != counts[0] * counts[1] * counts[2]) {
+    // Skip vals validation when using tiled input file (vals will be empty, loaded on demand)
+    std::string tiledInputFile = force.getTiledInputFile();
+    bool usingTiledInput = !tiledInputFile.empty();
+
+    if (!usingTiledInput && vals.size() != (size_t)(counts[0] * counts[1] * counts[2])) {
         throw OpenMMException("GridForce: Number of grid values doesn't match grid dimensions");
     }
 
@@ -411,11 +442,15 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     bool willUseTiledMode = force.getTiledMode();
 
     // Grid values: check cache first to enable sharing across multiple GridForce instances
-    // Priority: GridData > CachedGridData > vals.data()
+    // Priority: TiledInput (no caching needed) > GridData > CachedGridData > vals.data()
     std::shared_ptr<GridData> sharedGridData = force.getGridData();
     std::shared_ptr<CachedGridData> cachedGridData = force.getCachedGridData();
-    size_t gridHash;
-    if (sharedGridData) {
+    size_t gridHash = 0;  // Default hash (used for tiled mode)
+
+    if (usingTiledInput) {
+        // Tiled input mode: tiles loaded on demand, no full grid caching
+        gridHash = std::hash<std::string>{}(tiledInputFile);
+    } else if (sharedGridData) {
         // Use GridData pointer as hash for O(1) cache lookup
         gridHash = reinterpret_cast<size_t>(sharedGridData.get());
     } else if (cachedGridData) {
@@ -425,7 +460,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         // Use values vector data pointer as hash (fallback for old code paths)
         gridHash = reinterpret_cast<size_t>(vals.data());
     } else {
-        throw OpenMMException("GridForce: No grid values or GridData provided");
+        throw OpenMMException("GridForce: No grid values, GridData, or tiled input file provided");
     }
 
     // Only upload full grid to GPU if NOT using tiled mode
@@ -481,8 +516,24 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
     // Upload derivatives if they exist (for tricubic/triquintic interpolation)
     // Skip if using tiled mode - TileManager handles derivative streaming
+    // Also skip if derivatives are too large for GPU memory (will need tiled mode for evaluation)
     if (!willUseTiledMode && force.hasDerivatives()) {
+        // Check available GPU memory before attempting to cache derivatives
+        size_t freeMem, totalMem;
+        cuMemGetInfo(&freeMem, &totalMem);
+
         vector<double> derivatives_vec = force.getDerivatives();
+        size_t derivativesBytes = derivatives_vec.size() * sizeof(float);
+
+        // Skip caching if derivatives would use more than 80% of available GPU memory
+        if (derivativesBytes > (size_t)(freeMem * 0.8)) {
+            std::cout << "GridForce: Derivatives too large for GPU cache ("
+                      << (derivativesBytes / (1024.0 * 1024 * 1024)) << " GB needed, "
+                      << (freeMem / (1024.0 * 1024 * 1024)) << " GB available). "
+                      << "Use tiled mode for evaluation." << std::endl;
+            // Clear derivatives_vec to skip caching but still allow save to file
+            derivatives_vec.clear();
+        }
 
         // Skip if derivatives vector is empty to avoid CUDA allocation errors
         if (!derivatives_vec.empty()) {
@@ -634,44 +685,11 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
     // Initialize tiled mode if enabled
     tiledMode = force.getTiledMode();
+    // Note: tiledInputFile already declared earlier in this function
+
     if (tiledMode) {
         // Compile tiled kernel (uses same module since all kernels are combined)
         tiledKernel = cu.getKernel(module, "computeGridForceTiled");
-
-        // Get grid values for host-side storage (needed for tile extraction)
-        // We need to retrieve the original grid values since they may have been cleared
-        std::shared_ptr<GridData> gridData = force.getGridData();
-        std::shared_ptr<CachedGridData> cachedGridData = force.getCachedGridData();
-
-        if (gridData) {
-            hostGridValues.resize(counts[0] * counts[1] * counts[2]);
-            const auto& srcVals = gridData->getValues();
-            for (size_t i = 0; i < hostGridValues.size() && i < srcVals.size(); i++) {
-                hostGridValues[i] = (float)srcVals[i];
-            }
-            if (gridData->hasDerivatives()) {
-                const auto& srcDerivs = gridData->getDerivatives();
-                hostGridDerivatives.resize(srcDerivs.size());
-                for (size_t i = 0; i < hostGridDerivatives.size(); i++) {
-                    hostGridDerivatives[i] = (float)srcDerivs[i];
-                }
-            }
-        } else if (cachedGridData) {
-            hostGridValues.resize(counts[0] * counts[1] * counts[2]);
-            const auto& srcVals = cachedGridData->getOriginalValues();
-            for (size_t i = 0; i < hostGridValues.size() && i < srcVals.size(); i++) {
-                hostGridValues[i] = (float)srcVals[i];
-            }
-            if (cachedGridData->hasDerivatives()) {
-                const auto& srcDerivs = cachedGridData->getOriginalDerivatives();
-                hostGridDerivatives.resize(srcDerivs.size());
-                for (size_t i = 0; i < hostGridDerivatives.size(); i++) {
-                    hostGridDerivatives[i] = (float)srcDerivs[i];
-                }
-            }
-        } else {
-            throw OpenMMException("GridForce: Tiled mode requires GridData or CachedGridData");
-        }
 
         // Initialize TileManager
         TileConfig tileConfig;
@@ -679,14 +697,61 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         tileConfig.memoryBudget = (size_t)force.getMemoryBudgetMB() * 1024 * 1024;
 
         tileManager.reset(new TileManager(cu, tileConfig.memoryBudget));
-        tileManager->initFromGridData(
-            hostGridValues.data(),
-            hostGridDerivatives.empty() ? nullptr : hostGridDerivatives.data(),
-            counts[0], counts[1], counts[2],
-            (float)spacing[0], (float)spacing[1], (float)spacing[2],
-            originX, originY, originZ,
-            tileConfig
-        );
+
+        // Check if we have a tiled input file (file-backed mode)
+        if (!tiledInputFile.empty()) {
+            // File-backed mode: load tiles on-demand from the tiled file
+            // This is memory-efficient for very large grids
+            tileManager->initFromTiledFile(tiledInputFile, tileConfig);
+
+            // Update grid parameters from the file
+            // The TileManager now has the correct grid metadata from the file
+            // We need to verify consistency with any existing grid parameters
+        } else {
+            // Memory-backed mode: copy grid values to host storage for tile extraction
+            // This requires the grid to fit in host memory
+            std::shared_ptr<GridData> gridData = force.getGridData();
+            std::shared_ptr<CachedGridData> cachedGridData = force.getCachedGridData();
+
+            if (gridData) {
+                hostGridValues.resize(counts[0] * counts[1] * counts[2]);
+                const auto& srcVals = gridData->getValues();
+                for (size_t i = 0; i < hostGridValues.size() && i < srcVals.size(); i++) {
+                    hostGridValues[i] = (float)srcVals[i];
+                }
+                if (gridData->hasDerivatives()) {
+                    const auto& srcDerivs = gridData->getDerivatives();
+                    hostGridDerivatives.resize(srcDerivs.size());
+                    for (size_t i = 0; i < hostGridDerivatives.size(); i++) {
+                        hostGridDerivatives[i] = (float)srcDerivs[i];
+                    }
+                }
+            } else if (cachedGridData) {
+                hostGridValues.resize(counts[0] * counts[1] * counts[2]);
+                const auto& srcVals = cachedGridData->getOriginalValues();
+                for (size_t i = 0; i < hostGridValues.size() && i < srcVals.size(); i++) {
+                    hostGridValues[i] = (float)srcVals[i];
+                }
+                if (cachedGridData->hasDerivatives()) {
+                    const auto& srcDerivs = cachedGridData->getOriginalDerivatives();
+                    hostGridDerivatives.resize(srcDerivs.size());
+                    for (size_t i = 0; i < hostGridDerivatives.size(); i++) {
+                        hostGridDerivatives[i] = (float)srcDerivs[i];
+                    }
+                }
+            } else {
+                throw OpenMMException("GridForce: Tiled mode requires GridData, CachedGridData, or a tiled input file");
+            }
+
+            tileManager->initFromGridData(
+                hostGridValues.data(),
+                hostGridDerivatives.empty() ? nullptr : hostGridDerivatives.data(),
+                counts[0], counts[1], counts[2],
+                (float)spacing[0], (float)spacing[1], (float)spacing[2],
+                originX, originY, originZ,
+                tileConfig
+            );
+        }
     }
 
     hasInitializedKernel = true;
@@ -1094,88 +1159,128 @@ void CudaCalcGridForceKernel::generateGrid(
     int numReceptorAtoms = receptorAtoms.size();
 
     int blockSize = 256;
-    int gridSize = (totalPoints + blockSize - 1) / blockSize;
     CUresult result;
 
     if (computeDerivatives) {
-        // Check if derivative array would exceed reasonable GPU memory limit (10 GB)
-        size_t derivativeBytes = 27 * totalPoints * sizeof(float);
-        const size_t MAX_DERIV_BYTES = 10LL * 1024 * 1024 * 1024;  // 10 GB
+        // Determine chunk size based on available GPU memory
+        // Query free GPU memory
+        size_t freeMem, totalMem;
+        cuMemGetInfo(&freeMem, &totalMem);
 
-        if (derivativeBytes > MAX_DERIV_BYTES) {
-            throw OpenMMException(
-                "GridForce: Derivative array would require " +
-                std::to_string(derivativeBytes / (1024.0 * 1024 * 1024)) +
-                " GB GPU memory, exceeding limit of " +
-                std::to_string(MAX_DERIV_BYTES / (1024.0 * 1024 * 1024)) +
-                " GB. Grid size: " + std::to_string(counts[0]) + "x" +
-                std::to_string(counts[1]) + "x" + std::to_string(counts[2]) +
-                ". Consider using a smaller grid or disabling derivative computation.");
+        // Use at most 50% of free memory for the chunk buffer, leave headroom for other allocations
+        // (receptor arrays, grid spacing, counts, and other OpenMM context data)
+        size_t maxChunkBytes = (size_t)(freeMem * 0.5);
+
+        // Each grid point requires 27 floats for derivatives
+        size_t bytesPerPoint = 27 * sizeof(float);
+        int maxPointsPerChunk = maxChunkBytes / bytesPerPoint;
+
+        // Cap chunk size at 50 million points (~5.4 GB) for reasonable kernel times
+        maxPointsPerChunk = std::min(maxPointsPerChunk, 50000000);
+
+        // Determine if we need chunking
+        bool needsChunking = (totalPoints > maxPointsPerChunk);
+        int numChunks = needsChunking ? ((totalPoints + maxPointsPerChunk - 1) / maxPointsPerChunk) : 1;
+        int pointsPerChunk = needsChunking ? maxPointsPerChunk : totalPoints;
+
+        if (needsChunking) {
+            std::cout << "GridForce: Using chunked generation for " << totalPoints << " points ("
+                      << numChunks << " chunks of ~" << pointsPerChunk << " points each)" << std::endl;
+            std::cout << "  Available GPU memory: " << (freeMem / (1024.0 * 1024 * 1024)) << " GB" << std::endl;
         }
 
-        // Use RASPA3 tensor method with analytical derivatives
-        // This generates energy AND all 27 derivatives in one pass
-        // Allocate GPU memory for grid data (27 values per point)
-        CudaArray gridDataGPU;
-        gridDataGPU.initialize<float>(cu, 27 * totalPoints, "gridDataWithDerivatives");
+        // Pre-allocate output arrays (use size_t to avoid overflow for large grids)
+        derivatives.resize((size_t)27 * totalPoints);
 
         // Get analytical derivative kernel
         CUfunction analyticalKernel = cu.getKernel(module, "generateGridWithAnalyticalDerivatives");
 
         // Map gridType for analytical kernel: 0=charge, 1=ljr, 2=lja
-        int analyticalGridType = gridTypeInt;  // Mapping is the same
+        int analyticalGridType = gridTypeInt;
         float gridCapF = gridCap;
         float invPowerF = invPower;
         int invPowerModeInt = invPowerMode;  // 0=NONE, 1=RUNTIME, 2=STORED
 
-        void* analyticalArgs[] = {
-            &gridDataGPU.getDevicePointer(),
-            &receptorPos.getDevicePointer(),
-            &receptorCharges.getDevicePointer(),
-            &receptorSigmas.getDevicePointer(),
-            &receptorEpsilons.getDevicePointer(),
-            &numReceptorAtoms,
-            &analyticalGridType,
-            &gridCapF,
-            &invPowerF,
-            &invPowerModeInt,
-            &originXf,
-            &originYf,
-            &originZf,
-            &d_gridCounts.getDevicePointer(),
-            &d_gridSpacing.getDevicePointer(),
-            &totalPoints
-        };
+        // Process chunks
+        for (int chunk = 0; chunk < numChunks; chunk++) {
+            int chunkOffset = chunk * pointsPerChunk;
+            int chunkSize = std::min(pointsPerChunk, totalPoints - chunkOffset);
 
-        // Launch analytical derivative kernel
-        result = cuLaunchKernel(analyticalKernel,
-            gridSize, 1, 1,
-            blockSize, 1, 1,
-            0,
-            cu.getCurrentStream(),
-            analyticalArgs,
-            NULL);
+            if (needsChunking) {
+                std::cout << "  Processing chunk " << (chunk + 1) << "/" << numChunks
+                          << " (points " << chunkOffset << " to " << (chunkOffset + chunkSize - 1) << ")" << std::endl;
+            }
 
-        if (result != CUDA_SUCCESS) {
-            throw OpenMMException("Error launching analytical derivative kernel");
+            // Allocate GPU buffer for this chunk
+            CudaArray gridDataGPU;
+            gridDataGPU.initialize<float>(cu, 27 * chunkSize, "gridDataChunk");
+
+            int gridSizeKernel = (chunkSize + blockSize - 1) / blockSize;
+
+            void* analyticalArgs[] = {
+                &gridDataGPU.getDevicePointer(),
+                &receptorPos.getDevicePointer(),
+                &receptorCharges.getDevicePointer(),
+                &receptorSigmas.getDevicePointer(),
+                &receptorEpsilons.getDevicePointer(),
+                &numReceptorAtoms,
+                &analyticalGridType,
+                &gridCapF,
+                &invPowerF,
+                &invPowerModeInt,
+                &originXf,
+                &originYf,
+                &originZf,
+                &d_gridCounts.getDevicePointer(),
+                &d_gridSpacing.getDevicePointer(),
+                &totalPoints,
+                &chunkSize,
+                &chunkOffset
+            };
+
+            // Launch analytical derivative kernel for this chunk
+            result = cuLaunchKernel(analyticalKernel,
+                gridSizeKernel, 1, 1,
+                blockSize, 1, 1,
+                0,
+                cu.getCurrentStream(),
+                analyticalArgs,
+                NULL);
+
+            if (result != CUDA_SUCCESS) {
+                throw OpenMMException("Error launching analytical derivative kernel for chunk " + std::to_string(chunk));
+            }
+
+            // Synchronize
+            cuStreamSynchronize(cu.getCurrentStream());
+
+            // Download chunk data
+            vector<float> chunkDataFloat(27 * chunkSize);
+            gridDataGPU.download(chunkDataFloat);
+
+            // Copy chunk data to final arrays
+            // Layout in chunk: [deriv_idx * chunkSize + localIdx]
+            // Layout in final: [deriv_idx * totalPoints + globalIdx]
+            // Use size_t to avoid integer overflow for large grids
+            for (int derivIdx = 0; derivIdx < 27; derivIdx++) {
+                for (int localIdx = 0; localIdx < chunkSize; localIdx++) {
+                    size_t globalIdx = (size_t)chunkOffset + localIdx;
+                    size_t finalIdx = (size_t)derivIdx * totalPoints + globalIdx;
+                    size_t chunkIdx = (size_t)derivIdx * chunkSize + localIdx;
+                    derivatives[finalIdx] = chunkDataFloat[chunkIdx];
+                }
+            }
         }
 
-        // Synchronize
-        cuStreamSynchronize(cu.getCurrentStream());
-
-        // Download all data (energy + derivatives)
-        vector<float> gridDataFloat(27 * totalPoints);
-        gridDataGPU.download(gridDataFloat);
-
-        // Extract energy values - stored at [0 * totalPoints + point_idx]
-        for (int i = 0; i < totalPoints; i++) {
-            vals[i] = gridDataFloat[0 * totalPoints + i];
+        // Extract energy values from derivatives array (stored at derivIdx=0)
+        for (size_t i = 0; i < (size_t)totalPoints; i++) {
+            vals[i] = derivatives[i];
         }
 
         // Diagnostic: check for problematic values in grid energies
         int nan_count = 0, inf_count = 0;
         double min_val = vals[0], max_val = vals[0];
-        for (int i = 0; i < totalPoints; i++) {
+        for (size_t i = 0; i < (size_t)totalPoints; i++) {
             if (std::isnan(vals[i])) nan_count++;
             if (std::isinf(vals[i])) inf_count++;
             if (std::isfinite(vals[i])) {
@@ -1186,17 +1291,33 @@ void CudaCalcGridForceKernel::generateGrid(
 //         std::cout << "  Grid energy statistics: min=" << min_val << ", max=" << max_val
 //                   << ", NaN=" << nan_count << ", Inf=" << inf_count << std::endl;
 
-        // Store derivatives
-        derivatives.resize(27 * totalPoints);
-        for (int i = 0; i < 27 * totalPoints; i++) {
-            derivatives[i] = gridDataFloat[i];
-        }
-
 //         std::cout << "Generated grid with " << totalPoints << " points and "
 //                   << derivatives.size() << " derivative values using RASPA3 analytical method" << std::endl;
 
     } else {
-        // Use original finite difference method
+        // Use original finite difference method (no derivatives)
+        // Determine chunk size based on available GPU memory
+        size_t freeMem, totalMem;
+        cuMemGetInfo(&freeMem, &totalMem);
+
+        // Use at most 50% of free memory for the chunk buffer
+        size_t maxChunkBytes = (size_t)(freeMem * 0.5);
+
+        // Each grid point requires 1 float
+        int maxPointsPerChunk = maxChunkBytes / sizeof(float);
+
+        // Cap chunk size at 500 million points for reasonable kernel times
+        maxPointsPerChunk = std::min(maxPointsPerChunk, 500000000);
+
+        bool needsChunking = (totalPoints > maxPointsPerChunk);
+        int numChunks = needsChunking ? ((totalPoints + maxPointsPerChunk - 1) / maxPointsPerChunk) : 1;
+        int pointsPerChunk = needsChunking ? maxPointsPerChunk : totalPoints;
+
+        if (needsChunking) {
+            std::cout << "GridForce: Using chunked generation for " << totalPoints << " points ("
+                      << numChunks << " chunks of ~" << pointsPerChunk << " points each)" << std::endl;
+        }
+
         CUfunction kernel = cu.getKernel(module, "generateGridKernel");
         float gridCapF = gridCap;
 
@@ -1223,44 +1344,315 @@ void CudaCalcGridForceKernel::generateGrid(
         }
 #endif
 
-        void* args[] = {
-            &gridVals.getDevicePointer(),
-            &receptorPos.getDevicePointer(),
-            &receptorCharges.getDevicePointer(),
-            &receptorSigmas.getDevicePointer(),
-            &receptorEpsilons.getDevicePointer(),
-            &numReceptorAtoms,
-            &gridTypeInt,
-            &gridCapF,
-            &invPower,
-            &originXf,
-            &originYf,
-            &originZf,
-            &d_gridCounts.getDevicePointer(),
-            &d_gridSpacing.getDevicePointer(),
-            &totalPoints
-        };
+        // Process chunks
+        for (int chunk = 0; chunk < numChunks; chunk++) {
+            int chunkOffset = chunk * pointsPerChunk;
+            int chunkSize = std::min(pointsPerChunk, totalPoints - chunkOffset);
 
-        // Launch kernel
-        result = cuLaunchKernel(kernel,
-            gridSize, 1, 1,
-            blockSize, 1, 1,
-            0,
-            cu.getCurrentStream(),
-            args,
-            NULL);
+            if (needsChunking) {
+                std::cout << "  Processing chunk " << (chunk + 1) << "/" << numChunks
+                          << " (points " << chunkOffset << " to " << (chunkOffset + chunkSize - 1) << ")" << std::endl;
+            }
 
-        if (result != CUDA_SUCCESS) {
-            throw OpenMMException("Error launching grid generation kernel");
-        }
+            // Allocate GPU buffer for this chunk
+            CudaArray chunkVals;
+            chunkVals.initialize<float>(cu, chunkSize, "gridValuesChunk");
 
-        // Download results
-        vector<float> gridValsFloat(totalPoints);
-        gridVals.download(gridValsFloat);
+            int gridSizeKernel = (chunkSize + blockSize - 1) / blockSize;
 
-        // Convert to double
-        for (int i = 0; i < totalPoints; i++) {
-            vals[i] = gridValsFloat[i];
+            void* args[] = {
+                &chunkVals.getDevicePointer(),
+                &receptorPos.getDevicePointer(),
+                &receptorCharges.getDevicePointer(),
+                &receptorSigmas.getDevicePointer(),
+                &receptorEpsilons.getDevicePointer(),
+                &numReceptorAtoms,
+                &gridTypeInt,
+                &gridCapF,
+                &invPower,
+                &originXf,
+                &originYf,
+                &originZf,
+                &d_gridCounts.getDevicePointer(),
+                &d_gridSpacing.getDevicePointer(),
+                &totalPoints,
+                &chunkSize,
+                &chunkOffset
+            };
+
+            // Launch kernel for this chunk
+            result = cuLaunchKernel(kernel,
+                gridSizeKernel, 1, 1,
+                blockSize, 1, 1,
+                0,
+                cu.getCurrentStream(),
+                args,
+                NULL);
+
+            if (result != CUDA_SUCCESS) {
+                throw OpenMMException("Error launching grid generation kernel for chunk " + std::to_string(chunk));
+            }
+
+            // Synchronize
+            cuStreamSynchronize(cu.getCurrentStream());
+
+            // Download chunk results
+            vector<float> chunkValsFloat(chunkSize);
+            chunkVals.download(chunkValsFloat);
+
+            // Copy to output array
+            for (int i = 0; i < chunkSize; i++) {
+                vals[chunkOffset + i] = chunkValsFloat[i];
+            }
         }
     }
+}
+
+void CudaCalcGridForceKernel::generateGridToTiledFile(
+    const System& system,
+    const NonbondedForce* nonbondedForce,
+    const std::string& gridType,
+    const std::vector<int>& receptorAtoms,
+    const std::vector<Vec3>& receptorPositions,
+    double originX, double originY, double originZ,
+    const std::string& outputFilename,
+    bool computeDerivatives,
+    int tileSize) {
+
+    cu.setAsCurrent();
+
+    std::cout << "GridForce: Generating tiled grid to " << outputFilename << std::endl;
+    std::cout << "  Grid size: " << counts[0] << "x" << counts[1] << "x" << counts[2] << std::endl;
+    std::cout << "  Tile size: " << tileSize << std::endl;
+    std::cout << "  Derivatives: " << (computeDerivatives ? "yes" : "no") << std::endl;
+
+    // Create tiled grid file
+    TiledGridData tiledGrid(counts[0], counts[1], counts[2],
+                            spacing[0], spacing[1], spacing[2], tileSize);
+    tiledGrid.setOrigin(originX, originY, originZ);
+    tiledGrid.setInvPower(invPower);
+    tiledGrid.setInvPowerMode(static_cast<InvPowerMode>(invPowerMode));
+    tiledGrid.beginWriting(outputFilename, computeDerivatives);
+
+    int numTilesX = tiledGrid.getNumTilesX();
+    int numTilesY = tiledGrid.getNumTilesY();
+    int numTilesZ = tiledGrid.getNumTilesZ();
+    int totalTiles = tiledGrid.getTotalNumTiles();
+
+    std::cout << "  Tiles: " << numTilesX << "x" << numTilesY << "x" << numTilesZ
+              << " = " << totalTiles << " total" << std::endl;
+
+    // Map grid type string to integer
+    int gridTypeInt = 0;
+    if (gridType == "charge") gridTypeInt = 0;
+    else if (gridType == "ljr") gridTypeInt = 1;
+    else if (gridType == "lja") gridTypeInt = 2;
+
+    // Upload receptor data to GPU
+    int numReceptorAtoms = receptorAtoms.size();
+    CudaArray receptorPos, receptorCharges, receptorSigmas, receptorEpsilons;
+
+    std::vector<float3> posVec(numReceptorAtoms);
+    std::vector<float> chargesVec(numReceptorAtoms);
+    std::vector<float> sigmasVec(numReceptorAtoms);
+    std::vector<float> epsilonsVec(numReceptorAtoms);
+
+    for (int i = 0; i < numReceptorAtoms; i++) {
+        int atomIndex = receptorAtoms[i];
+        posVec[i] = make_float3((float)receptorPositions[i][0],
+                                 (float)receptorPositions[i][1],
+                                 (float)receptorPositions[i][2]);
+
+        double charge, sigma, epsilon;
+        nonbondedForce->getParticleParameters(atomIndex, charge, sigma, epsilon);
+        chargesVec[i] = (float)charge;
+        sigmasVec[i] = (float)sigma;
+        epsilonsVec[i] = (float)epsilon;
+    }
+
+    receptorPos.initialize<float3>(cu, numReceptorAtoms, "receptorPositions");
+    receptorCharges.initialize<float>(cu, numReceptorAtoms, "receptorCharges");
+    receptorSigmas.initialize<float>(cu, numReceptorAtoms, "receptorSigmas");
+    receptorEpsilons.initialize<float>(cu, numReceptorAtoms, "receptorEpsilons");
+
+    receptorPos.upload(posVec);
+    receptorCharges.upload(chargesVec);
+    receptorSigmas.upload(sigmasVec);
+    receptorEpsilons.upload(epsilonsVec);
+
+    // Get kernel module
+    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+
+    float originXf = (float)originX;
+    float originYf = (float)originY;
+    float originZf = (float)originZ;
+    float spacingXf = (float)spacing[0];
+    float spacingYf = (float)spacing[1];
+    float spacingZf = (float)spacing[2];
+    float gridCapF = gridCap;
+    float invPowerF = invPower;
+    int invPowerModeInt = invPowerMode;
+
+    int blockSize = 256;
+    CUresult result;
+
+    // Process tiles
+    int tilesProcessed = 0;
+    auto startTime = std::chrono::high_resolution_clock::now();
+
+    for (int tx = 0; tx < numTilesX; tx++) {
+        for (int ty = 0; ty < numTilesY; ty++) {
+            for (int tz = 0; tz < numTilesZ; tz++) {
+                // Get tile bounds
+                int sizeX, sizeY, sizeZ;
+                tiledGrid.getTileActualSize(tx, ty, tz, sizeX, sizeY, sizeZ);
+                int tilePoints = sizeX * sizeY * sizeZ;
+
+                auto range = tiledGrid.getTileGridRange(tx, ty, tz);
+                int startX = range[0], startY = range[1], startZ = range[2];
+
+                if (computeDerivatives) {
+                    // Allocate GPU buffer for tile (27 values per point)
+                    CudaArray tileDataGPU;
+                    tileDataGPU.initialize<float>(cu, 27 * tilePoints, "tileData");
+
+                    CUfunction tileKernel = cu.getKernel(module, "generateTileWithAnalyticalDerivatives");
+
+                    int gridSizeKernel = (tilePoints + blockSize - 1) / blockSize;
+
+                    void* args[] = {
+                        &tileDataGPU.getDevicePointer(),
+                        &receptorPos.getDevicePointer(),
+                        &receptorCharges.getDevicePointer(),
+                        &receptorSigmas.getDevicePointer(),
+                        &receptorEpsilons.getDevicePointer(),
+                        &numReceptorAtoms,
+                        &gridTypeInt,
+                        &gridCapF,
+                        &invPowerF,
+                        &invPowerModeInt,
+                        &originXf,
+                        &originYf,
+                        &originZf,
+                        &spacingXf,
+                        &spacingYf,
+                        &spacingZf,
+                        &startX,
+                        &startY,
+                        &startZ,
+                        &sizeX,
+                        &sizeY,
+                        &sizeZ
+                    };
+
+                    result = cuLaunchKernel(tileKernel,
+                        gridSizeKernel, 1, 1,
+                        blockSize, 1, 1,
+                        0,
+                        cu.getCurrentStream(),
+                        args,
+                        NULL);
+
+                    if (result != CUDA_SUCCESS) {
+                        throw OpenMMException("Error launching tile generation kernel");
+                    }
+
+                    cuStreamSynchronize(cu.getCurrentStream());
+
+                    // Download tile data
+                    std::vector<float> tileDataFloat(27 * tilePoints);
+                    tileDataGPU.download(tileDataFloat);
+
+                    // Extract values and derivatives
+                    std::vector<float> values(tilePoints);
+                    std::vector<float> derivatives(27 * tilePoints);
+
+                    for (int i = 0; i < tilePoints; i++) {
+                        values[i] = tileDataFloat[0 * tilePoints + i];  // First derivative index is energy
+                    }
+                    for (int d = 0; d < 27; d++) {
+                        for (int i = 0; i < tilePoints; i++) {
+                            derivatives[d * tilePoints + i] = tileDataFloat[d * tilePoints + i];
+                        }
+                    }
+
+                    // Write tile to file
+                    tiledGrid.writeTile(tx, ty, tz, values, derivatives);
+
+                } else {
+                    // Values only
+                    CudaArray tileValsGPU;
+                    tileValsGPU.initialize<float>(cu, tilePoints, "tileValues");
+
+                    CUfunction tileKernel = cu.getKernel(module, "generateTileKernel");
+
+                    int gridSizeKernel = (tilePoints + blockSize - 1) / blockSize;
+
+                    void* args[] = {
+                        &tileValsGPU.getDevicePointer(),
+                        &receptorPos.getDevicePointer(),
+                        &receptorCharges.getDevicePointer(),
+                        &receptorSigmas.getDevicePointer(),
+                        &receptorEpsilons.getDevicePointer(),
+                        &numReceptorAtoms,
+                        &gridTypeInt,
+                        &gridCapF,
+                        &invPowerF,
+                        &originXf,
+                        &originYf,
+                        &originZf,
+                        &spacingXf,
+                        &spacingYf,
+                        &spacingZf,
+                        &startX,
+                        &startY,
+                        &startZ,
+                        &sizeX,
+                        &sizeY,
+                        &sizeZ
+                    };
+
+                    result = cuLaunchKernel(tileKernel,
+                        gridSizeKernel, 1, 1,
+                        blockSize, 1, 1,
+                        0,
+                        cu.getCurrentStream(),
+                        args,
+                        NULL);
+
+                    if (result != CUDA_SUCCESS) {
+                        throw OpenMMException("Error launching tile generation kernel");
+                    }
+
+                    cuStreamSynchronize(cu.getCurrentStream());
+
+                    // Download and write
+                    std::vector<float> values(tilePoints);
+                    tileValsGPU.download(values);
+
+                    tiledGrid.writeTile(tx, ty, tz, values);
+                }
+
+                tilesProcessed++;
+
+                // Progress update every 100 tiles
+                if (tilesProcessed % 100 == 0 || tilesProcessed == totalTiles) {
+                    auto now = std::chrono::high_resolution_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
+                    double tilesPerSec = tilesProcessed / (elapsed > 0 ? elapsed : 1.0);
+                    int remaining = totalTiles - tilesProcessed;
+                    double etaSec = remaining / tilesPerSec;
+                    std::cout << "  Progress: " << tilesProcessed << "/" << totalTiles
+                              << " tiles (" << (100 * tilesProcessed / totalTiles) << "%)"
+                              << ", ETA: " << (int)etaSec << "s" << std::endl;
+                }
+            }
+        }
+    }
+
+    tiledGrid.finishWriting();
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto totalSec = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count();
+    std::cout << "  Complete! Generated " << totalTiles << " tiles in " << totalSec << "s" << std::endl;
 }

@@ -6,6 +6,7 @@ This is a copy of test_tricubic.py with tiled streaming enabled.
 
 import sys
 import numpy as np
+import pytest
 import gridforceplugin as gfp
 from openmm.app import *
 from openmm import *
@@ -13,12 +14,21 @@ from openmm.unit import *
 import os
 import tempfile
 
-# Check if CUDA is available
-try:
-    platform = Platform.getPlatformByName('CUDA')
-except Exception:
-    print("CUDA platform not available, skipping test")
-    sys.exit(0)
+
+def cuda_available():
+    """Check if CUDA platform is available."""
+    try:
+        Platform.getPlatformByName('CUDA')
+        return True
+    except Exception:
+        return False
+
+
+# Skip entire module if CUDA is not available
+pytestmark = pytest.mark.skipif(not cuda_available(), reason="CUDA platform not available")
+
+# Get CUDA platform (will only run if CUDA is available)
+platform = Platform.getPlatformByName('CUDA') if cuda_available() else None
 
 # Coulomb constant
 ONE_4PI_EPS0 = 138.935456  # kJ/mol * nm / e^2

@@ -228,6 +228,13 @@ public:
     int getTileSize() const;
     int getMemoryBudgetMB() const;
 
+    // Tiled file I/O (for generating/loading large grids tile-by-tile)
+    void setTiledOutputFile(const std::string& filename, int tileSize = 32);
+    const std::string& getTiledOutputFile() const;
+    int getTiledOutputTileSize() const;
+    void setTiledInputFile(const std::string& filename);
+    const std::string& getTiledInputFile() const;
+
     void clearGridData();
 
     void setReceptorPositions(const std::vector<OpenMM::Vec3>& positions);

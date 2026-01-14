@@ -56,7 +56,8 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
                          m_systemPtr(nullptr),
                          m_vals(std::make_shared<std::vector<double>>()),
                          m_derivatives(std::make_shared<std::vector<double>>()),
-                         m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048) {
+                         m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048),
+                         m_tiledOutputFile(""), m_tiledOutputTileSize(32) {
     //
 }
 
@@ -70,7 +71,8 @@ GridForce::GridForce(std::shared_ptr<GridData> gridData)
       m_gridData(gridData),
       m_vals(std::make_shared<std::vector<double>>()),
       m_derivatives(std::make_shared<std::vector<double>>()),
-      m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048) {
+      m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048),
+                         m_tiledOutputFile(""), m_tiledOutputTileSize(32) {
     if (gridData) {
         // Extract grid data to populate legacy members
         m_counts.clear();
@@ -324,6 +326,22 @@ void GridForce::setTiledMode(bool enable, int tileSize, int memoryBudgetMB) {
 
 bool GridForce::getTiledMode() const {
     return m_tiledMode;
+}
+
+void GridForce::setTiledOutputFile(const std::string& filename, int tileSize) {
+    if (tileSize < 8 || tileSize > 256) {
+        throw OpenMMException("GridForce: Tile size must be between 8 and 256");
+    }
+    m_tiledOutputFile = filename;
+    m_tiledOutputTileSize = tileSize;
+}
+
+void GridForce::setTiledInputFile(const std::string& filename) {
+    m_tiledInputFile = filename;
+    // Automatically enable tiled mode when using a tiled input file
+    if (!filename.empty() && !m_tiledMode) {
+        m_tiledMode = true;
+    }
 }
 
 int GridForce::getTileSize() const {

@@ -337,8 +337,16 @@ extern "C" __global__ void computeGridForce(
                 printf("  derivs: dx=%f, dy=%f, dz=%f\n", dvalue_dx, dvalue_dy, dvalue_dz);
             }
 
+        } else if ((interpolationMethod == 2 || interpolationMethod == 3) && gridDerivatives == nullptr) {
+            // Tricubic/Triquintic requested but derivatives not available - return NaN
+            // This prevents silent fallback to trilinear which would give incorrect results
+            interpolated = nanf("");
+            dx = dy = dz = nanf("");
+            if (index == 0) {
+                printf("ERROR: Interpolation method %d requires derivatives but gridDerivatives is null\n", interpolationMethod);
+            }
         } else {
-            // TRILINEAR INTERPOLATION (default, 2x2x2 = 8 points)
+            // TRILINEAR INTERPOLATION (default for method 0, 2x2x2 = 8 points)
             float ox = 1.0f - fx;
             float oy = 1.0f - fy;
             float oz = 1.0f - fz;

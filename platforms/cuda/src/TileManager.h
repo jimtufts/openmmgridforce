@@ -3,6 +3,7 @@
 
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
+#include "TiledGridData.h"
 #include <vector>
 #include <map>
 #include <list>
@@ -92,12 +93,15 @@ struct GPUTile {
 };
 
 /**
- * Host-side tiled grid that wraps existing grid data and extracts tiles on demand.
- * Does not own the underlying data - just provides tile-based access.
+ * Host-side tiled grid that provides tile-based access.
+ * Can be backed by either:
+ *   1. Host memory (full grid in RAM) - for smaller grids
+ *   2. Tiled file (TiledGridData) - for large grids that don't fit in RAM
  */
 class TiledGrid {
 public:
     TiledGrid();
+    ~TiledGrid();
 
     /**
      * Initialize from existing host-side grid data.
@@ -116,8 +120,18 @@ public:
                           const TileConfig& config);
 
     /**
+     * Initialize from a tiled grid file (TiledGridData format).
+     * Tiles are loaded on demand from the file.
+     *
+     * @param filename Path to the tiled grid file
+     * @param config Tile configuration (tile size must match file)
+     */
+    void initFromTiledFile(const std::string& filename, const TileConfig& config);
+
+    /**
      * Get tile data for GPU upload (includes overlap region).
-     * Extracts a tile from the host-side grid data.
+     * For memory-backed: extracts from host array.
+     * For file-backed: reads from TiledGridData file.
      */
     void getTileData(const TileID& id,
                      std::vector<float>& tileValues,
@@ -143,18 +157,37 @@ public:
     int3 getTileCount() const { return make_int3(numTilesX_, numTilesY_, numTilesZ_); }
     float3 getSpacing() const { return make_float3(spacingX_, spacingY_, spacingZ_); }
     float3 getOrigin() const { return make_float3(originX_, originY_, originZ_); }
-    bool hasDerivatives() const { return derivatives_ != nullptr; }
+    bool hasDerivatives() const { return hasDerivatives_; }
     const TileConfig& getConfig() const { return config_; }
+    bool isFileBacked() const { return fileBacked_; }
 
 private:
+    // Memory-backed data (when initialized from host arrays)
     const float* values_;
     const float* derivatives_;
+
+    // File-backed data (when initialized from TiledGridData file)
+    bool fileBacked_;
+    mutable std::unique_ptr<TiledGridData> tiledFile_;
+
+    // Common grid metadata
     int nx_, ny_, nz_;
     float spacingX_, spacingY_, spacingZ_;
     float originX_, originY_, originZ_;
     int numTilesX_, numTilesY_, numTilesZ_;
     TileConfig config_;
     bool initialized_;
+    bool hasDerivatives_;
+
+    // Helper for extracting tiles from memory-backed grid
+    void getTileDataFromMemory(const TileID& id,
+                               std::vector<float>& tileValues,
+                               std::vector<float>* tileDerivatives) const;
+
+    // Helper for reading tiles from file-backed grid
+    void getTileDataFromFile(const TileID& id,
+                             std::vector<float>& tileValues,
+                             std::vector<float>* tileDerivatives) const;
 };
 
 /**
@@ -251,6 +284,12 @@ public:
                           float spacingX, float spacingY, float spacingZ,
                           float originX, float originY, float originZ,
                           const TileConfig& config);
+
+    /**
+     * Initialize from a tiled grid file (TiledGridData format).
+     * Tiles are loaded on demand from the file.
+     */
+    void initFromTiledFile(const std::string& filename, const TileConfig& config);
 
     /**
      * Prepare tiles for force computation.
