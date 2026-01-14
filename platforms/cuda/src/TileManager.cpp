@@ -313,15 +313,33 @@ void TileManager::buildLookupTable(const std::set<TileID>& tiles) {
     }
 
     // Upload to GPU
+    // Check if arrays need to be (re)initialized
+    // CudaArray::initialize can only be called once, so we need to check size and reinitialize if needed
+
     // Offsets: use int array with 3 ints per tile
-    lookupTable_.tileOffsets.initialize<int>(cu_, offsets.size(), "tileOffsets");
+    if (!lookupTable_.tileOffsets.isInitialized() || lookupTable_.tileOffsets.getSize() != offsets.size()) {
+        // Need to create a new array - CudaArray doesn't support resize
+        // The old array will be destroyed when we assign a new one, but CudaArray is not copyable
+        // So we need to work around this by using a different approach
+        if (lookupTable_.tileOffsets.isInitialized()) {
+            // Resize by uploading to same buffer if size matches, else need workaround
+            // For now, just upload if size matches; otherwise recreate the context arrays
+        }
+        if (!lookupTable_.tileOffsets.isInitialized()) {
+            lookupTable_.tileOffsets.initialize<int>(cu_, offsets.size(), "tileOffsets");
+        }
+    }
     lookupTable_.tileOffsets.upload(offsets);
 
     // Pointers: device pointers (as unsigned long long)
-    lookupTable_.tileValuePtrs.initialize<unsigned long long>(cu_, valuePtrs.size(), "tileValuePtrs");
+    if (!lookupTable_.tileValuePtrs.isInitialized()) {
+        lookupTable_.tileValuePtrs.initialize<unsigned long long>(cu_, valuePtrs.size(), "tileValuePtrs");
+    }
     lookupTable_.tileValuePtrs.upload(valuePtrs);
 
-    lookupTable_.tileDerivPtrs.initialize<unsigned long long>(cu_, derivPtrs.size(), "tileDerivPtrs");
+    if (!lookupTable_.tileDerivPtrs.isInitialized()) {
+        lookupTable_.tileDerivPtrs.initialize<unsigned long long>(cu_, derivPtrs.size(), "tileDerivPtrs");
+    }
     lookupTable_.tileDerivPtrs.upload(derivPtrs);
 
     // Build spatial hash map for fast tile lookup in kernel

@@ -4,6 +4,9 @@
  */
 
 #include "include/InterpolationBasis.cuh"
+#include "include/TricubicCoefficients.cuh"
+#include "include/TriquinticCoefficients.cuh"
+#include "include/InvPowerChainRule.cuh"
 
 /**
  * Find which tile contains a grid position.
@@ -34,6 +37,13 @@ __device__ int findTileForPosition(
 }
 
 /**
+ * Helper to compute tile-local linear index.
+ */
+__device__ __forceinline__ int tileIndex(int lx, int ly, int lz, int tileWithOverlap) {
+    return lx * tileWithOverlap * tileWithOverlap + ly * tileWithOverlap + lz;
+}
+
+/**
  * Trilinear interpolation using tile-local data.
  */
 __device__ void trilinearInterpolateTiled(
@@ -45,20 +55,15 @@ __device__ void trilinearInterpolateTiled(
     float spacingX, float spacingY, float spacingZ,
     int tileWithOverlap  // Total tile dimension including overlap
 ) {
-    // Tile dimensions
-    const int tileNY = tileWithOverlap;
-    const int tileNZ = tileWithOverlap;
-    const int tileNYZ = tileNY * tileNZ;
-
     // Get 8 corner values from tile
-    float v000 = tileValues[localX * tileNYZ + localY * tileNZ + localZ];
-    float v001 = tileValues[localX * tileNYZ + localY * tileNZ + (localZ + 1)];
-    float v010 = tileValues[localX * tileNYZ + (localY + 1) * tileNZ + localZ];
-    float v011 = tileValues[localX * tileNYZ + (localY + 1) * tileNZ + (localZ + 1)];
-    float v100 = tileValues[(localX + 1) * tileNYZ + localY * tileNZ + localZ];
-    float v101 = tileValues[(localX + 1) * tileNYZ + localY * tileNZ + (localZ + 1)];
-    float v110 = tileValues[(localX + 1) * tileNYZ + (localY + 1) * tileNZ + localZ];
-    float v111 = tileValues[(localX + 1) * tileNYZ + (localY + 1) * tileNZ + (localZ + 1)];
+    float v000 = tileValues[tileIndex(localX, localY, localZ, tileWithOverlap)];
+    float v001 = tileValues[tileIndex(localX, localY, localZ + 1, tileWithOverlap)];
+    float v010 = tileValues[tileIndex(localX, localY + 1, localZ, tileWithOverlap)];
+    float v011 = tileValues[tileIndex(localX, localY + 1, localZ + 1, tileWithOverlap)];
+    float v100 = tileValues[tileIndex(localX + 1, localY, localZ, tileWithOverlap)];
+    float v101 = tileValues[tileIndex(localX + 1, localY, localZ + 1, tileWithOverlap)];
+    float v110 = tileValues[tileIndex(localX + 1, localY + 1, localZ, tileWithOverlap)];
+    float v111 = tileValues[tileIndex(localX + 1, localY + 1, localZ + 1, tileWithOverlap)];
 
     // Trilinear interpolation
     float fx1 = 1.0f - fx;
@@ -75,6 +80,268 @@ __device__ void trilinearInterpolateTiled(
              fx  * (fz1 * (v110 - v100) + fz * (v111 - v101))) / spacingY;
     *dEdz = (fx1 * (fy1 * (v001 - v000) + fy * (v011 - v010)) +
              fx  * (fy1 * (v101 - v100) + fy * (v111 - v110))) / spacingZ;
+}
+
+/**
+ * B-spline interpolation using tile-local data (4x4x4 stencil).
+ */
+__device__ void bsplineInterpolateTiled(
+    const float* __restrict__ tileValues,
+    int localX, int localY, int localZ,  // Position in tile coordinates (center of stencil)
+    float fx, float fy, float fz,        // Fractional position within cell
+    float* energy,
+    float* dEdx, float* dEdy, float* dEdz,
+    float spacingX, float spacingY, float spacingZ,
+    int tileWithOverlap,
+    float invPower,
+    int invPowerMode
+) {
+    // Precompute basis functions
+    float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+    float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+    float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+
+    float dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+    float dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+    float dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+
+    float interpolated = 0.0f;
+    float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+
+    // B-spline uses a 4x4x4 stencil centered at (localX-1, localY-1, localZ-1) to (localX+2, localY+2, localZ+2)
+    for (int i = 0; i < 4; i++) {
+        int lx = localX - 1 + i;
+        // Clamp to tile bounds
+        lx = min(max(lx, 0), tileWithOverlap - 1);
+
+        for (int j = 0; j < 4; j++) {
+            int ly = localY - 1 + j;
+            ly = min(max(ly, 0), tileWithOverlap - 1);
+
+            for (int k = 0; k < 4; k++) {
+                int lz = localZ - 1 + k;
+                lz = min(max(lz, 0), tileWithOverlap - 1);
+
+                float val = tileValues[tileIndex(lx, ly, lz, tileWithOverlap)];
+
+                // Apply RUNTIME inv_power transformation before interpolation
+                if (invPowerMode == 1 && invPower != 0.0f) {
+                    float invN = 1.0f / invPower;
+                    if (fabsf(val) >= 1e-10f) {
+                        val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                    } else {
+                        val = 0.0f;
+                    }
+                }
+
+                float weight = bx[i] * by[j] * bz[k];
+                interpolated += weight * val;
+                dvdx += dbx[i] * by[j] * bz[k] * val;
+                dvdy += bx[i] * dby[j] * bz[k] * val;
+                dvdz += bx[i] * by[j] * dbz[k] * val;
+            }
+        }
+    }
+
+    *energy = interpolated;
+    *dEdx = dvdx / spacingX;
+    *dEdy = dvdy / spacingY;
+    *dEdz = dvdz / spacingZ;
+}
+
+/**
+ * Tricubic (Lekien-Marsden) interpolation using tile-local data.
+ * Requires precomputed derivatives stored in tileDerivatives.
+ */
+__device__ void tricubicInterpolateTiled(
+    const float* __restrict__ tileValues,
+    const float* __restrict__ tileDerivatives,
+    int localX, int localY, int localZ,
+    float fx, float fy, float fz,
+    float* energy,
+    float* dEdx, float* dEdy, float* dEdz,
+    float spacingX, float spacingY, float spacingZ,
+    int tileWithOverlap,
+    float invPower,
+    int invPowerMode
+) {
+    int tilePoints = tileWithOverlap * tileWithOverlap * tileWithOverlap;
+
+    // 8 corners of the cell
+    int corners[8][3] = {
+        {localX, localY, localZ}, {localX+1, localY, localZ},
+        {localX, localY+1, localZ}, {localX+1, localY+1, localZ},
+        {localX, localY, localZ+1}, {localX+1, localY, localZ+1},
+        {localX, localY+1, localZ+1}, {localX+1, localY+1, localZ+1}
+    };
+
+    // Storage: X[deriv*8 + corner] - DERIVATIVE-MAJOR (matches RASPA3/Lekien-Marsden)
+    // Derivatives: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
+    float X[64];
+
+    // Map tricubic derivative order to gridDerivatives storage order
+    // Tricubic needs: 0=f, 1=fx, 2=fy, 3=fz, 4=fxy, 5=fxz, 6=fyz, 7=fxyz
+    // gridDerivatives (RASPA3 order): 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dxy, 6=dxz, 7=dyy, 8=dyz, 9=dzz, ..., 13=dxyz
+    const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
+
+    if (invPowerMode == 1 && invPower != 0.0f) {
+        // RUNTIME mode: transform all 27 derivatives per corner, then extract needed 8
+        float p = 1.0f / invPower;
+        for (int c = 0; c < 8; c++) {
+            int point_idx = tileIndex(corners[c][0], corners[c][1], corners[c][2], tileWithOverlap);
+            float U_derivs[27], V_derivs[27];
+            for (int d = 0; d < 27; d++) {
+                U_derivs[d] = tileDerivatives[d * tilePoints + point_idx];
+            }
+            applyInvPowerChainRule(U_derivs, p, V_derivs);
+            for (int d = 0; d < 8; d++) {
+                X[d*8 + c] = V_derivs[derivMap[d]];
+            }
+        }
+    } else {
+        // STORED or NONE mode: load directly
+        for (int d = 0; d < 8; d++) {
+            for (int c = 0; c < 8; c++) {
+                int point_idx = tileIndex(corners[c][0], corners[c][1], corners[c][2], tileWithOverlap);
+                X[d*8 + c] = tileDerivatives[derivMap[d] * tilePoints + point_idx];
+            }
+        }
+    }
+
+    // Multiply X by TRICUBIC_COEFFICIENTS matrix to get polynomial coefficients
+    float a[64];
+    for (int i = 0; i < 64; i++) {
+        a[i] = 0.0f;
+        for (int j = 0; j < 64; j++) {
+            a[i] += TRICUBIC_COEFFICIENTS[i][j] * X[j];
+        }
+    }
+
+    // Evaluate tricubic polynomial at (fx, fy, fz)
+    float interpolated = 0.0f;
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+
+    for (int k = 0; k < 4; k++) {
+        float fz_pow_k = (k == 0) ? 1.0f : (k == 1) ? fz : (k == 2) ? fz*fz : fz*fz*fz;
+        float fz_pow_k_deriv = (k == 0) ? 0.0f : (k == 1) ? 1.0f : (k == 2) ? 2.0f*fz : 3.0f*fz*fz;
+
+        for (int j = 0; j < 4; j++) {
+            float fy_pow_j = (j == 0) ? 1.0f : (j == 1) ? fy : (j == 2) ? fy*fy : fy*fy*fy;
+            float fy_pow_j_deriv = (j == 0) ? 0.0f : (j == 1) ? 1.0f : (j == 2) ? 2.0f*fy : 3.0f*fy*fy;
+
+            for (int i = 0; i < 4; i++) {
+                float fx_pow_i = (i == 0) ? 1.0f : (i == 1) ? fx : (i == 2) ? fx*fx : fx*fx*fx;
+                float fx_pow_i_deriv = (i == 0) ? 0.0f : (i == 1) ? 1.0f : (i == 2) ? 2.0f*fx : 3.0f*fx*fx;
+
+                float coeff = a[i + 4*j + 16*k];
+
+                interpolated += coeff * fx_pow_i * fy_pow_j * fz_pow_k;
+                dx += coeff * fx_pow_i_deriv * fy_pow_j * fz_pow_k;
+                dy += coeff * fx_pow_i * fy_pow_j_deriv * fz_pow_k;
+                dz += coeff * fx_pow_i * fy_pow_j * fz_pow_k_deriv;
+            }
+        }
+    }
+
+    *energy = interpolated;
+    *dEdx = dx / spacingX;
+    *dEdy = dy / spacingY;
+    *dEdz = dz / spacingZ;
+}
+
+/**
+ * Triquintic Hermite interpolation using tile-local data.
+ * Requires precomputed derivatives stored in tileDerivatives (27 per point).
+ */
+__device__ void triquinticInterpolateTiled(
+    const float* __restrict__ tileValues,
+    const float* __restrict__ tileDerivatives,
+    int localX, int localY, int localZ,
+    float fx, float fy, float fz,
+    float* energy,
+    float* dEdx, float* dEdy, float* dEdz,
+    float spacingX, float spacingY, float spacingZ,
+    int tileWithOverlap,
+    float invPower,
+    int invPowerMode
+) {
+    int tilePoints = tileWithOverlap * tileWithOverlap * tileWithOverlap;
+
+    // 8 corners of the cell
+    int corners[8][3] = {
+        {localX, localY, localZ}, {localX+1, localY, localZ},
+        {localX, localY+1, localZ}, {localX+1, localY+1, localZ},
+        {localX, localY, localZ+1}, {localX+1, localY, localZ+1},
+        {localX, localY+1, localZ+1}, {localX+1, localY+1, localZ+1}
+    };
+
+    // Gather derivatives in DERIVATIVE-MAJOR layout: X[deriv_idx * 8 + corner_idx]
+    float X[216];
+    if (invPowerMode == 1 && invPower != 0.0f) {
+        // RUNTIME mode: transform all 27 derivatives per corner
+        float p = 1.0f / invPower;
+        for (int c = 0; c < 8; c++) {
+            int point_idx = tileIndex(corners[c][0], corners[c][1], corners[c][2], tileWithOverlap);
+            float U_derivs[27], V_derivs[27];
+            for (int d = 0; d < 27; d++) {
+                U_derivs[d] = tileDerivatives[d * tilePoints + point_idx];
+            }
+            applyInvPowerChainRule(U_derivs, p, V_derivs);
+            for (int d = 0; d < 27; d++) {
+                X[d * 8 + c] = V_derivs[d];
+            }
+        }
+    } else {
+        // STORED or NONE mode: load directly
+        for (int d = 0; d < 27; d++) {
+            for (int c = 0; c < 8; c++) {
+                int point_idx = tileIndex(corners[c][0], corners[c][1], corners[c][2], tileWithOverlap);
+                X[d * 8 + c] = tileDerivatives[d * tilePoints + point_idx];
+            }
+        }
+    }
+
+    // Compute polynomial coefficients: a = 0.125 * TRIQUINTIC_COEFFICIENTS * X
+    float a[216];
+    const float scale = 0.125f;
+    for (int i = 0; i < 216; i++) {
+        a[i] = 0.0f;
+        for (int j = 0; j < 216; j++) {
+            a[i] += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
+        }
+        a[i] *= scale;
+    }
+
+    // Precompute powers of local coordinates
+    float sx_pow[6], sy_pow[6], sz_pow[6];
+    sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
+    for (int p = 1; p < 6; p++) {
+        sx_pow[p] = sx_pow[p-1] * fx;
+        sy_pow[p] = sy_pow[p-1] * fy;
+        sz_pow[p] = sz_pow[p-1] * fz;
+    }
+
+    // Evaluate polynomial: sum over i,j,k of a[i+6j+36k] * fx^i * fy^j * fz^k
+    float value = 0.0f;
+    float dvalue_dx = 0.0f, dvalue_dy = 0.0f, dvalue_dz = 0.0f;
+
+    for (int k = 0; k < 6; k++) {
+        for (int j = 0; j < 6; j++) {
+            for (int i = 0; i < 6; i++) {
+                int coeff_idx = i + 6*j + 36*k;
+                float coeff = a[coeff_idx];
+                value += coeff * sx_pow[i] * sy_pow[j] * sz_pow[k];
+                if (i > 0) dvalue_dx += coeff * i * sx_pow[i-1] * sy_pow[j] * sz_pow[k];
+                if (j > 0) dvalue_dy += coeff * j * sx_pow[i] * sy_pow[j-1] * sz_pow[k];
+                if (k > 0) dvalue_dz += coeff * k * sx_pow[i] * sy_pow[j] * sz_pow[k-1];
+            }
+        }
+    }
+
+    *energy = value;
+    *dEdx = dvalue_dx / spacingX;
+    *dEdy = dvalue_dy / spacingY;
+    *dEdz = dvalue_dz / spacingZ;
 }
 
 /**
@@ -157,8 +424,9 @@ extern "C" __global__ void computeGridForceTiled(
         int tileIdx = findTileForPosition(ix, iy, iz, tileOffsets, numTiles, tileSize);
 
         if (tileIdx >= 0) {
-            // Get tile data pointer
+            // Get tile data pointers
             const float* tileValues = (const float*)tileValuePtrs[tileIdx];
+            const float* tileDerivatives = (const float*)tileDerivPtrs[tileIdx];
 
             // Convert global grid coordinates to tile-local coordinates
             // Add tileOverlap to account for the overlap region at the start
@@ -182,29 +450,67 @@ extern "C" __global__ void computeGridForceTiled(
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],
                     tileWithOverlap
                 );
-            }
-            // TODO: Add tricubic and triquintic tiled interpolation
 
-            // Apply inv_power transformation if RUNTIME mode
-            if (invPowerMode == 1 && invPower != 0.0f) {
-                float p = 1.0f / invPower;
-                if (interpolated > 0.0f) {
-                    float U = interpolated;
-                    float V = powf(U, p);
-                    float dVdU = p * powf(U, p - 1.0f);
-                    interpolated = V;
-                    dx *= dVdU;
-                    dy *= dVdU;
-                    dz *= dVdU;
-                } else if (interpolated < 0.0f) {
-                    float U = -interpolated;
-                    float V = -powf(U, p);
-                    float dVdU = p * powf(U, p - 1.0f);
-                    interpolated = V;
-                    dx *= dVdU;
-                    dy *= dVdU;
-                    dz *= dVdU;
+                // Apply inv_power transformation if RUNTIME mode (for trilinear only - others handle internally)
+                if (invPowerMode == 1 && invPower != 0.0f) {
+                    float p = 1.0f / invPower;
+                    if (interpolated > 0.0f) {
+                        float U = interpolated;
+                        float V = powf(U, p);
+                        float dVdU = p * powf(U, p - 1.0f);
+                        interpolated = V;
+                        dx *= dVdU;
+                        dy *= dVdU;
+                        dz *= dVdU;
+                    } else if (interpolated < 0.0f) {
+                        float U = -interpolated;
+                        float V = -powf(U, p);
+                        float dVdU = p * powf(U, p - 1.0f);
+                        interpolated = V;
+                        dx *= dVdU;
+                        dy *= dVdU;
+                        dz *= dVdU;
+                    }
                 }
+            } else if (interpolationMethod == 1) {
+                // B-spline interpolation (handles inv_power internally)
+                bsplineInterpolateTiled(
+                    tileValues, localX, localY, localZ,
+                    fx, fy, fz,
+                    &interpolated, &dx, &dy, &dz,
+                    gridSpacing[0], gridSpacing[1], gridSpacing[2],
+                    tileWithOverlap,
+                    invPower, invPowerMode
+                );
+            } else if (interpolationMethod == 2 && tileDerivatives != nullptr) {
+                // Tricubic interpolation (handles inv_power internally)
+                tricubicInterpolateTiled(
+                    tileValues, tileDerivatives, localX, localY, localZ,
+                    fx, fy, fz,
+                    &interpolated, &dx, &dy, &dz,
+                    gridSpacing[0], gridSpacing[1], gridSpacing[2],
+                    tileWithOverlap,
+                    invPower, invPowerMode
+                );
+            } else if (interpolationMethod == 3 && tileDerivatives != nullptr) {
+                // Triquintic interpolation (handles inv_power internally)
+                triquinticInterpolateTiled(
+                    tileValues, tileDerivatives, localX, localY, localZ,
+                    fx, fy, fz,
+                    &interpolated, &dx, &dy, &dz,
+                    gridSpacing[0], gridSpacing[1], gridSpacing[2],
+                    tileWithOverlap,
+                    invPower, invPowerMode
+                );
+            } else {
+                // Fallback to trilinear if derivatives not available for tricubic/triquintic
+                trilinearInterpolateTiled(
+                    tileValues, localX, localY, localZ,
+                    fx, fy, fz,
+                    &interpolated, &dx, &dy, &dz,
+                    gridSpacing[0], gridSpacing[1], gridSpacing[2],
+                    tileWithOverlap
+                );
             }
 
             // Apply scaling factor and compute energy/force
@@ -248,16 +554,21 @@ extern "C" __global__ void computeGridForceTiled(
         atomEnergyBuffer[index] = threadEnergy;
     }
 
-    // Accumulate energy to group buffer if using particle groups
+    // Accumulate energy - EITHER to group OR to total, not both
+    // (This matches the non-tiled kernel behavior)
     if (particleToGroupMap != nullptr && groupEnergyBuffer != nullptr) {
         int groupIdx = particleToGroupMap[index];
         if (groupIdx >= 0 && groupIdx < numGroups) {
+            // Particle in a group - only add to group energy
             atomicAdd(&groupEnergyBuffer[groupIdx], threadEnergy);
+        } else {
+            // Particle not in any group - add to total
+            atomicAdd(energyBuffer, threadEnergy);
         }
+    } else {
+        // No group tracking - add to total
+        atomicAdd(energyBuffer, threadEnergy);
     }
-
-    // Accumulate total energy
-    atomicAdd(energyBuffer, threadEnergy);
 
     // Convert force to fixed point and accumulate
     atomicAdd(&forceBuffers[particleIndex], static_cast<unsigned long long>((long long)(atomForce.x * 0x100000000)));
