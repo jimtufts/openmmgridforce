@@ -2,10 +2,16 @@
  *                              OpenMMGridForce                               *
  * -------------------------------------------------------------------------- *
  * Newton-Raphson minimizer using analytical Hessians for fast convergence.  *
+ * Combines Hessians from:                                                    *
+ *   - BondedHessian (bonds, angles, torsions)                                *
+ *   - GridForce (ligand-receptor grid interactions)                          *
+ *   - IsolatedNonbondedForce (intra-ligand nonbonded)                        *
  * -------------------------------------------------------------------------- */
 
 #include "NewtonMinimizer.h"
 #include "BondedHessian.h"
+#include "GridForce.h"
+#include "IsolatedNonbondedForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
 #include <cmath>
@@ -196,7 +202,146 @@ bool NewtonMinimizer::minimizeBondedOnly(Context& context, double tolerance, int
 }
 
 bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterations) {
-    // For now, just use bonded-only minimization
-    // Full implementation would include nonbonded Hessian from IsolatedNonbondedForce
-    return minimizeBondedOnly(context, tolerance, maxIterations);
+    const System& system = context.getSystem();
+    int numAtoms = system.getNumParticles();
+    int n = 3 * numAtoms;
+
+    // Find all force types that provide Hessians
+    BondedHessian bondedHessian;
+    bondedHessian.initialize(system, context);
+
+    vector<GridForce*> gridForces;
+    vector<IsolatedNonbondedForce*> isoNBForces;
+
+    for (int i = 0; i < system.getNumForces(); i++) {
+        // Note: We need const_cast because getForce returns const reference
+        // but we need non-const to call computeHessian
+        Force& force = const_cast<Force&>(system.getForce(i));
+
+        GridForce* gf = dynamic_cast<GridForce*>(&force);
+        if (gf != nullptr) {
+            gridForces.push_back(gf);
+        }
+
+        IsolatedNonbondedForce* inb = dynamic_cast<IsolatedNonbondedForce*>(&force);
+        if (inb != nullptr) {
+            isoNBForces.push_back(inb);
+        }
+    }
+
+    for (int iter = 0; iter < maxIterations; iter++) {
+        lastIterations = iter + 1;
+
+        // Get current state
+        State state = context.getState(State::Positions | State::Forces | State::Energy);
+        vector<Vec3> positions = state.getPositions();
+        vector<Vec3> forces = state.getForces();
+        double energy = state.getPotentialEnergy();
+
+        // Convert forces to gradient (negative forces)
+        vector<double> gradient(n);
+        for (int i = 0; i < numAtoms; i++) {
+            gradient[3*i]     = -forces[i][0];
+            gradient[3*i + 1] = -forces[i][1];
+            gradient[3*i + 2] = -forces[i][2];
+        }
+
+        // Check convergence
+        lastRMSForce = computeRMS(gradient);
+        if (lastRMSForce < tolerance) {
+            return true;
+        }
+
+        // Start with bonded Hessian
+        vector<double> H = bondedHessian.computeHessian(context);
+
+        // Add GridForce Hessians (diagonal blocks only - atoms don't interact with each other through grid)
+        for (GridForce* gf : gridForces) {
+            gf->computeHessian(context);
+            vector<double> blocks = gf->getHessianBlocks(context);
+
+            // blocks contains 6 values per atom: [dxx, dyy, dzz, dxy, dxz, dyz]
+            for (int i = 0; i < numAtoms; i++) {
+                if (6*i + 5 < (int)blocks.size()) {
+                    double dxx = blocks[6*i + 0];
+                    double dyy = blocks[6*i + 1];
+                    double dzz = blocks[6*i + 2];
+                    double dxy = blocks[6*i + 3];
+                    double dxz = blocks[6*i + 4];
+                    double dyz = blocks[6*i + 5];
+
+                    // Add to diagonal 3x3 block for atom i
+                    int base = 3*i;
+                    H[(base+0)*n + (base+0)] += dxx;
+                    H[(base+1)*n + (base+1)] += dyy;
+                    H[(base+2)*n + (base+2)] += dzz;
+                    H[(base+0)*n + (base+1)] += dxy;
+                    H[(base+1)*n + (base+0)] += dxy;
+                    H[(base+0)*n + (base+2)] += dxz;
+                    H[(base+2)*n + (base+0)] += dxz;
+                    H[(base+1)*n + (base+2)] += dyz;
+                    H[(base+2)*n + (base+1)] += dyz;
+                }
+            }
+        }
+
+        // Add IsolatedNonbondedForce Hessians (full matrix)
+        for (IsolatedNonbondedForce* inb : isoNBForces) {
+            vector<double> nbH = inb->computeHessian(context);
+            if (nbH.size() == H.size()) {
+                for (size_t i = 0; i < H.size(); i++) {
+                    H[i] += nbH[i];
+                }
+            }
+        }
+
+        // Solve for Newton step: H * dx = -gradient
+        vector<double> dx;
+        solveDamped(H, gradient, dx, n, dampingFactor);
+
+        // Negate to get descent direction
+        for (int i = 0; i < n; i++) {
+            dx[i] = -dx[i];
+        }
+
+        // Line search
+        double alpha = 1.0;
+        if (useLineSearch) {
+            double c = 0.0001;
+            double rho = 0.5;
+
+            double directionalDeriv = 0.0;
+            for (int i = 0; i < n; i++) {
+                directionalDeriv += gradient[i] * dx[i];
+            }
+
+            for (int ls = 0; ls < 20; ls++) {
+                vector<Vec3> newPos = positions;
+                for (int i = 0; i < numAtoms; i++) {
+                    newPos[i][0] += alpha * dx[3*i];
+                    newPos[i][1] += alpha * dx[3*i + 1];
+                    newPos[i][2] += alpha * dx[3*i + 2];
+                }
+                context.setPositions(newPos);
+
+                State newState = context.getState(State::Energy);
+                double newEnergy = newState.getPotentialEnergy();
+
+                if (newEnergy <= energy + c * alpha * directionalDeriv || alpha < 1e-10) {
+                    break;
+                }
+                alpha *= rho;
+            }
+        } else {
+            vector<Vec3> newPos = positions;
+            for (int i = 0; i < numAtoms; i++) {
+                newPos[i][0] += alpha * dx[3*i];
+                newPos[i][1] += alpha * dx[3*i + 1];
+                newPos[i][2] += alpha * dx[3*i + 2];
+            }
+            context.setPositions(newPos);
+        }
+    }
+
+    return false;
 }

@@ -577,7 +577,8 @@ __device__ void computeDihedralAndGradient(
  */
 __device__ void computeDihedralHessian(
     float3 p1, float3 p2, float3 p3, float3 p4,
-    float* hess  // 144 floats
+    float* hess,  // 144 floats
+    bool debug = false
 ) {
     // Initialize to zero
     for (int i = 0; i < 144; i++) hess[i] = 0.0f;
@@ -596,7 +597,18 @@ __device__ void computeDihedralHessian(
     float b2_sq = length_sq(b2);
     float b2_norm = sqrtf(b2_sq);
 
+    if (debug) {
+        printf("DEBUG computeDihedralHessian:\n");
+        printf("  b1 = [%f, %f, %f]\n", b1.x, b1.y, b1.z);
+        printf("  b2 = [%f, %f, %f]\n", b2.x, b2.y, b2.z);
+        printf("  b3 = [%f, %f, %f]\n", b3.x, b3.y, b3.z);
+        printf("  m = [%f, %f, %f], m_sq = %e\n", m.x, m.y, m.z, m_sq);
+        printf("  n = [%f, %f, %f], n_sq = %e\n", n.x, n.y, n.z, n_sq);
+        printf("  b2_sq = %e, b2_norm = %f\n", b2_sq, b2_norm);
+    }
+
     if (m_sq < 1e-20f || n_sq < 1e-20f || b2_sq < 1e-20f) {
+        if (debug) printf("  EARLY RETURN: degenerate case\n");
         return;
     }
 
@@ -692,6 +704,13 @@ __device__ void computeDihedralHessian(
     // Compute dG1/dpj and dG4/dpj (3x3 matrices for each j)
     float dG1_dp[4][9], dG4_dp[4][9];
 
+    if (debug) {
+        printf("  G1 = [%f, %f, %f]\n", G1.x, G1.y, G1.z);
+        printf("  G4 = [%f, %f, %f]\n", G4.x, G4.y, G4.z);
+        printf("  alpha = %f, beta = %f\n", alpha, beta);
+        printf("  dm_dp[0] (row 0): [%f, %f, %f]\n", dm_dp[0][0], dm_dp[0][1], dm_dp[0][2]);
+    }
+
     for (int j = 0; j < 4; j++) {
         // dG1/dpj = outer(m, db2_norm/dpj) / m_sq + (b2_norm/m_sq) * (I - 2*mm/m_sq) @ dm/dpj
         // dG4/dpj = -outer(n, db2_norm/dpj) / n_sq - (b2_norm/n_sq) * (I - 2*nn/n_sq) @ dn/dpj
@@ -713,6 +732,11 @@ __device__ void computeDihedralHessian(
                 float term2_G1 = (b2_norm / m_sq) * sum_G1;
 
                 dG1_dp[j][idx] = term1_G1 + term2_G1;
+
+                if (debug && j == 0 && a == 0 && b == 0) {
+                    printf("  dG1_dp[0][0,0]: term1=%f, sum=%f, term2=%f, total=%f\n",
+                           term1_G1, sum_G1, term2_G1, dG1_dp[j][idx]);
+                }
 
                 // term1 for G4: -n[a] * db2_norm[j][b] / n_sq
                 float term1_G4 = -nv[a] * db2_norm_dp[j][b] / n_sq;
@@ -802,6 +826,14 @@ __device__ void computeDihedralHessian(
             hess[j * 12 + i] = avg;
         }
     }
+
+    // DEBUG: Set known values to verify write is working
+    if (debug) {
+        // Print some computed values
+        printf("DEBUG H_phi final: hess[0]=%f, max_dG1=%f\n", hess[0], dG1_dp[0][0]);
+        // Overwrite to verify writes work
+        hess[143] = 12345.0f;  // Sentinel value
+    }
 }
 
 /**
@@ -819,16 +851,34 @@ __device__ void computeDihedralHessian(
 __device__ void computeTorsionHessian(
     float3 p1, float3 p2, float3 p3, float3 p4,
     float k, int n, float phi0,
-    float* hess  // 144 floats
+    float* hess,  // 144 floats
+    bool debug = false
 ) {
     // Get dihedral angle and gradient
     float phi;
     float grad[12];
     computeDihedralAndGradient(p1, p2, p3, p4, phi, grad);
 
+    if (debug) {
+        printf("DEBUG computeTorsionHessian:\n");
+        printf("  phi = %f rad, k = %f, n = %d, phi0 = %f\n", phi, k, n, phi0);
+        printf("  grad[0-2] = [%f, %f, %f]\n", grad[0], grad[1], grad[2]);
+    }
+
     // Get dihedral Hessian
     float H_phi[144];
-    computeDihedralHessian(p1, p2, p3, p4, H_phi);
+    computeDihedralHessian(p1, p2, p3, p4, H_phi, debug);
+
+    if (debug) {
+        printf("  H_phi[0,0] = %f, H_phi[0,2] = %f, H_phi[2,2] = %f\n",
+               H_phi[0], H_phi[2], H_phi[2*12+2]);
+        printf("  H_phi max = %f\n", H_phi[0]);
+        float max_hphi = 0.0f;
+        for (int i = 0; i < 144; i++) {
+            if (fabsf(H_phi[i]) > max_hphi) max_hphi = fabsf(H_phi[i]);
+        }
+        printf("  H_phi actual max = %f\n", max_hphi);
+    }
 
     // Energy derivatives
     float arg = n * phi - phi0;
@@ -841,6 +891,11 @@ __device__ void computeTorsionHessian(
         for (int j = 0; j < 12; j++) {
             hess[i * 12 + j] = d2E_dphi2 * grad[i] * grad[j] + dE_dphi * H_phi[i * 12 + j];
         }
+    }
+
+    if (debug) {
+        printf("DEBUG torsion: H_phi[0]=%f, H_phi[143]=%f, dE_dphi=%f\n", H_phi[0], H_phi[143], dE_dphi);
+        printf("DEBUG torsion: hess[0]=%f (should include H_phi contrib)\n", hess[0]);
     }
 }
 
@@ -891,7 +946,11 @@ extern "C" __global__ void computeTorsionHessians(
 
     // Compute torsion Hessian
     float localHess[144];
-    computeTorsionHessian(p1, p2, p3, p4, k, n, phi0, localHess);
+    bool debug = true;  // ALWAYS debug for now
+    computeTorsionHessian(p1, p2, p3, p4, k, n, phi0, localHess, debug);
+
+    // Force sentinel unconditionally
+    localHess[143] = 99999.0f;
 
     // Map local indices (0-3) to global atom indices
     int atomIndices[4] = {i1, i2, i3, i4};
@@ -931,6 +990,39 @@ extern "C" __global__ void computeTorsionHessians(
  * @param torsionHessians  Output: [numTorsions * 144] Hessian blocks
  * @param numTorsions      Number of torsions
  */
+/**
+ * Debug kernel that outputs ONLY the dihedral angle Hessian (H_phi) for inspection.
+ */
+extern "C" __global__ void computeDihedralHessianBlocks(
+    const float4* __restrict__ posq,
+    const int* __restrict__ torsionAtoms,
+    float* __restrict__ dihedralHessians,  // [numTorsions * 144]
+    int numTorsions
+) {
+    int torsionIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (torsionIdx >= numTorsions) return;
+
+    int i1 = torsionAtoms[torsionIdx * 4 + 0];
+    int i2 = torsionAtoms[torsionIdx * 4 + 1];
+    int i3 = torsionAtoms[torsionIdx * 4 + 2];
+    int i4 = torsionAtoms[torsionIdx * 4 + 3];
+
+    float4 pos1 = posq[i1];
+    float4 pos2 = posq[i2];
+    float4 pos3 = posq[i3];
+    float4 pos4 = posq[i4];
+
+    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
+    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
+    float3 p3 = make_float3(pos3.x, pos3.y, pos3.z);
+    float3 p4 = make_float3(pos4.x, pos4.y, pos4.z);
+
+    // Output H_phi directly
+    float* output = &dihedralHessians[torsionIdx * 144];
+    bool debug = (torsionIdx == 0);
+    computeDihedralHessian(p1, p2, p3, p4, output, debug);
+}
+
 extern "C" __global__ void computeTorsionHessianBlocks(
     const float4* __restrict__ posq,
     const int* __restrict__ torsionAtoms,
@@ -1125,62 +1217,8 @@ extern "C" __global__ void computeNonbondedPairHessians(
     }
 }
 
-/**
- * Kernel to compute isolated nonbonded Hessians (pure LJ, no Coulomb).
- *
- * Used for IsolatedNonbondedForce which handles only LJ interactions
- * between non-bonded atoms.
- */
-extern "C" __global__ void computeIsolatedNonbondedHessians(
-    const float4* __restrict__ posq,
-    const int* __restrict__ pairAtoms,         // [numPairs * 2]: atom indices
-    const float* __restrict__ pairParams,      // [numPairs * 2]: sigma, epsilon
-    float* __restrict__ globalHessian,
-    int numPairs,
-    int numAtoms
-) {
-    int pairIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pairIdx >= numPairs) return;
-
-    int i1 = pairAtoms[pairIdx * 2 + 0];
-    int i2 = pairAtoms[pairIdx * 2 + 1];
-
-    float4 pos1 = posq[i1];
-    float4 pos2 = posq[i2];
-
-    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
-    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
-
-    float sigma = pairParams[pairIdx * 2 + 0];
-    float epsilon = pairParams[pairIdx * 2 + 1];
-
-    // Use zero charges for pure LJ
-    float localHess[36];
-    computeNonbondedPairHessian(p1, p2, 0.0f, 0.0f, sigma, epsilon, localHess);
-
-    // Accumulate into global Hessian
-    int atomIndices[2] = {i1, i2};
-    int stride = numAtoms * 3;
-
-    for (int localI = 0; localI < 2; localI++) {
-        for (int localJ = 0; localJ < 2; localJ++) {
-            int globalI = atomIndices[localI];
-            int globalJ = atomIndices[localJ];
-
-            for (int di = 0; di < 3; di++) {
-                for (int dj = 0; dj < 3; dj++) {
-                    int globalRow = globalI * 3 + di;
-                    int globalCol = globalJ * 3 + dj;
-                    int localRow = localI * 3 + di;
-                    int localCol = localJ * 3 + dj;
-
-                    float val = localHess[localRow * 6 + localCol];
-                    atomicAdd(&globalHessian[globalRow * stride + globalCol], val);
-                }
-            }
-        }
-    }
-}
+// Note: computeIsolatedNonbondedHessians kernel is defined in isolatedNonbonded.cu
+// to include both LJ and Coulomb interactions
 
 // ============================================================
 // Utility Kernels
@@ -1196,5 +1234,9 @@ extern "C" __global__ void initializeHessian(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         hessian[idx] = 0.0f;
+    }
+    // DEBUG: Set sentinel in first element to verify kernel runs
+    if (idx == 0) {
+        hessian[0] = 77777.0f;
     }
 }

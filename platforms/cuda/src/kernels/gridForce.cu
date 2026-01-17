@@ -327,18 +327,6 @@ extern "C" __global__ void computeGridForce(
             dy = dvalue_dy;
             dz = dvalue_dz;
 
-            // DEBUG: Only print if there are problematic values (NaN, Inf, or coefficients with all-zero derivatives)
-            bool hasProblems = isnan(value) || isinf(value) || isnan(a[0]) || isinf(a[0]) ||
-                               (X[0] > 1e6f) ||  // Very large corner value
-                               (fabsf(X[8]) < 1e-10f && fabsf(X[16]) < 1e-10f && fabsf(X[24]) < 1e-10f && X[0] > 1000.0f); // Zero derivs with high energy
-            if (hasProblems && index < 5) {  // Only print for first 5 atoms to avoid spam
-                printf("WARNING: TRIQUINTIC ISSUE (atom %d):\n", index);
-                printf("  corner0: f=%f, dx=%f, dy=%f, dz=%f\n", X[0], X[8], X[16], X[24]);
-                printf("  coeffs: a[0]=%f, a[1]=%f, a[6]=%f, a[36]=%f\n", a[0], a[1], a[6], a[36]);
-                printf("  interp: fx=%f, fy=%f, fz=%f, value=%f\n", fx, fy, fz, value);
-                printf("  derivs: dx=%f, dy=%f, dz=%f\n", dvalue_dx, dvalue_dy, dvalue_dz);
-            }
-
         } else if ((interpolationMethod == 2 || interpolationMethod == 3) && gridDerivatives == nullptr) {
             // Tricubic/Triquintic requested but derivatives not available - return NaN
             // This prevents silent fallback to trilinear which would give incorrect results

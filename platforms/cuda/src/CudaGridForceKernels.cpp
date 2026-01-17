@@ -1172,8 +1172,6 @@ void CudaCalcGridForceKernel::computeHessian() {
     }
 
     // Launch Hessian kernel (with invPower chain rule support)
-    std::cout << "[HESSIAN CPP] invPower=" << invPower << ", invPowerMode=" << invPowerMode << std::endl;
-
     void* args[] = {
         &posqPtr,
         &hessianPtr,
