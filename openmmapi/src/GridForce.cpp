@@ -854,4 +854,41 @@ vector<double> GridForce::getParticleAtomEnergies(Context& context) const {
     return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleAtomEnergies();
 }
 
+vector<int> GridForce::getParticleOutOfBoundsFlags(Context& context) const {
+    return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleOutOfBoundsFlags();
+}
+
+void GridForce::computeHessian(Context& context) const {
+    dynamic_cast<GridForceImpl&>(getImplInContext(context)).computeHessian();
+}
+
+vector<double> GridForce::getHessianBlocks(Context& context) const {
+    return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getHessianBlocks();
+}
+
+HessianAnalysis GridForce::analyzeHessian(Context& context, float temperature) const {
+    HessianAnalysis result;
+    GridForceImpl& impl = dynamic_cast<GridForceImpl&>(getImplInContext(context));
+
+    // Compute Hessian first if not already done
+    impl.computeHessian();
+
+    // Perform analysis
+    impl.analyzeHessian(temperature);
+
+    // Collect results
+    result.eigenvalues = impl.getEigenvalues();
+    result.eigenvectors = impl.getEigenvectors();
+    result.meanCurvature = impl.getMeanCurvature();
+    result.totalCurvature = impl.getTotalCurvature();
+    result.gaussianCurvature = impl.getGaussianCurvature();
+    result.fracAnisotropy = impl.getFracAnisotropy();
+    result.entropy = impl.getEntropy();
+    result.minEigenvalue = impl.getMinEigenvalue();
+    result.numNegative = impl.getNumNegative();
+    result.totalEntropy = impl.getTotalEntropy();
+
+    return result;
+}
+
 }  // namespace GridForcePlugin

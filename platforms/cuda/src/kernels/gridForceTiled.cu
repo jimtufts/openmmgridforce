@@ -44,7 +44,19 @@ __device__ __forceinline__ int tileIndex(int lx, int ly, int lz, int tileWithOve
 }
 
 /**
+ * Helper to apply inv_power forward transform: val -> sign(val) * |val|^(1/n)
+ */
+__device__ __forceinline__ float invPowerForwardTransform(float val, float invN) {
+    if (fabsf(val) >= 1e-10f) {
+        return (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+    }
+    return 0.0f;
+}
+
+/**
  * Trilinear interpolation using tile-local data.
+ * For RUNTIME inv_power mode, transforms grid values before interpolation
+ * and returns interpolated value in transformed space.
  */
 __device__ void trilinearInterpolateTiled(
     const float* __restrict__ tileValues,
@@ -53,7 +65,9 @@ __device__ void trilinearInterpolateTiled(
     float* energy,
     float* dEdx, float* dEdy, float* dEdz,
     float spacingX, float spacingY, float spacingZ,
-    int tileWithOverlap  // Total tile dimension including overlap
+    int tileWithOverlap,  // Total tile dimension including overlap
+    float invPower,       // inv_power value
+    int invPowerMode      // 0=NONE, 1=RUNTIME, 2=STORED
 ) {
     // Get 8 corner values from tile
     float v000 = tileValues[tileIndex(localX, localY, localZ, tileWithOverlap)];
@@ -65,6 +79,20 @@ __device__ void trilinearInterpolateTiled(
     float v110 = tileValues[tileIndex(localX + 1, localY + 1, localZ, tileWithOverlap)];
     float v111 = tileValues[tileIndex(localX + 1, localY + 1, localZ + 1, tileWithOverlap)];
 
+    // RUNTIME mode: transform corner values BEFORE interpolation
+    // val -> sign(val) * |val|^(1/n)
+    if (invPowerMode == 1 && invPower != 0.0f) {
+        float invN = 1.0f / invPower;
+        v000 = invPowerForwardTransform(v000, invN);
+        v001 = invPowerForwardTransform(v001, invN);
+        v010 = invPowerForwardTransform(v010, invN);
+        v011 = invPowerForwardTransform(v011, invN);
+        v100 = invPowerForwardTransform(v100, invN);
+        v101 = invPowerForwardTransform(v101, invN);
+        v110 = invPowerForwardTransform(v110, invN);
+        v111 = invPowerForwardTransform(v111, invN);
+    }
+
     // Trilinear interpolation
     float fx1 = 1.0f - fx;
     float fy1 = 1.0f - fy;
@@ -73,13 +101,25 @@ __device__ void trilinearInterpolateTiled(
     *energy = fx1 * (fy1 * (fz1 * v000 + fz * v001) + fy * (fz1 * v010 + fz * v011)) +
               fx  * (fy1 * (fz1 * v100 + fz * v101) + fy * (fz1 * v110 + fz * v111));
 
-    // Compute gradients
-    *dEdx = (fy1 * (fz1 * (v100 - v000) + fz * (v101 - v001)) +
-             fy  * (fz1 * (v110 - v010) + fz * (v111 - v011))) / spacingX;
-    *dEdy = (fx1 * (fz1 * (v010 - v000) + fz * (v011 - v001)) +
-             fx  * (fz1 * (v110 - v100) + fz * (v111 - v101))) / spacingY;
-    *dEdz = (fx1 * (fy1 * (v001 - v000) + fy * (v011 - v010)) +
-             fx  * (fy1 * (v101 - v100) + fy * (v111 - v110))) / spacingZ;
+    // Compute gradients in transformed space (don't divide by spacing yet for RUNTIME mode)
+    if (invPowerMode == 1 && invPower != 0.0f) {
+        // For RUNTIME mode, compute gradients WITHOUT dividing by spacing
+        // (chain rule will be applied later, then divide by spacing)
+        *dEdx = (fy1 * (fz1 * (v100 - v000) + fz * (v101 - v001)) +
+                 fy  * (fz1 * (v110 - v010) + fz * (v111 - v011)));
+        *dEdy = (fx1 * (fz1 * (v010 - v000) + fz * (v011 - v001)) +
+                 fx  * (fz1 * (v110 - v100) + fz * (v111 - v101)));
+        *dEdz = (fx1 * (fy1 * (v001 - v000) + fy * (v011 - v010)) +
+                 fx  * (fy1 * (v101 - v100) + fy * (v111 - v110)));
+    } else {
+        // For NONE/STORED mode, divide by spacing immediately
+        *dEdx = (fy1 * (fz1 * (v100 - v000) + fz * (v101 - v001)) +
+                 fy  * (fz1 * (v110 - v010) + fz * (v111 - v011))) / spacingX;
+        *dEdy = (fx1 * (fz1 * (v010 - v000) + fz * (v011 - v001)) +
+                 fx  * (fz1 * (v110 - v100) + fz * (v111 - v101))) / spacingY;
+        *dEdz = (fx1 * (fy1 * (v001 - v000) + fy * (v011 - v010)) +
+                 fx  * (fy1 * (v101 - v100) + fy * (v111 - v110))) / spacingZ;
+    }
 }
 
 /**
@@ -368,6 +408,7 @@ extern "C" __global__ void computeGridForceTiled(
     const int* __restrict__ particleToGroupMap,
     float* __restrict__ groupEnergyBuffer,
     float* __restrict__ atomEnergyBuffer,
+    int* __restrict__ outOfBoundsBuffer,           // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups,
     // Tile-specific parameters
     const int* __restrict__ tileOffsets,           // Grid offsets for each tile (x,y,z,x,y,z,...)
@@ -442,38 +483,33 @@ extern "C" __global__ void computeGridForceTiled(
             float dx = 0.0f, dy = 0.0f, dz = 0.0f;
 
             if (interpolationMethod == 0) {
-                // Trilinear interpolation
+                // Trilinear interpolation (now handles inv_power internally for pre-transform)
                 trilinearInterpolateTiled(
                     tileValues, localX, localY, localZ,
                     fx, fy, fz,
                     &interpolated, &dx, &dy, &dz,
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],
-                    tileWithOverlap
+                    tileWithOverlap,
+                    invPower, invPowerMode
                 );
 
-                // Apply inv_power transformation if RUNTIME mode (for trilinear only - others handle internally)
-                if (invPowerMode == 1 && invPower != 0.0f) {
-                    float p = 1.0f / invPower;
-                    if (interpolated > 0.0f) {
-                        float U = interpolated;
-                        float V = powf(U, p);
-                        float dVdU = p * powf(U, p - 1.0f);
-                        interpolated = V;
-                        dx *= dVdU;
-                        dy *= dVdU;
-                        dz *= dVdU;
-                    } else if (interpolated < 0.0f) {
-                        float U = -interpolated;
-                        float V = -powf(U, p);
-                        float dVdU = p * powf(U, p - 1.0f);
-                        interpolated = V;
-                        dx *= dVdU;
-                        dy *= dVdU;
-                        dz *= dVdU;
+                // Back-transform from transformed space if RUNTIME or STORED mode
+                // val^(1/n) -> val^(1/n)^n = val
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    float absVal = fabsf(interpolated);
+                    if (absVal > 1e-10f) {
+                        // Back-convert: v -> sign(v)*|v|^n
+                        float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+                        interpolated = sign * powf(absVal, invPower);
+                        // Apply chain rule to gradients, then divide by spacing
+                        dx = dx * powerFactor / gridSpacing[0];
+                        dy = dy * powerFactor / gridSpacing[1];
+                        dz = dz * powerFactor / gridSpacing[2];
                     }
                 }
             } else if (interpolationMethod == 1) {
-                // B-spline interpolation (handles inv_power internally)
+                // B-spline interpolation (handles inv_power pre-transform internally)
                 bsplineInterpolateTiled(
                     tileValues, localX, localY, localZ,
                     fx, fy, fz,
@@ -482,8 +518,22 @@ extern "C" __global__ void computeGridForceTiled(
                     tileWithOverlap,
                     invPower, invPowerMode
                 );
+
+                // Back-transform from transformed space if RUNTIME or STORED mode
+                // (bspline already divided by spacing, so just apply power factor to gradients)
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    float absVal = fabsf(interpolated);
+                    if (absVal > 1e-10f) {
+                        float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+                        interpolated = sign * powf(absVal, invPower);
+                        dx *= powerFactor;
+                        dy *= powerFactor;
+                        dz *= powerFactor;
+                    }
+                }
             } else if (interpolationMethod == 2 && tileDerivatives != nullptr) {
-                // Tricubic interpolation (handles inv_power internally)
+                // Tricubic interpolation (handles inv_power pre-transform internally)
                 tricubicInterpolateTiled(
                     tileValues, tileDerivatives, localX, localY, localZ,
                     fx, fy, fz,
@@ -492,8 +542,21 @@ extern "C" __global__ void computeGridForceTiled(
                     tileWithOverlap,
                     invPower, invPowerMode
                 );
+
+                // Back-transform from transformed space if RUNTIME or STORED mode
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    float absVal = fabsf(interpolated);
+                    if (absVal > 1e-10f) {
+                        float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+                        interpolated = sign * powf(absVal, invPower);
+                        dx *= powerFactor;
+                        dy *= powerFactor;
+                        dz *= powerFactor;
+                    }
+                }
             } else if (interpolationMethod == 3 && tileDerivatives != nullptr) {
-                // Triquintic interpolation (handles inv_power internally)
+                // Triquintic interpolation (handles inv_power pre-transform internally)
                 triquinticInterpolateTiled(
                     tileValues, tileDerivatives, localX, localY, localZ,
                     fx, fy, fz,
@@ -502,6 +565,19 @@ extern "C" __global__ void computeGridForceTiled(
                     tileWithOverlap,
                     invPower, invPowerMode
                 );
+
+                // Back-transform from transformed space if RUNTIME or STORED mode
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    float absVal = fabsf(interpolated);
+                    if (absVal > 1e-10f) {
+                        float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+                        interpolated = sign * powf(absVal, invPower);
+                        dx *= powerFactor;
+                        dy *= powerFactor;
+                        dz *= powerFactor;
+                    }
+                }
             } else {
                 // Fallback to trilinear if derivatives not available for tricubic/triquintic
                 trilinearInterpolateTiled(
@@ -509,8 +585,22 @@ extern "C" __global__ void computeGridForceTiled(
                     fx, fy, fz,
                     &interpolated, &dx, &dy, &dz,
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],
-                    tileWithOverlap
+                    tileWithOverlap,
+                    invPower, invPowerMode
                 );
+
+                // Back-transform from transformed space if RUNTIME or STORED mode
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    float absVal = fabsf(interpolated);
+                    if (absVal > 1e-10f) {
+                        float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+                        interpolated = sign * powf(absVal, invPower);
+                        dx = dx * powerFactor / gridSpacing[0];
+                        dy = dy * powerFactor / gridSpacing[1];
+                        dz = dz * powerFactor / gridSpacing[2];
+                    }
+                }
             }
 
             // Apply scaling factor and compute energy/force
@@ -552,6 +642,11 @@ extern "C" __global__ void computeGridForceTiled(
     // Store per-atom energy if buffer provided
     if (atomEnergyBuffer != nullptr) {
         atomEnergyBuffer[index] = threadEnergy;
+    }
+
+    // Store per-atom out-of-bounds flag if buffer provided
+    if (outOfBoundsBuffer != nullptr) {
+        outOfBoundsBuffer[index] = isInside ? 0 : 1;
     }
 
     // Accumulate energy - EITHER to group OR to total, not both

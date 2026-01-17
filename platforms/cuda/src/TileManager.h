@@ -311,6 +311,11 @@ public:
     const TileConfig& getConfig() const { return hostGrid_.getConfig(); }
 
     /**
+     * Check if grid has derivatives available.
+     */
+    bool hasDerivatives() const { return hostGrid_.hasDerivatives(); }
+
+    /**
      * Get cache statistics.
      */
     size_t getCacheHits() const { return cache_.getCacheHits(); }

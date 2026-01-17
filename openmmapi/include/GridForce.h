@@ -53,6 +53,28 @@ namespace GridForcePlugin {
  * Allows multiple ligands to share a single GridForce while maintaining
  * independent particle lists and per-group energy tracking.
  */
+/**
+ * Structure containing results from Hessian analysis.
+ * Provides per-atom eigendecomposition, curvature metrics, and entropy estimates.
+ */
+struct OPENMM_EXPORT_GRIDFORCE HessianAnalysis {
+    std::vector<double> eigenvalues;        // [3 * N] sorted ascending per atom
+    std::vector<double> eigenvectors;       // [9 * N] (3 eigenvectors × 3 components per atom)
+    std::vector<double> meanCurvature;      // [N] (λ1 + λ2 + λ3) / 3
+    std::vector<double> totalCurvature;     // [N] λ1 + λ2 + λ3 (equals trace of Hessian)
+    std::vector<double> gaussianCurvature;  // [N] λ1 * λ2 * λ3 (negative indicates saddle)
+    std::vector<double> fracAnisotropy;     // [N] range [0,1] (0=isotropic, 1=linear)
+    std::vector<double> entropy;            // [N] per-atom entropy in kB units, NaN for saddle points
+    std::vector<double> minEigenvalue;      // [N] smallest eigenvalue per atom
+    std::vector<int> numNegative;           // [N] count of negative eigenvalues (0-3)
+    double totalEntropy;                    // Sum of per-atom entropies (excluding NaN)
+};
+
+/**
+ * Represents a named group of particles for multi-ligand simulations.
+ * Allows multiple ligands to share a single GridForce while maintaining
+ * independent particle lists and per-group energy tracking.
+ */
 struct OPENMM_EXPORT_GRIDFORCE ParticleGroup {
     /**
      * Create a particle group.
@@ -506,6 +528,54 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @return         vector of per-atom energies (empty if no groups)
      */
     std::vector<double> getParticleAtomEnergies(OpenMM::Context& context) const;
+
+    /**
+     * Get per-atom out-of-bounds flags from the most recent evaluation.
+     * Only available after evaluating a Context with particle groups.
+     * Returns flags in the same order as particles were added to groups.
+     * Flag values: 0 = inside grid, 1 = outside grid.
+     *
+     * @param context  the Context to query
+     * @return         vector of per-atom flags (empty if no groups)
+     */
+    std::vector<int> getParticleOutOfBoundsFlags(OpenMM::Context& context) const;
+
+    /**
+     * Compute Hessian (second derivative) blocks for each atom from the grid potential.
+     * This computes the 3x3 Hessian block for each atom, storing 6 unique components
+     * per atom: [d²V/dx², d²V/dy², d²V/dz², d²V/dxdy, d²V/dxdz, d²V/dydz].
+     *
+     * Must be called after execute() (e.g., after getState() with forces).
+     * Only supported for bspline (method 1) and triquintic (method 3) interpolation.
+     *
+     * @param context    the Context for which to compute the Hessian
+     */
+    void computeHessian(OpenMM::Context& context) const;
+
+    /**
+     * Get the Hessian blocks computed by the most recent call to computeHessian().
+     *
+     * @param context    the Context from which to retrieve Hessian data
+     * @return           vector of 6 components per atom: [dxx, dyy, dzz, dxy, dxz, dyz]
+     *                   Total size is 6 * numAtoms. Units are kJ/(mol·nm²).
+     */
+    std::vector<double> getHessianBlocks(OpenMM::Context& context) const;
+
+    /**
+     * Analyze Hessian to compute per-atom eigenvalues, curvature metrics, and entropy.
+     *
+     * This performs eigendecomposition of each 3x3 Hessian block using Cardano's
+     * analytical method, then computes derived metrics useful for binding site analysis
+     * and normal modes approximations.
+     *
+     * Must be called after execute() (e.g., after getState() with forces).
+     * Only supported for bspline (method 1) and triquintic (method 3) interpolation.
+     *
+     * @param context      the Context for analysis
+     * @param temperature  temperature in Kelvin for entropy calculation (default: 300.0)
+     * @return             HessianAnalysis structure with all computed metrics
+     */
+    HessianAnalysis analyzeHessian(OpenMM::Context& context, float temperature = 300.0f) const;
 
     /**
      * Clear grid data from host memory (values and derivatives).

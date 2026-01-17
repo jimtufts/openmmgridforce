@@ -85,4 +85,60 @@ std::vector<double> GridForceImpl::getParticleAtomEnergies() {
     return kernel.getAs<CalcGridForceKernel>().getParticleAtomEnergies();
 }
 
+std::vector<int> GridForceImpl::getParticleOutOfBoundsFlags() {
+    return kernel.getAs<CalcGridForceKernel>().getParticleOutOfBoundsFlags();
+}
+
+void GridForceImpl::computeHessian() {
+    kernel.getAs<CalcGridForceKernel>().computeHessian();
+}
+
+std::vector<double> GridForceImpl::getHessianBlocks() {
+    return kernel.getAs<CalcGridForceKernel>().getHessianBlocks();
+}
+
+void GridForceImpl::analyzeHessian(float temperature) {
+    kernel.getAs<CalcGridForceKernel>().analyzeHessian(temperature);
+}
+
+std::vector<double> GridForceImpl::getEigenvalues() {
+    return kernel.getAs<CalcGridForceKernel>().getEigenvalues();
+}
+
+std::vector<double> GridForceImpl::getEigenvectors() {
+    return kernel.getAs<CalcGridForceKernel>().getEigenvectors();
+}
+
+std::vector<double> GridForceImpl::getMeanCurvature() {
+    return kernel.getAs<CalcGridForceKernel>().getMeanCurvature();
+}
+
+std::vector<double> GridForceImpl::getTotalCurvature() {
+    return kernel.getAs<CalcGridForceKernel>().getTotalCurvature();
+}
+
+std::vector<double> GridForceImpl::getGaussianCurvature() {
+    return kernel.getAs<CalcGridForceKernel>().getGaussianCurvature();
+}
+
+std::vector<double> GridForceImpl::getFracAnisotropy() {
+    return kernel.getAs<CalcGridForceKernel>().getFracAnisotropy();
+}
+
+std::vector<double> GridForceImpl::getEntropy() {
+    return kernel.getAs<CalcGridForceKernel>().getEntropy();
+}
+
+std::vector<double> GridForceImpl::getMinEigenvalue() {
+    return kernel.getAs<CalcGridForceKernel>().getMinEigenvalue();
+}
+
+std::vector<int> GridForceImpl::getNumNegative() {
+    return kernel.getAs<CalcGridForceKernel>().getNumNegative();
+}
+
+double GridForceImpl::getTotalEntropy() {
+    return kernel.getAs<CalcGridForceKernel>().getTotalEntropy();
+}
+
 }  // namespace GridForcePlugin

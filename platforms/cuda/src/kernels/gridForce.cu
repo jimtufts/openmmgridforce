@@ -33,6 +33,7 @@ extern "C" __global__ void computeGridForce(
     const int* __restrict__ particleToGroupMap,  // Map particle index to group index (null = no groups)
     float* __restrict__ groupEnergyBuffer,  // Per-group energy buffer (null = no groups)
     float* __restrict__ atomEnergyBuffer,   // Per-atom energy buffer (null = don't store)
+    int* __restrict__ outOfBoundsBuffer,    // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups) {  // Number of particle groups
 
     // Get thread index
@@ -142,9 +143,11 @@ extern "C" __global__ void computeGridForce(
                 }
             }
 
-            dx = dvdx / gridSpacing[0];
-            dy = dvdy / gridSpacing[1];
-            dz = dvdz / gridSpacing[2];
+            // Don't divide by spacing here - let the common code at the end handle it
+            // This ensures chain rule is applied to unit cell gradients for RUNTIME inv_power mode
+            dx = dvdx;
+            dy = dvdy;
+            dz = dvdz;
 
         } else if (interpolationMethod == 2 && gridDerivatives != nullptr) {
             // LEKIEN-MARSDEN TRICUBIC INTERPOLATION (as used in RASPA3)
@@ -241,10 +244,8 @@ extern "C" __global__ void computeGridForce(
                 }
             }
 
-            // Convert derivatives from unit cell coordinates to physical coordinates
-            dx /= gridSpacing[0];
-            dy /= gridSpacing[1];
-            dz /= gridSpacing[2];
+            // Don't divide by spacing here - let the common code at the end handle it
+            // This ensures chain rule is applied to unit cell gradients for RUNTIME inv_power mode
 
         } else if (interpolationMethod == 3 && gridDerivatives != nullptr) {
             // TRIQUINTIC HERMITE INTERPOLATION (requires precomputed derivatives)
@@ -320,10 +321,11 @@ extern "C" __global__ void computeGridForce(
             }
 
             interpolated = value;
-            // Convert gradients from cell-local [0,1] to physical coordinates
-            dx = dvalue_dx / gridSpacing[0];
-            dy = dvalue_dy / gridSpacing[1];
-            dz = dvalue_dz / gridSpacing[2];
+            // Don't divide by spacing here - let the common code at the end handle it
+            // This ensures chain rule is applied to unit cell gradients for RUNTIME inv_power mode
+            dx = dvalue_dx;
+            dy = dvalue_dy;
+            dz = dvalue_dz;
 
             // DEBUG: Only print if there are problematic values (NaN, Inf, or coefficients with all-zero derivatives)
             bool hasProblems = isnan(value) || isinf(value) || isnan(a[0]) || isinf(a[0]) ||
@@ -501,6 +503,11 @@ extern "C" __global__ void computeGridForce(
     // Store per-atom energy if buffer provided (for debugging/analysis)
     if (atomEnergyBuffer != nullptr) {
         atomEnergyBuffer[index] = threadEnergy;
+    }
+
+    // Store per-atom out-of-bounds flag if buffer provided
+    if (outOfBoundsBuffer != nullptr) {
+        outOfBoundsBuffer[index] = isInside ? 0 : 1;
     }
 
     // Accumulate energy - EITHER to group OR to total, not both

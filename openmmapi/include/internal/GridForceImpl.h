@@ -74,6 +74,76 @@ class OPENMM_EXPORT_GRIDFORCE GridForceImpl : public OpenMM::ForceImpl {
 
     std::vector<double> getParticleAtomEnergies();
 
+    std::vector<int> getParticleOutOfBoundsFlags();
+
+    /**
+     * Compute Hessian (second derivative) blocks for each atom from grid potential.
+     * Results stored in kernel and retrieved via getHessianBlocks().
+     */
+    void computeHessian();
+
+    /**
+     * Get the Hessian blocks computed by computeHessian().
+     * @return vector of 6 components per atom: [dxx, dyy, dzz, dxy, dxz, dyz]
+     */
+    std::vector<double> getHessianBlocks();
+
+    /**
+     * Analyze Hessian blocks to compute per-atom metrics.
+     * @param temperature  Temperature in Kelvin for entropy calculation
+     */
+    void analyzeHessian(float temperature);
+
+    /**
+     * Get eigenvalues computed by analyzeHessian().
+     */
+    std::vector<double> getEigenvalues();
+
+    /**
+     * Get eigenvectors computed by analyzeHessian().
+     */
+    std::vector<double> getEigenvectors();
+
+    /**
+     * Get mean curvature computed by analyzeHessian().
+     */
+    std::vector<double> getMeanCurvature();
+
+    /**
+     * Get total curvature computed by analyzeHessian().
+     */
+    std::vector<double> getTotalCurvature();
+
+    /**
+     * Get Gaussian curvature computed by analyzeHessian().
+     */
+    std::vector<double> getGaussianCurvature();
+
+    /**
+     * Get fractional anisotropy computed by analyzeHessian().
+     */
+    std::vector<double> getFracAnisotropy();
+
+    /**
+     * Get per-atom entropy computed by analyzeHessian().
+     */
+    std::vector<double> getEntropy();
+
+    /**
+     * Get minimum eigenvalue per atom computed by analyzeHessian().
+     */
+    std::vector<double> getMinEigenvalue();
+
+    /**
+     * Get count of negative eigenvalues per atom computed by analyzeHessian().
+     */
+    std::vector<int> getNumNegative();
+
+    /**
+     * Get total entropy computed by analyzeHessian().
+     */
+    double getTotalEntropy();
+
    private:
     const GridForce &owner;
     OpenMM::Kernel kernel;

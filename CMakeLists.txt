@@ -95,6 +95,9 @@ SET_TARGET_PROPERTIES(${SHARED_GRIDFORCE_TARGET}
     LINK_FLAGS "${EXTRA_COMPILE_FLAGS}")
 TARGET_LINK_LIBRARIES(${SHARED_GRIDFORCE_TARGET} OpenMM)
 INSTALL_TARGETS(/lib RUNTIME_DIRECTORY /lib ${SHARED_GRIDFORCE_TARGET})
+# Also install to plugins directory - OpenMM's plugin loader looks there first
+# and we need to ensure it finds the current version, not a stale one
+INSTALL(TARGETS ${SHARED_GRIDFORCE_TARGET} DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/plugins)
 
 # install headers 
 FILE(GLOB API_ONLY_INCLUDE_FILES "openmmapi/include/*.h")

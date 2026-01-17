@@ -470,3 +470,8 @@ vector<double> CommonCalcGridForceKernel::getParticleAtomEnergies() {
     // Common platform does not support per-atom energy tracking yet
     return vector<double>();
 }
+
+vector<int> CommonCalcGridForceKernel::getParticleOutOfBoundsFlags() {
+    // Common platform does not support per-atom out-of-bounds tracking yet
+    return vector<int>();
+}
