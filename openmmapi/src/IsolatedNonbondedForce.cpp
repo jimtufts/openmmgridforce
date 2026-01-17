@@ -142,6 +142,10 @@ void IsolatedNonbondedForce::updateParametersInContext(Context& context) {
     dynamic_cast<IsolatedNonbondedForceImpl&>(getImplInContext(context)).updateParametersInContext(getContextImpl(context));
 }
 
+std::vector<double> IsolatedNonbondedForce::computeHessian(Context& context) {
+    return dynamic_cast<IsolatedNonbondedForceImpl&>(getImplInContext(context)).computeHessian(getContextImpl(context));
+}
+
 ForceImpl* IsolatedNonbondedForce::createImpl() const {
     return new IsolatedNonbondedForceImpl(*this);
 }

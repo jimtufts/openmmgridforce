@@ -35,6 +35,8 @@ namespace std {
 #include "CachedGridData.h"
 #include "IsolatedNonbondedForce.h"
 #include "IsolatedNonbondedForceKernels.h"
+#include "BondedHessian.h"
+#include "NewtonMinimizer.h"
 #include "OpenMM.h"
 #include "OpenMMAmoeba.h"
 #include "OpenMMDrude.h"
@@ -86,6 +88,19 @@ enum class InvPowerMode {
     NONE = 0,
     RUNTIME = 1,
     STORED = 2
+};
+
+struct HessianAnalysis {
+    std::vector<double> eigenvalues;
+    std::vector<double> eigenvectors;
+    std::vector<double> meanCurvature;
+    std::vector<double> totalCurvature;
+    std::vector<double> gaussianCurvature;
+    std::vector<double> fracAnisotropy;
+    std::vector<double> entropy;
+    std::vector<double> minEigenvalue;
+    std::vector<int> numNegative;
+    double totalEntropy;
 };
 
 struct ParticleGroup {
@@ -221,6 +236,14 @@ public:
 
     std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
     std::vector<double> getParticleAtomEnergies(OpenMM::Context& context) const;
+    std::vector<int> getParticleOutOfBoundsFlags(OpenMM::Context& context) const;
+
+    // Hessian (second derivative) computation for normal modes analysis
+    void computeHessian(OpenMM::Context& context) const;
+    std::vector<double> getHessianBlocks(OpenMM::Context& context) const;
+
+    // Hessian analysis for eigenvalues, curvature metrics, and entropy
+    HessianAnalysis analyzeHessian(OpenMM::Context& context, float temperature = 300.0f) const;
 
     // Tiled grid streaming mode
     void setTiledMode(bool enable, int tileSize = 64, int memoryBudgetMB = 2048);
@@ -262,6 +285,138 @@ public:
         y = pos_array[:, 1].tolist()
         z = pos_array[:, 2].tolist()
         self.setReceptorPositionsFromArrays(x, y, z)
+
+    def getHessianMatrices(self, context):
+        """
+        Compute and return Hessian blocks as (N, 3, 3) numpy array.
+
+        This is a convenience wrapper around computeHessian() and getHessianBlocks()
+        that returns the Hessian in matrix form suitable for normal modes analysis.
+
+        For grid-based potentials, the Hessian is block-diagonal - each atom only
+        contributes to its own 3x3 block since atoms interact independently with the grid.
+
+        Args:
+            context: OpenMM Context that has been evaluated (getState with forces)
+
+        Returns:
+            numpy.ndarray: Shape (N, 3, 3) array of Hessian blocks per atom.
+                           Each block contains second derivatives:
+                           [[d²V/dx², d²V/dxdy, d²V/dxdz],
+                            [d²V/dydx, d²V/dy², d²V/dydz],
+                            [d²V/dzdx, d²V/dzdy, d²V/dz²]]
+                           Units are kJ/(mol·nm²).
+
+        Raises:
+            RuntimeError: If interpolation method doesn't support Hessian computation
+                          (only bspline and triquintic are supported).
+
+        Example:
+            >>> # After minimization
+            >>> gridforce.computeHessian(context)
+            >>> H_blocks = gridforce.getHessianMatrices(context)
+            >>> # H_blocks[i] is the 3x3 Hessian for atom i
+        """
+        import numpy as np
+
+        # Compute Hessian on GPU
+        self.computeHessian(context)
+
+        # Get flat array: [dxx0, dyy0, dzz0, dxy0, dxz0, dyz0, dxx1, ...]
+        flat = np.array(self.getHessianBlocks(context))
+
+        if len(flat) == 0:
+            return np.zeros((0, 3, 3))
+
+        # Reshape to (N, 6)
+        n_atoms = len(flat) // 6
+        blocks = flat.reshape(n_atoms, 6)
+
+        # Convert to (N, 3, 3) symmetric matrices
+        # Layout: [dxx, dyy, dzz, dxy, dxz, dyz]
+        H = np.zeros((n_atoms, 3, 3))
+        H[:, 0, 0] = blocks[:, 0]  # dxx
+        H[:, 1, 1] = blocks[:, 1]  # dyy
+        H[:, 2, 2] = blocks[:, 2]  # dzz
+        H[:, 0, 1] = H[:, 1, 0] = blocks[:, 3]  # dxy
+        H[:, 0, 2] = H[:, 2, 0] = blocks[:, 4]  # dxz
+        H[:, 1, 2] = H[:, 2, 1] = blocks[:, 5]  # dyz
+
+        return H
+
+    def getHessianAnalysis(self, context, temperature=300.0):
+        """
+        Compute and return comprehensive Hessian analysis with numpy arrays.
+
+        This performs eigendecomposition of each 3x3 Hessian block using Cardano's
+        analytical method, then computes derived metrics useful for binding site
+        analysis and normal modes approximations.
+
+        The analysis includes:
+        - Eigenvalues (sorted ascending) for each atom
+        - Eigenvectors (optional) for each atom
+        - Curvature metrics: mean, total (trace), Gaussian (product)
+        - Fractional anisotropy: 0=isotropic potential, 1=linear/directional
+        - Per-atom harmonic entropy in kB units
+        - Saddle point detection via negative eigenvalue count
+
+        Args:
+            context: OpenMM Context that has been evaluated (getState with forces)
+            temperature: Temperature in Kelvin for entropy calculation (default: 300.0)
+
+        Returns:
+            dict: Dictionary with keys:
+                'eigenvalues': numpy.ndarray (N, 3) - sorted ascending per atom
+                'eigenvectors': numpy.ndarray (N, 3, 3) - one 3x3 matrix per atom
+                'mean_curvature': numpy.ndarray (N,) - (λ1 + λ2 + λ3) / 3
+                'total_curvature': numpy.ndarray (N,) - λ1 + λ2 + λ3 (trace of Hessian)
+                'gaussian_curvature': numpy.ndarray (N,) - λ1 * λ2 * λ3
+                'frac_anisotropy': numpy.ndarray (N,) - range [0,1]
+                'entropy': numpy.ndarray (N,) - per-atom entropy in kB units (NaN at saddle points)
+                'min_eigenvalue': numpy.ndarray (N,) - smallest eigenvalue per atom
+                'num_negative': numpy.ndarray (N,) int - count of negative eigenvalues (0-3)
+                'total_entropy': float - sum of per-atom entropies (excluding NaN)
+
+        Raises:
+            RuntimeError: If interpolation method doesn't support Hessian computation
+                          (only bspline and triquintic are supported).
+
+        Example:
+            >>> # After minimization or energy evaluation
+            >>> state = context.getState(getEnergy=True, getForces=True)
+            >>> analysis = gridforce.getHessianAnalysis(context, temperature=300.0)
+            >>>
+            >>> # Find atoms at saddle points (not at true minimum)
+            >>> saddle_atoms = np.where(analysis['num_negative'] > 0)[0]
+            >>>
+            >>> # Get average fractional anisotropy (measure of potential directionality)
+            >>> avg_fa = np.mean(analysis['frac_anisotropy'])
+            >>>
+            >>> # Total configurational entropy contribution from grid
+            >>> S_config = analysis['total_entropy']
+        """
+        import numpy as np
+
+        # Call C++ analysis method
+        result = self.analyzeHessian(context, temperature)
+
+        n_atoms = len(result.meanCurvature)
+
+        # Convert to numpy arrays with proper shapes
+        analysis = {
+            'eigenvalues': np.array(result.eigenvalues).reshape(n_atoms, 3) if n_atoms > 0 else np.zeros((0, 3)),
+            'eigenvectors': np.array(result.eigenvectors).reshape(n_atoms, 3, 3) if n_atoms > 0 else np.zeros((0, 3, 3)),
+            'mean_curvature': np.array(result.meanCurvature),
+            'total_curvature': np.array(result.totalCurvature),
+            'gaussian_curvature': np.array(result.gaussianCurvature),
+            'frac_anisotropy': np.array(result.fracAnisotropy),
+            'entropy': np.array(result.entropy),
+            'min_eigenvalue': np.array(result.minEigenvalue),
+            'num_negative': np.array(result.numNegative),
+            'total_entropy': result.totalEntropy
+        }
+
+        return analysis
     %}
 
     void loadFromFile(const std::string& filename);
@@ -327,6 +482,122 @@ public:
     %clear double& epsilon_ex;
 
     void updateParametersInContext(Context &context);
+
+    std::vector<double> computeHessian(OpenMM::Context& context);
+
+    %pythoncode %{
+    def getHessianMatrix(self, context):
+        """
+        Compute and return the full Hessian matrix as a numpy array.
+
+        This computes the analytical Hessian (second derivatives) of the
+        isolated nonbonded potential with respect to all atomic coordinates.
+
+        Args:
+            context: OpenMM Context containing current positions
+
+        Returns:
+            numpy.ndarray: Shape (3N, 3N) Hessian matrix where N is the number
+                           of atoms. Units are kJ/(mol·nm²).
+
+        Example:
+            >>> H = isolated_nb_force.getHessianMatrix(context)
+            >>> eigenvalues = np.linalg.eigvalsh(H)
+        """
+        import numpy as np
+        flat = np.array(self.computeHessian(context))
+        n = self.getNumAtoms()
+        return flat.reshape(3*n, 3*n)
+    %}
+};
+
+/**
+ * BondedHessian computes analytical Hessians for bonded forces.
+ */
+class BondedHessian {
+public:
+    BondedHessian();
+    ~BondedHessian();
+
+    void initialize(const OpenMM::System& system, OpenMM::Context& context);
+    std::vector<double> computeHessian(OpenMM::Context& context);
+    int getNumBonds() const;
+    int getNumAngles() const;
+    int getNumTorsions() const;
+
+    %pythoncode %{
+    def getHessianMatrix(self, context):
+        """
+        Compute and return the full Hessian matrix as a numpy array.
+
+        This computes the analytical Hessian (second derivatives) of all
+        bonded forces (HarmonicBondForce, HarmonicAngleForce, PeriodicTorsionForce)
+        with respect to all atomic coordinates.
+
+        Args:
+            context: OpenMM Context containing current positions
+
+        Returns:
+            numpy.ndarray: Shape (3N, 3N) Hessian matrix where N is the number
+                           of particles in the System. Units are kJ/(mol·nm²).
+
+        Example:
+            >>> hessian_calc = BondedHessian()
+            >>> hessian_calc.initialize(system, context)
+            >>> H = hessian_calc.getHessianMatrix(context)
+            >>> eigenvalues = np.linalg.eigvalsh(H)
+        """
+        import numpy as np
+        flat = np.array(self.computeHessian(context))
+        n = int(np.sqrt(len(flat)))
+        return flat.reshape(n, n)
+    %}
+};
+
+/**
+ * NewtonMinimizer performs energy minimization using analytical Hessians.
+ */
+class NewtonMinimizer {
+public:
+    NewtonMinimizer();
+    ~NewtonMinimizer();
+
+    bool minimize(OpenMM::Context& context, double tolerance = 1.0, int maxIterations = 100);
+    bool minimizeBondedOnly(OpenMM::Context& context, double tolerance = 10.0, int maxIterations = 50);
+    int getNumIterations() const;
+    double getFinalRMSForce() const;
+    void setDamping(double lambda);
+    void setLineSearch(bool enable);
+
+    %pythoncode %{
+    def minimizeToTolerance(self, context, force_tolerance=10.0, max_iterations=100):
+        """
+        Minimize energy until RMS force is below tolerance.
+
+        This uses Newton-Raphson optimization with analytical Hessians,
+        which provides quadratic convergence near minima. Much faster than
+        gradient-based methods for small molecules.
+
+        Args:
+            context: OpenMM Context to minimize
+            force_tolerance: RMS force tolerance in kJ/(mol·nm) (default: 10.0)
+            max_iterations: Maximum Newton iterations (default: 100)
+
+        Returns:
+            dict: {'converged': bool, 'iterations': int, 'rms_force': float}
+
+        Example:
+            >>> minimizer = NewtonMinimizer()
+            >>> result = minimizer.minimizeToTolerance(context, force_tolerance=1.0)
+            >>> print(f"Converged in {result['iterations']} iterations")
+        """
+        converged = self.minimize(context, force_tolerance, max_iterations)
+        return {
+            'converged': converged,
+            'iterations': self.getNumIterations(),
+            'rms_force': self.getFinalRMSForce()
+        }
+    %}
 };
 
 class CalcGridForceKernel : public OpenMM::KernelImpl {

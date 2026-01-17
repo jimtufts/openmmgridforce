@@ -208,3 +208,83 @@ void CudaCalcIsolatedNonbondedForceKernel::copyParametersToContext(ContextImpl& 
 
     cu.invalidateMolecules();
 }
+
+std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(ContextImpl& context) {
+    if (!hasInitializedKernel) {
+        throw OpenMMException("IsolatedNonbondedForce: must call execute() before computeHessian()");
+    }
+
+    // Get the number of pairs
+    int numPairs = (numAtoms * (numAtoms - 1)) / 2;
+    if (numPairs == 0) {
+        return std::vector<double>(9 * numAtoms * numAtoms, 0.0);
+    }
+
+    // Initialize Hessian kernel if not already done
+    if (hessianKernel == nullptr) {
+        map<string, string> defines;
+        defines["NUM_ATOMS"] = cu.intToString(numAtoms);
+        defines["NUM_EXCLUSIONS"] = cu.intToString(exclusions.getSize() > 1 ? exclusions.getSize() : 0);
+        defines["NUM_EXCEPTIONS"] = cu.intToString(exceptions.getSize() > 1 ? exceptions.getSize() : 0);
+
+        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+        hessianKernel = cu.getKernel(module, "computeIsolatedNonbondedHessians");
+    }
+
+    // Allocate Hessian buffer if needed (3N x 3N matrix, stored as 3x3 blocks)
+    int hessianSize = 3 * numAtoms;
+    int numBlocks3x3 = numAtoms * numAtoms;  // One 3x3 block per atom pair (i,j)
+    if (hessianBuffer.getSize() != numBlocks3x3 * 9) {
+        hessianBuffer.initialize<float>(cu, numBlocks3x3 * 9, "isolatedNB_hessian");
+    }
+
+    // Zero out the Hessian buffer
+    cu.clearBuffer(hessianBuffer);
+
+    // Set up kernel arguments
+    int paddedNumAtoms = cu.getPaddedNumAtoms();
+    CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    CUdeviceptr particleIndicesPtr = particleIndices.getDevicePointer();
+    CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
+    CUdeviceptr epsilonsPtr = epsilons.getDevicePointer();
+    CUdeviceptr exclusionsPtr = exclusions.getDevicePointer();
+    CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
+
+    void* args[] = {
+        &posqPtr,
+        &particleIndicesPtr,
+        &sigmasPtr,
+        &epsilonsPtr,
+        &exclusionsPtr,
+        &hessianPtr,
+        &numAtoms,
+        &numPairs,
+        &paddedNumAtoms
+    };
+
+    // Launch kernel - one thread per pair
+    int blockSize = 128;
+    int numBlocksKernel = (numPairs + blockSize - 1) / blockSize;
+    cu.executeKernel(hessianKernel, args, numBlocksKernel * blockSize, blockSize);
+
+    // Download Hessian and convert to double
+    vector<float> h_hessian(numBlocks3x3 * 9);
+    hessianBuffer.download(h_hessian);
+
+    // Convert to double and reformat as full 3N x 3N matrix
+    vector<double> result(hessianSize * hessianSize, 0.0);
+    for (int i = 0; i < numAtoms; i++) {
+        for (int j = 0; j < numAtoms; j++) {
+            int blockIdx = i * numAtoms + j;
+            for (int di = 0; di < 3; di++) {
+                for (int dj = 0; dj < 3; dj++) {
+                    int row = 3 * i + di;
+                    int col = 3 * j + dj;
+                    result[row * hessianSize + col] = h_hessian[blockIdx * 9 + di * 3 + dj];
+                }
+            }
+        }
+    }
+
+    return result;
+}

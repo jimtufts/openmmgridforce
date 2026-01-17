@@ -4,6 +4,7 @@
 #include "IsolatedNonbondedForceKernels.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
+#include <vector>
 
 namespace GridForcePlugin {
 
@@ -43,6 +44,15 @@ public:
      */
     void copyParametersToContext(OpenMM::ContextImpl& context, const IsolatedNonbondedForce& force);
 
+    /**
+     * Compute the Hessian (second derivatives) for the isolated nonbonded force.
+     * This computes d²E/dr_i dr_j for all pairs of atoms.
+     *
+     * @param context  the context containing the current positions
+     * @return the full Hessian matrix as a flattened vector (3N x 3N)
+     */
+    std::vector<double> computeHessian(OpenMM::ContextImpl& context) override;
+
 private:
     bool hasInitializedKernel;
     int numAtoms;
@@ -59,6 +69,10 @@ private:
     OpenMM::CudaArray exceptionParams;  // Exception parameters (float3: chargeProd, sigma, epsilon)
 
     std::vector<int> h_particleIndices;  // Host copy for updates
+
+    // Hessian computation support
+    CUfunction hessianKernel;             // Kernel for Hessian computation
+    OpenMM::CudaArray hessianBuffer;      // Full Hessian matrix (3N x 3N)
 };
 
 } // namespace GridForcePlugin

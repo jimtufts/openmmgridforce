@@ -65,6 +65,11 @@ public:
 
     void updateParametersInContext(OpenMM::ContextImpl& context);
 
+    /**
+     * Compute the Hessian (second derivatives) for the isolated nonbonded force.
+     */
+    std::vector<double> computeHessian(OpenMM::ContextImpl& context);
+
 private:
     const IsolatedNonbondedForce& owner;
     OpenMM::Kernel kernel;

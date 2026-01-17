@@ -67,4 +67,8 @@ void IsolatedNonbondedForceImpl::updateParametersInContext(ContextImpl& context)
     kernel.getAs<CalcIsolatedNonbondedForceKernel>().copyParametersToContext(context, owner);
 }
 
+std::vector<double> IsolatedNonbondedForceImpl::computeHessian(ContextImpl& context) {
+    return kernel.getAs<CalcIsolatedNonbondedForceKernel>().computeHessian(context);
+}
+
 }  // namespace GridForcePlugin

@@ -178,6 +178,15 @@ public:
      */
     void updateParametersInContext(OpenMM::Context& context);
 
+    /**
+     * Compute the Hessian (second derivatives) for the isolated nonbonded force.
+     * This computes d²E/dr_i dr_j for all pairs of atoms.
+     *
+     * @param context  the Context containing the current positions
+     * @return the full Hessian matrix as a flattened vector (3N x 3N), row-major order
+     */
+    std::vector<double> computeHessian(OpenMM::Context& context);
+
 protected:
     OpenMM::ForceImpl* createImpl() const;
 
