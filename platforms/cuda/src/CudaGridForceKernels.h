@@ -55,6 +55,83 @@ public:
      *         (in the same order as particles were added to groups)
      */
     std::vector<double> getParticleAtomEnergies();
+    /**
+     * Get per-atom out-of-bounds flags for particles in groups.
+     *
+     * @return vector of flags (0 = inside grid, 1 = outside grid), one per particle
+     *         across all groups (in the same order as particles were added to groups)
+     */
+    std::vector<int> getParticleOutOfBoundsFlags();
+    /**
+     * Compute Hessian (second derivative) blocks for each atom from grid potential.
+     * Must be called after execute() to get positions. Results stored internally.
+     * Only supported for bspline (method 1) and triquintic (method 3) interpolation.
+     */
+    void computeHessian();
+    /**
+     * Get the Hessian blocks computed by computeHessian().
+     *
+     * @return vector of 6 components per atom: [dxx, dyy, dzz, dxy, dxz, dyz]
+     *         Total size is 6 * numAtoms
+     */
+    std::vector<double> getHessianBlocks();
+    /**
+     * Analyze Hessian blocks to compute per-atom metrics: eigenvalues, curvature,
+     * anisotropy, and entropy estimates. Must call computeHessian() first.
+     *
+     * @param temperature  Temperature in Kelvin for entropy calculation
+     */
+    void analyzeHessian(float temperature);
+    /**
+     * Get the eigenvalues computed by analyzeHessian().
+     * @return vector of 3 eigenvalues per atom [λ1, λ2, λ3], sorted ascending
+     */
+    std::vector<double> getEigenvalues();
+    /**
+     * Get the eigenvectors computed by analyzeHessian().
+     * @return vector of 9 components per atom (3 eigenvectors × 3 components)
+     */
+    std::vector<double> getEigenvectors();
+    /**
+     * Get the mean curvature computed by analyzeHessian().
+     * @return vector of mean curvature per atom: (λ1 + λ2 + λ3) / 3
+     */
+    std::vector<double> getMeanCurvature();
+    /**
+     * Get the total curvature computed by analyzeHessian().
+     * @return vector of total curvature per atom: λ1 + λ2 + λ3
+     */
+    std::vector<double> getTotalCurvature();
+    /**
+     * Get the Gaussian curvature computed by analyzeHessian().
+     * @return vector of Gaussian curvature per atom: λ1 * λ2 * λ3
+     */
+    std::vector<double> getGaussianCurvature();
+    /**
+     * Get the fractional anisotropy computed by analyzeHessian().
+     * @return vector of FA per atom, range [0, 1] (0=isotropic, 1=linear)
+     */
+    std::vector<double> getFracAnisotropy();
+    /**
+     * Get the per-atom entropy computed by analyzeHessian().
+     * @return vector of entropy per atom in kB units (NaN for saddle points)
+     */
+    std::vector<double> getEntropy();
+    /**
+     * Get the minimum eigenvalue computed by analyzeHessian().
+     * @return vector of minimum eigenvalue per atom
+     */
+    std::vector<double> getMinEigenvalue();
+    /**
+     * Get the count of negative eigenvalues computed by analyzeHessian().
+     * @return vector of negative eigenvalue count per atom (0-3)
+     */
+    std::vector<int> getNumNegative();
+    /**
+     * Get the total entropy summed over all atoms (excluding saddle points).
+     * @return total entropy in kB units
+     */
+    double getTotalEntropy();
 private:
     /**
      * Generate grid values from receptor atoms and NonbondedForce parameters.
@@ -122,17 +199,95 @@ private:
     OpenMM::CudaArray atomEnergyBuffer;         // Per-atom energy storage
     std::vector<float> lastAtomEnergies;         // Persistent copy of last atom energies
 
+    // Per-atom out-of-bounds tracking
+    OpenMM::CudaArray outOfBoundsBuffer;        // Per-atom out-of-bounds flags (0=inside, 1=outside)
+    std::vector<int> lastOutOfBoundsFlags;       // Persistent copy of last out-of-bounds flags
+
     // Tiled grid streaming support
     bool tiledMode;                              // Whether tiled streaming is enabled
     std::unique_ptr<TileManager> tileManager;   // Manages tile loading and caching
     CUfunction tiledKernel;                      // Kernel for tiled grid evaluation
     std::vector<float> hostGridValues;          // Host-side copy of grid values (for tiling)
     std::vector<float> hostGridDerivatives;     // Host-side copy of derivatives (for tiling)
+
+    // Hessian (second derivative) computation support
+    CUfunction hessianKernel;                    // Kernel for Hessian computation
+    OpenMM::CudaArray hessianBuffer;            // Per-atom Hessian storage (6 floats per atom)
+    std::vector<float> lastHessianBlocks;        // Persistent copy of last Hessian computation
+
+    // Hessian analysis support (eigendecomposition, curvature, entropy)
+    CUfunction analysisKernel;                   // Kernel for per-atom Hessian analysis
+    CUfunction sumEntropyKernel;                 // Kernel for entropy reduction
+    OpenMM::CudaArray eigenvaluesBuffer;         // [3 * numAtoms] eigenvalues
+    OpenMM::CudaArray eigenvectorsBuffer;        // [9 * numAtoms] eigenvectors
+    OpenMM::CudaArray meanCurvatureBuffer;       // [numAtoms]
+    OpenMM::CudaArray totalCurvatureBuffer;      // [numAtoms]
+    OpenMM::CudaArray gaussianCurvatureBuffer;   // [numAtoms]
+    OpenMM::CudaArray fracAnisotropyBuffer;      // [numAtoms]
+    OpenMM::CudaArray entropyBuffer;             // [numAtoms]
+    OpenMM::CudaArray minEigenvalueBuffer;       // [numAtoms]
+    OpenMM::CudaArray numNegativeBuffer;         // [numAtoms] int
+    OpenMM::CudaArray totalEntropyBuffer;        // [1] scalar
+    bool analysisBuffersInitialized;             // Whether analysis buffers are allocated
+    std::vector<float> lastEigenvalues;
+    std::vector<float> lastEigenvectors;
+    std::vector<float> lastMeanCurvature;
+    std::vector<float> lastTotalCurvature;
+    std::vector<float> lastGaussianCurvature;
+    std::vector<float> lastFracAnisotropy;
+    std::vector<float> lastEntropy;
+    std::vector<float> lastMinEigenvalue;
+    std::vector<int> lastNumNegative;
+    float lastTotalEntropy;
 };
 
 // Clear GPU-side grid caches to free CUDA memory
 // Call this between systems in batch workflows to prevent GPU memory exhaustion
 void clearCudaGridCaches();
+
+/**
+ * CUDA implementation of CalcBondedHessianKernel.
+ * Computes analytical Hessian of bonded forces (bonds, angles, torsions) on GPU.
+ */
+class CudaCalcBondedHessianKernel : public CalcBondedHessianKernel {
+public:
+    CudaCalcBondedHessianKernel(std::string name, const OpenMM::Platform& platform, OpenMM::CudaContext& cu)
+        : CalcBondedHessianKernel(name, platform), cu(cu), hasInitializedKernel(false),
+          numAtoms(0), numBonds(0), numAngles(0), numTorsions(0) {
+    }
+    ~CudaCalcBondedHessianKernel();
+
+    void initialize(const OpenMM::System& system);
+    std::vector<double> computeHessian(OpenMM::ContextImpl& context);
+    int getNumBonds() const { return numBonds; }
+    int getNumAngles() const { return numAngles; }
+    int getNumTorsions() const { return numTorsions; }
+
+private:
+    OpenMM::CudaContext& cu;
+    bool hasInitializedKernel;
+    int numAtoms;
+    int numBonds;
+    int numAngles;
+    int numTorsions;
+
+    // GPU arrays for bonded parameters
+    OpenMM::CudaArray bondAtoms;      // [numBonds * 2]
+    OpenMM::CudaArray bondParams;     // [numBonds * 2]: k, r0
+    OpenMM::CudaArray angleAtoms;     // [numAngles * 3]
+    OpenMM::CudaArray angleParams;    // [numAngles * 2]: k, theta0
+    OpenMM::CudaArray torsionAtoms;   // [numTorsions * 4]
+    OpenMM::CudaArray torsionParams;  // [numTorsions * 3]: n, k, phi0
+
+    // GPU array for Hessian output
+    OpenMM::CudaArray hessianBuffer;
+
+    // CUDA kernels
+    CUfunction bondHessianKernel;
+    CUfunction angleHessianKernel;
+    CUfunction torsionHessianKernel;
+    CUfunction initHessianKernel;
+};
 
 } // namespace GridForcePlugin
 

@@ -9,6 +9,9 @@
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/NonbondedForce.h"
+#include "openmm/HarmonicBondForce.h"
+#include "openmm/HarmonicAngleForce.h"
+#include "openmm/PeriodicTorsionForce.h"
 #include <cuda_runtime.h>
 #include <map>
 #include <iostream>
@@ -66,6 +69,9 @@ static size_t computeGridHash(const vector<int>& counts, const vector<double>& s
 CudaCalcGridForceKernel::~CudaCalcGridForceKernel() {
 }
 
+// Initialize analysis-related members in constructor if needed
+// Note: analysisBuffersInitialized should be false by default
+
 void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& force) {
     cu.setAsCurrent();
     // Get grid parameters
@@ -93,10 +99,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         double ox, oy, oz;
         force.getGridOrigin(ox, oy, oz);
 
-        // Create CachedGridData with current grid values
+        // Get derivatives if available (needed for tiled mode with tricubic/triquintic)
+        const vector<double>& derivs = force.getDerivatives();
+
+        // Create CachedGridData with current grid values and derivatives
         auto cachedGridData = std::make_shared<CachedGridData>(
             vals,
-            vector<double>(),  // derivatives (empty for now)
+            derivs,  // Pass actual derivatives from the force
             counts_local,
             spacing_local,
             ox, oy, oz
@@ -259,6 +268,9 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         if (totalGroupParticles > 0) {
             atomEnergyBuffer.initialize<float>(cu, totalGroupParticles, "atomEnergyBuffer");
             lastAtomEnergies.resize(totalGroupParticles, 0.0f);
+            // Initialize per-atom out-of-bounds buffer
+            outOfBoundsBuffer.initialize<int>(cu, totalGroupParticles, "outOfBoundsBuffer");
+            lastOutOfBoundsFlags.resize(totalGroupParticles, 0);
         }
     } else {
         numParticleGroups = 0;
@@ -340,7 +352,19 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 // Continue to tiled mode initialization below
             } else {
                 std::cout << "  Use setTiledInputFile() with setTiledMode(true) to evaluate" << std::endl;
-                // Skip the normal grid setup - we're done
+                // Generation-only mode: initialize minimal state so getState() doesn't crash
+                // but return 0 energy since we're not evaluating
+                g_counts.initialize<int>(cu, 3, "gridCounts");
+                g_spacing.initialize<float>(cu, 3, "gridSpacing");
+                g_scaling_factors.initialize<float>(cu, 1, "scalingFactors");
+                vector<int> countsVec = {counts[0], counts[1], counts[2]};
+                vector<float> spacingVec = {(float)spacing[0], (float)spacing[1], (float)spacing[2]};
+                vector<float> scalingVec = {0.0f};
+                g_counts.upload(countsVec);
+                g_spacing.upload(spacingVec);
+                g_scaling_factors.upload(scalingVec);
+                numAtoms = 0;  // Causes execute() to return 0.0 early
+                hasInitializedKernel = true;
                 return;
             }
         } else {
@@ -683,6 +707,22 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     kernel = cu.getKernel(module, "computeGridForce");
     addGroupEnergiesKernel = cu.getKernel(module, "addGroupEnergiesToTotal");
 
+    // Initialize Hessian kernel (for normal modes analysis)
+    // Only available for bspline (method 1) and triquintic (method 3) interpolation
+    if (interpolationMethod == 1 || interpolationMethod == 3) {
+        hessianKernel = cu.getKernel(module, "computeGridHessian");
+        // Allocate Hessian buffer: 6 components per atom
+        int hessianNumAtoms = (totalGroupParticles > 0) ? totalGroupParticles : numAtoms;
+        if (hessianNumAtoms > 0) {
+            hessianBuffer.initialize<float>(cu, 6 * hessianNumAtoms, "hessianBuffer");
+        }
+
+        // Initialize analysis kernels for eigendecomposition and metrics
+        analysisKernel = cu.getKernel(module, "analyzeHessianKernel");
+        sumEntropyKernel = cu.getKernel(module, "sumEntropyKernel");
+    }
+    analysisBuffersInitialized = false;
+
     // Initialize tiled mode if enabled
     tiledMode = force.getTiledMode();
     // Note: tiledInputFile already declared earlier in this function
@@ -703,10 +743,6 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             // File-backed mode: load tiles on-demand from the tiled file
             // This is memory-efficient for very large grids
             tileManager->initFromTiledFile(tiledInputFile, tileConfig);
-
-            // Update grid parameters from the file
-            // The TileManager now has the correct grid metadata from the file
-            // We need to verify consistency with any existing grid parameters
         } else {
             // Memory-backed mode: copy grid values to host storage for tile extraction
             // This requires the grid to fit in host memory
@@ -837,6 +873,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     CUdeviceptr particleToGroupMapPtr = 0;
     CUdeviceptr groupEnergyBufferPtr = 0;
     CUdeviceptr atomEnergyBufferPtr = 0;
+    CUdeviceptr outOfBoundsBufferPtr = 0;
     if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
         // Zero out the group energy buffer
         vector<float> zeros(numParticleGroups, 0.0f);
@@ -850,6 +887,14 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             vector<float> atomZeros(totalGroupParticles, 0.0f);
             atomEnergyBuffer.upload(atomZeros);
             atomEnergyBufferPtr = atomEnergyBuffer.getDevicePointer();
+        }
+
+        // Set up per-atom out-of-bounds buffer if initialized
+        if (outOfBoundsBuffer.isInitialized()) {
+            // Zero out the buffer before kernel execution
+            vector<int> oobZeros(totalGroupParticles, 0);
+            outOfBoundsBuffer.upload(oobZeros);
+            outOfBoundsBufferPtr = outOfBoundsBuffer.getDevicePointer();
         }
     }
 
@@ -875,6 +920,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &particleToGroupMapPtr,
         &groupEnergyBufferPtr,
         &atomEnergyBufferPtr,
+        &outOfBoundsBufferPtr,
         &numParticleGroups
     };
 
@@ -963,6 +1009,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &particleToGroupMapPtr,
             &groupEnergyBufferPtr,
             &atomEnergyBufferPtr,
+            &outOfBoundsBufferPtr,
             &numParticleGroups,
             &tileOffsetsPtr,
             &tileValuePtrsPtr,
@@ -993,6 +1040,12 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         if (atomEnergyBuffer.isInitialized()) {
             lastAtomEnergies.resize(totalGroupParticles);
             atomEnergyBuffer.download(lastAtomEnergies);
+        }
+
+        // Download per-atom out-of-bounds flags if buffer is initialized
+        if (outOfBoundsBuffer.isInitialized()) {
+            lastOutOfBoundsFlags.resize(totalGroupParticles);
+            outOfBoundsBuffer.download(lastOutOfBoundsFlags);
         }
 
         // Use a kernel to sum group energies and add to main energy buffer
@@ -1028,15 +1081,16 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
 }
 
 void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, const GridForce& force) {
-    // For updateParametersInContext, we only need to update inv_power and invPowerMode
-    // Grid values and scaling factors don't change (they're either shared via GridData or already set)
+    // For updateParametersInContext, update inv_power, invPowerMode, and interpolation method
+    // Grid values, scaling factors, and tiles don't change - they stay cached
     double inv_power = force.getInvPower();
     int inv_power_mode = static_cast<int>(force.getInvPowerMode());
+    int interp_method = force.getInterpolationMethod();
 
-    // For RUNTIME inv_power mode, only update the transformation parameters
-    // Grid values and scaling factors remain unchanged
+    // Update transformation parameters and interpolation method
     invPower = (float)inv_power;
     invPowerMode = inv_power_mode;
+    interpolationMethod = interp_method;
 }
 
 vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {
@@ -1066,6 +1120,315 @@ vector<double> CudaCalcGridForceKernel::getParticleAtomEnergies() {
     }
 
     return atomEnergies;
+}
+
+vector<int> CudaCalcGridForceKernel::getParticleOutOfBoundsFlags() {
+    vector<int> outOfBoundsFlags;
+
+    // Return the saved per-atom out-of-bounds flags from the last execute()
+    if (numParticleGroups > 0 && !lastOutOfBoundsFlags.empty()) {
+        outOfBoundsFlags = lastOutOfBoundsFlags;
+    }
+
+    return outOfBoundsFlags;
+}
+
+void CudaCalcGridForceKernel::computeHessian() {
+    // Check if Hessian computation is supported for this interpolation method
+    if (interpolationMethod != 1 && interpolationMethod != 3) {
+        throw OpenMMException("Hessian computation only supported for bspline (method 1) and triquintic (method 3) interpolation");
+    }
+
+    if (!hessianBuffer.isInitialized()) {
+        throw OpenMMException("Hessian buffer not initialized - initialize kernel first");
+    }
+
+    cu.setAsCurrent();
+
+    // Get pointers to GPU arrays
+    CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
+    CUdeviceptr countsPtr = g_counts.getDevicePointer();
+    CUdeviceptr spacingPtr = g_spacing.getDevicePointer();
+    CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
+    CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
+                            (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
+
+    // Determine which scaling factors and particle indices to use
+    CUdeviceptr scalingPtr;
+    CUdeviceptr particleIndicesPtr;
+    int kernelNumAtoms;
+
+    if (totalGroupParticles > 0) {
+        // Multi-ligand mode
+        scalingPtr = allGroupScalingFactors.getDevicePointer();
+        particleIndicesPtr = allGroupParticleIndices.getDevicePointer();
+        kernelNumAtoms = totalGroupParticles;
+    } else {
+        // Legacy mode
+        scalingPtr = g_scaling_factors.getDevicePointer();
+        particleIndicesPtr = (particleIndices.isInitialized()) ? particleIndices.getDevicePointer() : 0;
+        kernelNumAtoms = numAtoms;
+    }
+
+    // Launch Hessian kernel (with invPower chain rule support)
+    std::cout << "[HESSIAN CPP] invPower=" << invPower << ", invPowerMode=" << invPowerMode << std::endl;
+
+    void* args[] = {
+        &posqPtr,
+        &hessianPtr,
+        &countsPtr,
+        &spacingPtr,
+        &valsPtr,
+        &scalingPtr,
+        &invPower,
+        &invPowerMode,
+        &interpolationMethod,
+        &originX,
+        &originY,
+        &originZ,
+        &derivsPtr,
+        &kernelNumAtoms,
+        &particleIndicesPtr
+    };
+
+    cu.executeKernel(hessianKernel, args, kernelNumAtoms);
+
+    // Download results
+    lastHessianBlocks.resize(6 * kernelNumAtoms);
+    hessianBuffer.download(lastHessianBlocks);
+}
+
+vector<double> CudaCalcGridForceKernel::getHessianBlocks() {
+    vector<double> hessianBlocks;
+
+    if (!lastHessianBlocks.empty()) {
+        hessianBlocks.resize(lastHessianBlocks.size());
+        for (size_t i = 0; i < lastHessianBlocks.size(); i++) {
+            hessianBlocks[i] = (double)lastHessianBlocks[i];
+        }
+    }
+
+    return hessianBlocks;
+}
+
+void CudaCalcGridForceKernel::analyzeHessian(float temperature) {
+    // Check if Hessian computation is supported for this interpolation method
+    if (interpolationMethod != 1 && interpolationMethod != 3) {
+        throw OpenMMException("Hessian analysis only supported for bspline (method 1) and triquintic (method 3) interpolation");
+    }
+
+    if (lastHessianBlocks.empty()) {
+        throw OpenMMException("Must call computeHessian() before analyzeHessian()");
+    }
+
+    cu.setAsCurrent();
+
+    // Determine number of atoms
+    int kernelNumAtoms = (totalGroupParticles > 0) ? totalGroupParticles : numAtoms;
+
+    // Initialize analysis buffers if needed
+    if (!analysisBuffersInitialized && kernelNumAtoms > 0) {
+        eigenvaluesBuffer.initialize<float>(cu, 3 * kernelNumAtoms, "eigenvalues");
+        eigenvectorsBuffer.initialize<float>(cu, 9 * kernelNumAtoms, "eigenvectors");
+        meanCurvatureBuffer.initialize<float>(cu, kernelNumAtoms, "meanCurvature");
+        totalCurvatureBuffer.initialize<float>(cu, kernelNumAtoms, "totalCurvature");
+        gaussianCurvatureBuffer.initialize<float>(cu, kernelNumAtoms, "gaussianCurvature");
+        fracAnisotropyBuffer.initialize<float>(cu, kernelNumAtoms, "fracAnisotropy");
+        entropyBuffer.initialize<float>(cu, kernelNumAtoms, "entropy");
+        minEigenvalueBuffer.initialize<float>(cu, kernelNumAtoms, "minEigenvalue");
+        numNegativeBuffer.initialize<int>(cu, kernelNumAtoms, "numNegative");
+        totalEntropyBuffer.initialize<float>(cu, 1, "totalEntropy");
+        analysisBuffersInitialized = true;
+    }
+
+    if (kernelNumAtoms == 0) {
+        return;
+    }
+
+    // Calculate kT in kJ/mol
+    float kB = 0.008314462618f;  // kJ/(mol·K)
+    float kT = kB * temperature;
+
+    // Get device pointers
+    CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
+    CUdeviceptr eigenvaluesPtr = eigenvaluesBuffer.getDevicePointer();
+    CUdeviceptr eigenvectorsPtr = eigenvectorsBuffer.getDevicePointer();
+    CUdeviceptr meanCurvaturePtr = meanCurvatureBuffer.getDevicePointer();
+    CUdeviceptr totalCurvaturePtr = totalCurvatureBuffer.getDevicePointer();
+    CUdeviceptr gaussianCurvaturePtr = gaussianCurvatureBuffer.getDevicePointer();
+    CUdeviceptr fracAnisotropyPtr = fracAnisotropyBuffer.getDevicePointer();
+    CUdeviceptr entropyPtr = entropyBuffer.getDevicePointer();
+    CUdeviceptr minEigenvaluePtr = minEigenvalueBuffer.getDevicePointer();
+    CUdeviceptr numNegativePtr = numNegativeBuffer.getDevicePointer();
+    CUdeviceptr totalEntropyPtr = totalEntropyBuffer.getDevicePointer();
+
+    // Launch analysis kernel
+    void* analysisArgs[] = {
+        &hessianPtr,
+        &eigenvaluesPtr,
+        &eigenvectorsPtr,
+        &meanCurvaturePtr,
+        &totalCurvaturePtr,
+        &gaussianCurvaturePtr,
+        &fracAnisotropyPtr,
+        &entropyPtr,
+        &minEigenvaluePtr,
+        &numNegativePtr,
+        &kT,
+        &kernelNumAtoms
+    };
+
+    cu.executeKernel(analysisKernel, analysisArgs, kernelNumAtoms);
+
+    // Clear total entropy buffer and sum
+    vector<float> zeroEntropy(1, 0.0f);
+    totalEntropyBuffer.upload(zeroEntropy);
+
+    int blockSize = 256;
+    int numBlocks = (kernelNumAtoms + blockSize - 1) / blockSize;
+
+    void* sumArgs[] = {
+        &entropyPtr,
+        &totalEntropyPtr,
+        &kernelNumAtoms
+    };
+
+    // Launch with shared memory for reduction
+    CUresult result = cuLaunchKernel(
+        sumEntropyKernel,
+        numBlocks, 1, 1,
+        blockSize, 1, 1,
+        blockSize * sizeof(float),
+        cu.getCurrentStream(),
+        sumArgs,
+        NULL
+    );
+
+    if (result != CUDA_SUCCESS) {
+        throw OpenMMException("Error launching sumEntropyKernel");
+    }
+
+    // Download results
+    lastEigenvalues.resize(3 * kernelNumAtoms);
+    lastEigenvectors.resize(9 * kernelNumAtoms);
+    lastMeanCurvature.resize(kernelNumAtoms);
+    lastTotalCurvature.resize(kernelNumAtoms);
+    lastGaussianCurvature.resize(kernelNumAtoms);
+    lastFracAnisotropy.resize(kernelNumAtoms);
+    lastEntropy.resize(kernelNumAtoms);
+    lastMinEigenvalue.resize(kernelNumAtoms);
+    lastNumNegative.resize(kernelNumAtoms);
+
+    eigenvaluesBuffer.download(lastEigenvalues);
+    eigenvectorsBuffer.download(lastEigenvectors);
+    meanCurvatureBuffer.download(lastMeanCurvature);
+    totalCurvatureBuffer.download(lastTotalCurvature);
+    gaussianCurvatureBuffer.download(lastGaussianCurvature);
+    fracAnisotropyBuffer.download(lastFracAnisotropy);
+    entropyBuffer.download(lastEntropy);
+    minEigenvalueBuffer.download(lastMinEigenvalue);
+    numNegativeBuffer.download(lastNumNegative);
+
+    vector<float> totalEntropyHost(1);
+    totalEntropyBuffer.download(totalEntropyHost);
+    lastTotalEntropy = totalEntropyHost[0];
+}
+
+vector<double> CudaCalcGridForceKernel::getEigenvalues() {
+    vector<double> result;
+    if (!lastEigenvalues.empty()) {
+        result.resize(lastEigenvalues.size());
+        for (size_t i = 0; i < lastEigenvalues.size(); i++) {
+            result[i] = (double)lastEigenvalues[i];
+        }
+    }
+    return result;
+}
+
+vector<double> CudaCalcGridForceKernel::getEigenvectors() {
+    vector<double> result;
+    if (!lastEigenvectors.empty()) {
+        result.resize(lastEigenvectors.size());
+        for (size_t i = 0; i < lastEigenvectors.size(); i++) {
+            result[i] = (double)lastEigenvectors[i];
+        }
+    }
+    return result;
+}
+
+vector<double> CudaCalcGridForceKernel::getMeanCurvature() {
+    vector<double> result;
+    if (!lastMeanCurvature.empty()) {
+        result.resize(lastMeanCurvature.size());
+        for (size_t i = 0; i < lastMeanCurvature.size(); i++) {
+            result[i] = (double)lastMeanCurvature[i];
+        }
+    }
+    return result;
+}
+
+vector<double> CudaCalcGridForceKernel::getTotalCurvature() {
+    vector<double> result;
+    if (!lastTotalCurvature.empty()) {
+        result.resize(lastTotalCurvature.size());
+        for (size_t i = 0; i < lastTotalCurvature.size(); i++) {
+            result[i] = (double)lastTotalCurvature[i];
+        }
+    }
+    return result;
+}
+
+vector<double> CudaCalcGridForceKernel::getGaussianCurvature() {
+    vector<double> result;
+    if (!lastGaussianCurvature.empty()) {
+        result.resize(lastGaussianCurvature.size());
+        for (size_t i = 0; i < lastGaussianCurvature.size(); i++) {
+            result[i] = (double)lastGaussianCurvature[i];
+        }
+    }
+    return result;
+}
+
+vector<double> CudaCalcGridForceKernel::getFracAnisotropy() {
+    vector<double> result;
+    if (!lastFracAnisotropy.empty()) {
+        result.resize(lastFracAnisotropy.size());
+        for (size_t i = 0; i < lastFracAnisotropy.size(); i++) {
+            result[i] = (double)lastFracAnisotropy[i];
+        }
+    }
+    return result;
+}
+
+vector<double> CudaCalcGridForceKernel::getEntropy() {
+    vector<double> result;
+    if (!lastEntropy.empty()) {
+        result.resize(lastEntropy.size());
+        for (size_t i = 0; i < lastEntropy.size(); i++) {
+            result[i] = (double)lastEntropy[i];
+        }
+    }
+    return result;
+}
+
+vector<double> CudaCalcGridForceKernel::getMinEigenvalue() {
+    vector<double> result;
+    if (!lastMinEigenvalue.empty()) {
+        result.resize(lastMinEigenvalue.size());
+        for (size_t i = 0; i < lastMinEigenvalue.size(); i++) {
+            result[i] = (double)lastMinEigenvalue[i];
+        }
+    }
+    return result;
+}
+
+vector<int> CudaCalcGridForceKernel::getNumNegative() {
+    return lastNumNegative;
+}
+
+double CudaCalcGridForceKernel::getTotalEntropy() {
+    return (double)lastTotalEntropy;
 }
 
 void CudaCalcGridForceKernel::generateGrid(
@@ -1655,4 +2018,211 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
     auto endTime = std::chrono::high_resolution_clock::now();
     auto totalSec = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count();
     std::cout << "  Complete! Generated " << totalTiles << " tiles in " << totalSec << "s" << std::endl;
+}
+// ============================================================================
+// CudaCalcBondedHessianKernel implementation
+// ============================================================================
+
+CudaCalcBondedHessianKernel::~CudaCalcBondedHessianKernel() {
+}
+
+void CudaCalcBondedHessianKernel::initialize(const System& system) {
+    cu.setAsCurrent();
+    numAtoms = system.getNumParticles();
+
+    // Extract HarmonicBondForce parameters
+    for (int i = 0; i < system.getNumForces(); i++) {
+        const HarmonicBondForce* bondForce = dynamic_cast<const HarmonicBondForce*>(&system.getForce(i));
+        if (bondForce != nullptr) {
+            numBonds = bondForce->getNumBonds();
+            if (numBonds > 0) {
+                vector<int> h_bondAtoms(numBonds * 2);
+                vector<float> h_bondParams(numBonds * 2);
+
+                for (int j = 0; j < numBonds; j++) {
+                    int atom1, atom2;
+                    double length, k;
+                    bondForce->getBondParameters(j, atom1, atom2, length, k);
+                    h_bondAtoms[j * 2] = atom1;
+                    h_bondAtoms[j * 2 + 1] = atom2;
+                    h_bondParams[j * 2] = (float)k;
+                    h_bondParams[j * 2 + 1] = (float)length;
+                }
+
+                bondAtoms.initialize<int>(cu, numBonds * 2, "bondedHessian_bondAtoms");
+                bondParams.initialize<float>(cu, numBonds * 2, "bondedHessian_bondParams");
+                bondAtoms.upload(h_bondAtoms);
+                bondParams.upload(h_bondParams);
+            }
+            break;
+        }
+    }
+
+    // Extract HarmonicAngleForce parameters
+    for (int i = 0; i < system.getNumForces(); i++) {
+        const HarmonicAngleForce* angleForce = dynamic_cast<const HarmonicAngleForce*>(&system.getForce(i));
+        if (angleForce != nullptr) {
+            numAngles = angleForce->getNumAngles();
+            if (numAngles > 0) {
+                vector<int> h_angleAtoms(numAngles * 3);
+                vector<float> h_angleParams(numAngles * 2);
+
+                for (int j = 0; j < numAngles; j++) {
+                    int atom1, atom2, atom3;
+                    double angle, k;
+                    angleForce->getAngleParameters(j, atom1, atom2, atom3, angle, k);
+                    h_angleAtoms[j * 3] = atom1;
+                    h_angleAtoms[j * 3 + 1] = atom2;
+                    h_angleAtoms[j * 3 + 2] = atom3;
+                    h_angleParams[j * 2] = (float)k;
+                    h_angleParams[j * 2 + 1] = (float)angle;
+                }
+
+                angleAtoms.initialize<int>(cu, numAngles * 3, "bondedHessian_angleAtoms");
+                angleParams.initialize<float>(cu, numAngles * 2, "bondedHessian_angleParams");
+                angleAtoms.upload(h_angleAtoms);
+                angleParams.upload(h_angleParams);
+            }
+            break;
+        }
+    }
+
+    // Extract PeriodicTorsionForce parameters
+    for (int i = 0; i < system.getNumForces(); i++) {
+        const PeriodicTorsionForce* torsionForce = dynamic_cast<const PeriodicTorsionForce*>(&system.getForce(i));
+        if (torsionForce != nullptr) {
+            numTorsions = torsionForce->getNumTorsions();
+            if (numTorsions > 0) {
+                vector<int> h_torsionAtoms(numTorsions * 4);
+                vector<float> h_torsionParams(numTorsions * 3);
+
+                for (int j = 0; j < numTorsions; j++) {
+                    int atom1, atom2, atom3, atom4, periodicity;
+                    double phase, k;
+                    torsionForce->getTorsionParameters(j, atom1, atom2, atom3, atom4, periodicity, phase, k);
+                    h_torsionAtoms[j * 4] = atom1;
+                    h_torsionAtoms[j * 4 + 1] = atom2;
+                    h_torsionAtoms[j * 4 + 2] = atom3;
+                    h_torsionAtoms[j * 4 + 3] = atom4;
+                    h_torsionParams[j * 3] = (float)periodicity;  // n
+                    h_torsionParams[j * 3 + 1] = (float)k;
+                    h_torsionParams[j * 3 + 2] = (float)phase;
+                }
+
+                torsionAtoms.initialize<int>(cu, numTorsions * 4, "bondedHessian_torsionAtoms");
+                torsionParams.initialize<float>(cu, numTorsions * 3, "bondedHessian_torsionParams");
+                torsionAtoms.upload(h_torsionAtoms);
+                torsionParams.upload(h_torsionParams);
+            }
+            break;
+        }
+    }
+
+    // Allocate Hessian buffer (3N x 3N)
+    int hessianSize = 3 * numAtoms;
+    hessianBuffer.initialize<float>(cu, hessianSize * hessianSize, "bondedHessian_hessian");
+
+    // Load CUDA kernels
+    map<string, string> defines;
+    defines["NUM_ATOMS"] = cu.intToString(numAtoms);
+
+    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+    bondHessianKernel = cu.getKernel(module, "computeBondHessians");
+    angleHessianKernel = cu.getKernel(module, "computeAngleHessians");
+    torsionHessianKernel = cu.getKernel(module, "computeTorsionHessians");
+    initHessianKernel = cu.getKernel(module, "initializeHessian");
+
+    hasInitializedKernel = true;
+}
+
+std::vector<double> CudaCalcBondedHessianKernel::computeHessian(ContextImpl& context) {
+    if (!hasInitializedKernel) {
+        throw OpenMMException("CudaCalcBondedHessianKernel: must call initialize() first");
+    }
+
+    cu.setAsCurrent();
+
+    int hessianSize = 3 * numAtoms;
+    int totalElements = hessianSize * hessianSize;
+
+    // Zero out Hessian buffer
+    {
+        CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
+        void* args[] = {&hessianPtr, &totalElements};
+        int blockSize = 256;
+        int numBlocks = (totalElements + blockSize - 1) / blockSize;
+        cu.executeKernel(initHessianKernel, args, numBlocks * blockSize, blockSize);
+    }
+
+    // Get positions
+    CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
+
+    // Compute bond Hessians
+    if (numBonds > 0) {
+        CUdeviceptr bondAtomsPtr = bondAtoms.getDevicePointer();
+        CUdeviceptr bondParamsPtr = bondParams.getDevicePointer();
+
+        void* args[] = {
+            &posqPtr,
+            &bondAtomsPtr,
+            &bondParamsPtr,
+            &hessianPtr,
+            &numBonds,
+            &numAtoms
+        };
+
+        int blockSize = 128;
+        int numBlocks = (numBonds + blockSize - 1) / blockSize;
+        cu.executeKernel(bondHessianKernel, args, numBlocks * blockSize, blockSize);
+    }
+
+    // Compute angle Hessians
+    if (numAngles > 0) {
+        CUdeviceptr angleAtomsPtr = angleAtoms.getDevicePointer();
+        CUdeviceptr angleParamsPtr = angleParams.getDevicePointer();
+
+        void* args[] = {
+            &posqPtr,
+            &angleAtomsPtr,
+            &angleParamsPtr,
+            &hessianPtr,
+            &numAngles,
+            &numAtoms
+        };
+
+        int blockSize = 128;
+        int numBlocks = (numAngles + blockSize - 1) / blockSize;
+        cu.executeKernel(angleHessianKernel, args, numBlocks * blockSize, blockSize);
+    }
+
+    // Compute torsion Hessians
+    if (numTorsions > 0) {
+        CUdeviceptr torsionAtomsPtr = torsionAtoms.getDevicePointer();
+        CUdeviceptr torsionParamsPtr = torsionParams.getDevicePointer();
+
+        void* args[] = {
+            &posqPtr,
+            &torsionAtomsPtr,
+            &torsionParamsPtr,
+            &hessianPtr,
+            &numTorsions,
+            &numAtoms
+        };
+
+        int blockSize = 128;
+        int numBlocks = (numTorsions + blockSize - 1) / blockSize;
+        cu.executeKernel(torsionHessianKernel, args, numBlocks * blockSize, blockSize);
+    }
+
+    // Download Hessian and convert to double
+    vector<float> h_hessian(totalElements);
+    hessianBuffer.download(h_hessian);
+
+    vector<double> result(totalElements);
+    for (int i = 0; i < totalElements; i++) {
+        result[i] = (double)h_hessian[i];
+    }
+
+    return result;
 }

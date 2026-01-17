@@ -20,6 +20,7 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
         CudaGridForceKernelFactory* factory = new CudaGridForceKernelFactory();
         platform.registerKernelFactory(CalcGridForceKernel::Name(), factory);
         platform.registerKernelFactory(CalcIsolatedNonbondedForceKernel::Name(), factory);
+        platform.registerKernelFactory(CalcBondedHessianKernel::Name(), factory);
     }
     catch (...) {
     }
@@ -34,5 +35,7 @@ KernelImpl* CudaGridForceKernelFactory::createKernelImpl(std::string name, const
         return new CudaCalcGridForceKernel(name, platform, cu);
     if (name == CalcIsolatedNonbondedForceKernel::Name())
         return new CudaCalcIsolatedNonbondedForceKernel(name, platform, cu);
+    if (name == CalcBondedHessianKernel::Name())
+        return new CudaCalcBondedHessianKernel(name, platform, cu);
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

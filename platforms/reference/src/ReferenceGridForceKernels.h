@@ -81,6 +81,7 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
 
     std::vector<double> getParticleGroupEnergies();
     std::vector<double> getParticleAtomEnergies();
+    std::vector<int> getParticleOutOfBoundsFlags();
 
    private:
     /**
@@ -131,6 +132,46 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
 
 
 
+
+/**
+ * Reference implementation of CalcBondedHessianKernel.
+ * Computes analytical Hessian of bonded forces on CPU.
+ */
+class ReferenceCalcBondedHessianKernel : public CalcBondedHessianKernel {
+public:
+    ReferenceCalcBondedHessianKernel(std::string name, const OpenMM::Platform& platform)
+        : CalcBondedHessianKernel(name, platform), numAtoms(0), numBonds(0),
+          numAngles(0), numTorsions(0) {
+    }
+
+    void initialize(const OpenMM::System& system);
+    std::vector<double> computeHessian(OpenMM::ContextImpl& context);
+    int getNumBonds() const { return numBonds; }
+    int getNumAngles() const { return numAngles; }
+    int getNumTorsions() const { return numTorsions; }
+
+private:
+    int numAtoms;
+    int numBonds;
+    int numAngles;
+    int numTorsions;
+
+    // Bond parameters
+    std::vector<int> bondAtoms;      // [atom1, atom2] * numBonds
+    std::vector<double> bondLengths;
+    std::vector<double> bondKs;
+
+    // Angle parameters
+    std::vector<int> angleAtoms;     // [atom1, atom2, atom3] * numAngles
+    std::vector<double> angleValues;
+    std::vector<double> angleKs;
+
+    // Torsion parameters
+    std::vector<int> torsionAtoms;   // [atom1, atom2, atom3, atom4] * numTorsions
+    std::vector<int> torsionPeriodicities;
+    std::vector<double> torsionPhases;
+    std::vector<double> torsionKs;
+};
 
 }  // namespace GridForcePlugin
 

@@ -49,11 +49,12 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
         Platform& platform = Platform::getPlatform(i);
         if (dynamic_cast<ReferencePlatform*>(&platform) != NULL) {
             if (platform.getName() == "Reference") {
-                ReferenceGridForceKernelFactory* factory = 
+                ReferenceGridForceKernelFactory* factory =
                             new ReferenceGridForceKernelFactory();
-                platform.registerKernelFactory(CalcGridForceKernel::Name(), 
+                platform.registerKernelFactory(CalcGridForceKernel::Name(),
                                                 factory);
-                
+                platform.registerKernelFactory(CalcBondedHessianKernel::Name(),
+                                                factory);
             }
         }
     }
@@ -67,6 +68,8 @@ KernelImpl* ReferenceGridForceKernelFactory::createKernelImpl(std::string name, 
     ReferencePlatform::PlatformData& data = *static_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
     if (name == CalcGridForceKernel::Name())
         return new ReferenceCalcGridForceKernel(name, platform);
+    if (name == CalcBondedHessianKernel::Name())
+        return new ReferenceCalcBondedHessianKernel(name, platform);
 
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

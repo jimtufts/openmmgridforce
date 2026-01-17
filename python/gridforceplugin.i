@@ -512,7 +512,7 @@ public:
 };
 
 /**
- * BondedHessian computes analytical Hessians for bonded forces.
+ * BondedHessian computes analytical Hessians for bonded forces (CPU version).
  */
 class BondedHessian {
 public:
@@ -528,7 +528,7 @@ public:
     %pythoncode %{
     def getHessianMatrix(self, context):
         """
-        Compute and return the full Hessian matrix as a numpy array.
+        Compute and return the full Hessian matrix as a numpy array (CPU).
 
         This computes the analytical Hessian (second derivatives) of all
         bonded forces (HarmonicBondForce, HarmonicAngleForce, PeriodicTorsionForce)

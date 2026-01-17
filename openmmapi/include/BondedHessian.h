@@ -17,8 +17,8 @@ namespace GridForcePlugin {
 /**
  * BondedHessian computes the Hessian (second derivative matrix) for bonded
  * interactions in an OpenMM System. It extracts parameters from HarmonicBondForce,
- * HarmonicAngleForce, and PeriodicTorsionForce, then uses GPU-accelerated kernels
- * to compute the full 3N x 3N Hessian matrix.
+ * HarmonicAngleForce, and PeriodicTorsionForce, then computes the full 3N x 3N
+ * Hessian matrix analytically.
  *
  * Usage:
  *   BondedHessian hessianCalc;
@@ -40,7 +40,7 @@ public:
      * This must be called before computeHessian().
      *
      * @param system   the System containing bonded forces
-     * @param context  the Context (used to determine platform)
+     * @param context  the Context (used to get positions)
      */
     void initialize(const OpenMM::System& system, OpenMM::Context& context);
 
@@ -59,26 +59,21 @@ public:
     /**
      * Get the number of bonds found in the System.
      */
-    int getNumBonds() const { return numBonds; }
+    int getNumBonds() const;
 
     /**
      * Get the number of angles found in the System.
      */
-    int getNumAngles() const { return numAngles; }
+    int getNumAngles() const;
 
     /**
      * Get the number of torsions found in the System.
      */
-    int getNumTorsions() const { return numTorsions; }
+    int getNumTorsions() const;
 
 private:
     class Impl;
     Impl* impl;
-
-    int numAtoms;
-    int numBonds;
-    int numAngles;
-    int numTorsions;
     bool initialized;
 };
 
