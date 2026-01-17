@@ -155,7 +155,7 @@ static void computeBondHessianBlock(const Vec3& ri, const Vec3& rj, double k, do
     }
 }
 
-// Compute angle Hessian (simplified - uses numerical differentiation for second derivatives)
+// Compute analytical angle Hessian for E = 0.5 * k * (theta - theta0)^2
 static void computeAngleHessian(const Vec3& r1, const Vec3& r2, const Vec3& r3,
                                  double k, double theta0,
                                  double H[12][12]) {
@@ -164,61 +164,155 @@ static void computeAngleHessian(const Vec3& r1, const Vec3& r2, const Vec3& r3,
         for (int j = 0; j < 12; j++)
             H[i][j] = 0.0;
 
-    const double h = 1e-5;
-    Vec3 pos[3] = {r1, r2, r3};
+    // Vectors from central atom
+    Vec3 b1, b3;
+    for (int d = 0; d < 3; d++) {
+        b1[d] = r1[d] - r2[d];
+        b3[d] = r3[d] - r2[d];
+    }
 
-    // Numerical second derivatives
-    for (int i = 0; i < 9; i++) {  // 3 atoms * 3 coords
-        for (int j = i; j < 9; j++) {
-            int ai = i / 3, di = i % 3;
-            int aj = j / 3, dj = j % 3;
+    double L1 = sqrt(b1[0]*b1[0] + b1[1]*b1[1] + b1[2]*b1[2]);
+    double L3 = sqrt(b3[0]*b3[0] + b3[1]*b3[1] + b3[2]*b3[2]);
 
-            // Compute angle at displaced positions
-            auto computeAngle = [](const Vec3& p1, const Vec3& p2, const Vec3& p3) {
-                Vec3 v1 = p1 - p2;
-                Vec3 v2 = p3 - p2;
-                double dot = v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2];
-                double len1 = sqrt(v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]);
-                double len2 = sqrt(v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2]);
-                double cosTheta = dot / (len1 * len2);
-                if (cosTheta > 1.0) cosTheta = 1.0;
-                if (cosTheta < -1.0) cosTheta = -1.0;
-                return acos(cosTheta);
-            };
+    if (L1 < 1e-10 || L3 < 1e-10) return;
 
-            auto computeEnergy = [&](const Vec3 p[3]) {
-                double theta = computeAngle(p[0], p[1], p[2]);
-                double dtheta = theta - theta0;
-                return 0.5 * k * dtheta * dtheta;
-            };
+    double invL1 = 1.0 / L1;
+    double invL3 = 1.0 / L3;
+    double invL1_sq = invL1 * invL1;
+    double invL3_sq = invL3 * invL3;
 
-            // E(+h, +h)
-            Vec3 pp[3] = {pos[0], pos[1], pos[2]};
-            pp[ai][di] += h;
-            pp[aj][dj] += h;
-            double Epp = computeEnergy(pp);
+    // Unit vectors
+    double e1[3], e3[3];
+    for (int d = 0; d < 3; d++) {
+        e1[d] = b1[d] * invL1;
+        e3[d] = b3[d] * invL3;
+    }
 
-            // E(+h, -h)
-            Vec3 pm[3] = {pos[0], pos[1], pos[2]};
-            pm[ai][di] += h;
-            pm[aj][dj] -= h;
-            double Epm = computeEnergy(pm);
+    double cos_theta = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
+    if (cos_theta > 0.9999999) cos_theta = 0.9999999;
+    if (cos_theta < -0.9999999) cos_theta = -0.9999999;
+    double theta = acos(cos_theta);
+    double sin_theta = sin(theta);
 
-            // E(-h, +h)
-            Vec3 mp[3] = {pos[0], pos[1], pos[2]};
-            mp[ai][di] -= h;
-            mp[aj][dj] += h;
-            double Emp = computeEnergy(mp);
+    if (fabs(sin_theta) < 1e-10) return;
 
-            // E(-h, -h)
-            Vec3 mm[3] = {pos[0], pos[1], pos[2]};
-            mm[ai][di] -= h;
-            mm[aj][dj] -= h;
-            double Emm = computeEnergy(mm);
+    double inv_sin = 1.0 / sin_theta;
+    double cot_theta = cos_theta * inv_sin;
 
-            double d2E = (Epp - Epm - Emp + Emm) / (4.0 * h * h);
-            H[i][j] = d2E;
-            H[j][i] = d2E;  // Symmetric
+    // Energy derivatives
+    double dtheta = theta - theta0;
+    double dE_dtheta = k * dtheta;
+    double d2E_dtheta2 = k;
+
+    // Gradient vectors: v1 = e3 - cos θ * e1, v3 = e1 - cos θ * e3
+    double v1[3], v3[3];
+    for (int d = 0; d < 3; d++) {
+        v1[d] = e3[d] - cos_theta * e1[d];
+        v3[d] = e1[d] - cos_theta * e3[d];
+    }
+
+    // Gradient of theta
+    double g1[3], g3[3], g2[3];
+    for (int d = 0; d < 3; d++) {
+        g1[d] = -inv_sin * invL1 * v1[d];
+        g3[d] = -inv_sin * invL3 * v3[d];
+        g2[d] = -(g1[d] + g3[d]);
+    }
+
+    // Full gradient vector (9 elements)
+    double grad[9];
+    for (int d = 0; d < 3; d++) {
+        grad[d] = g1[d];
+        grad[3+d] = g2[d];
+        grad[6+d] = g3[d];
+    }
+
+    // Projection matrices P1 = I - e1⊗e1, P3 = I - e3⊗e3
+    double P1[9], P3[9];
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            double delta = (a == b) ? 1.0 : 0.0;
+            P1[a*3+b] = delta - e1[a] * e1[b];
+            P3[a*3+b] = delta - e3[a] * e3[b];
+        }
+    }
+
+    // Initialize H_theta (9x9 matrix for d²θ/dr)
+    double H_theta[81];
+    for (int i = 0; i < 81; i++) H_theta[i] = 0.0;
+
+    // d²θ/dr1 dr1
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            double val = inv_sin * invL1_sq * (
+                2.0 * v1[a] * e1[b] +
+                cot_theta * v1[a] * v1[b] +
+                cos_theta * P1[a*3+b]
+            );
+            H_theta[(0+a)*9 + (0+b)] = val;
+        }
+    }
+
+    // d²θ/dr3 dr3
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            double val = inv_sin * invL3_sq * (
+                2.0 * v3[a] * e3[b] +
+                cot_theta * v3[a] * v3[b] +
+                cos_theta * P3[a*3+b]
+            );
+            H_theta[(6+a)*9 + (6+b)] = val;
+        }
+    }
+
+    // d²θ/dr1 dr3
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            double val = -inv_sin * invL1 * invL3 * (
+                P3[a*3+b] -
+                v3[a] * e1[b] -
+                cot_theta * v1[a] * v3[b]
+            );
+            H_theta[(0+a)*9 + (6+b)] = val;
+            H_theta[(6+b)*9 + (0+a)] = val;
+        }
+    }
+
+    // d²θ/dr1 dr2 and d²θ/dr2 dr1 (via g2 = -(g1 + g3))
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            double d2_r1_r1 = H_theta[(0+a)*9 + (0+b)];
+            double d2_r1_r3 = H_theta[(0+a)*9 + (6+b)];
+            double val = -d2_r1_r1 - d2_r1_r3;
+            H_theta[(0+a)*9 + (3+b)] = val;
+            H_theta[(3+b)*9 + (0+a)] = val;
+        }
+    }
+
+    // d²θ/dr3 dr2 and d²θ/dr2 dr3
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            double d2_r3_r3 = H_theta[(6+a)*9 + (6+b)];
+            double d2_r3_r1 = H_theta[(6+a)*9 + (0+b)];
+            double val = -d2_r3_r3 - d2_r3_r1;
+            H_theta[(6+a)*9 + (3+b)] = val;
+            H_theta[(3+b)*9 + (6+a)] = val;
+        }
+    }
+
+    // d²θ/dr2 dr2
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            double d2_r1_r2 = H_theta[(0+a)*9 + (3+b)];
+            double d2_r3_r2 = H_theta[(6+a)*9 + (3+b)];
+            H_theta[(3+a)*9 + (3+b)] = -d2_r1_r2 - d2_r3_r2;
+        }
+    }
+
+    // Full Hessian: H = d²E/dθ² * grad ⊗ grad + dE/dθ * H_theta
+    for (int i = 0; i < 9; i++) {
+        for (int j = 0; j < 9; j++) {
+            H[i][j] = d2E_dtheta2 * grad[i] * grad[j] + dE_dtheta * H_theta[i * 9 + j];
         }
     }
 }
