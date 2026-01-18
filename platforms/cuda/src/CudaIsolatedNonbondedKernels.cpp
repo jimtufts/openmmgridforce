@@ -245,6 +245,7 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
     CUdeviceptr particleIndicesPtr = particleIndices.getDevicePointer();
+    CUdeviceptr chargesPtr = charges.getDevicePointer();
     CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
     CUdeviceptr epsilonsPtr = epsilons.getDevicePointer();
     CUdeviceptr exclusionsPtr = exclusions.getDevicePointer();
@@ -253,6 +254,7 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     void* args[] = {
         &posqPtr,
         &particleIndicesPtr,
+        &chargesPtr,
         &sigmasPtr,
         &epsilonsPtr,
         &exclusionsPtr,

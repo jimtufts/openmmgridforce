@@ -71,7 +71,7 @@ private:
     std::vector<int> h_particleIndices;  // Host copy for updates
 
     // Hessian computation support
-    CUfunction hessianKernel;             // Kernel for Hessian computation
+    CUfunction hessianKernel = nullptr;   // Kernel for Hessian computation
     OpenMM::CudaArray hessianBuffer;      // Full Hessian matrix (3N x 3N)
 };
 
