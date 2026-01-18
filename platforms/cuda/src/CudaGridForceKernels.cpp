@@ -731,6 +731,11 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         // Compile tiled kernel (uses same module since all kernels are combined)
         tiledKernel = cu.getKernel(module, "computeGridForceTiled");
 
+        // Compile tiled Hessian kernel if Hessian is supported
+        if (interpolationMethod == 1 || interpolationMethod == 3) {
+            tiledHessianKernel = cu.getKernel(module, "computeGridHessianTiled");
+        }
+
         // Initialize TileManager
         TileConfig tileConfig;
         tileConfig.tileSize = force.getTileSize();
@@ -1150,9 +1155,6 @@ void CudaCalcGridForceKernel::computeHessian() {
     CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
     CUdeviceptr countsPtr = g_counts.getDevicePointer();
     CUdeviceptr spacingPtr = g_spacing.getDevicePointer();
-    CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
-    CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
-                            (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
 
     // Determine which scaling factors and particle indices to use
     CUdeviceptr scalingPtr;
@@ -1171,26 +1173,114 @@ void CudaCalcGridForceKernel::computeHessian() {
         kernelNumAtoms = numAtoms;
     }
 
-    // Launch Hessian kernel (with invPower chain rule support)
-    void* args[] = {
-        &posqPtr,
-        &hessianPtr,
-        &countsPtr,
-        &spacingPtr,
-        &valsPtr,
-        &scalingPtr,
-        &invPower,
-        &invPowerMode,
-        &interpolationMethod,
-        &originX,
-        &originY,
-        &originZ,
-        &derivsPtr,
-        &kernelNumAtoms,
-        &particleIndicesPtr
-    };
+    if (tiledMode && tileManager) {
+        // Tiled execution path: determine required tiles and launch tiled Hessian kernel
 
-    cu.executeKernel(hessianKernel, args, kernelNumAtoms);
+        // Get particle positions from GPU
+        int totalParticles = cu.getNumAtoms();
+        std::vector<float4> posqHost(totalParticles);
+        cu.getPosq().download(posqHost);
+
+        // Extract positions for tile determination
+        std::vector<float> positions;
+        if (totalGroupParticles > 0) {
+            // Multi-ligand mode: use flattened group particle indices
+            std::vector<int> groupIndicesHost(totalGroupParticles);
+            allGroupParticleIndices.download(groupIndicesHost);
+            positions.reserve(totalGroupParticles * 3);
+            for (int i = 0; i < totalGroupParticles; i++) {
+                int idx = groupIndicesHost[i];
+                positions.push_back(posqHost[idx].x);
+                positions.push_back(posqHost[idx].y);
+                positions.push_back(posqHost[idx].z);
+            }
+        } else if (!particles.empty()) {
+            // Filtered particles mode
+            positions.reserve(particles.size() * 3);
+            for (int idx : particles) {
+                positions.push_back(posqHost[idx].x);
+                positions.push_back(posqHost[idx].y);
+                positions.push_back(posqHost[idx].z);
+            }
+        } else {
+            // All particles mode
+            positions.reserve(numAtoms * 3);
+            for (int i = 0; i < numAtoms; i++) {
+                positions.push_back(posqHost[i].x);
+                positions.push_back(posqHost[i].y);
+                positions.push_back(posqHost[i].z);
+            }
+        }
+
+        // Prepare tiles for Hessian computation
+        if (!tileManager->prepareTiles(positions)) {
+            throw OpenMMException("GridForce: Failed to prepare tiles for Hessian computation");
+        }
+
+        // Get tile lookup table
+        TileLookupTable& lookup = const_cast<TileLookupTable&>(tileManager->getLookupTable());
+
+        // Get tile parameters
+        CUdeviceptr tileOffsetsPtr = lookup.tileOffsets.getDevicePointer();
+        CUdeviceptr tileValuePtrsPtr = lookup.tileValuePtrs.getDevicePointer();
+        CUdeviceptr tileDerivPtrsPtr = lookup.tileDerivPtrs.isInitialized() ? lookup.tileDerivPtrs.getDevicePointer() : 0;
+        int numTiles = lookup.numLoadedTiles;
+
+        const TileConfig& tileConfig = tileManager->getConfig();
+        int tileSizeParam = tileConfig.tileSize;
+        int tileOverlapParam = tileConfig.overlap;
+
+        // Launch tiled Hessian kernel
+        void* tiledArgs[] = {
+            &posqPtr,
+            &hessianPtr,
+            &countsPtr,
+            &spacingPtr,
+            &scalingPtr,
+            &invPower,
+            &invPowerMode,
+            &interpolationMethod,
+            &originX,
+            &originY,
+            &originZ,
+            &kernelNumAtoms,
+            &particleIndicesPtr,
+            &tileOffsetsPtr,
+            &tileValuePtrsPtr,
+            &tileDerivPtrsPtr,
+            &numTiles,
+            &tileSizeParam,
+            &tileOverlapParam
+        };
+
+        cu.executeKernel(tiledHessianKernel, tiledArgs, kernelNumAtoms);
+    } else {
+        // Standard (non-tiled) execution path
+        CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
+        CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
+                                (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
+
+        // Launch Hessian kernel (with invPower chain rule support)
+        void* args[] = {
+            &posqPtr,
+            &hessianPtr,
+            &countsPtr,
+            &spacingPtr,
+            &valsPtr,
+            &scalingPtr,
+            &invPower,
+            &invPowerMode,
+            &interpolationMethod,
+            &originX,
+            &originY,
+            &originZ,
+            &derivsPtr,
+            &kernelNumAtoms,
+            &particleIndicesPtr
+        };
+
+        cu.executeKernel(hessianKernel, args, kernelNumAtoms);
+    }
 
     // Download results
     lastHessianBlocks.resize(6 * kernelNumAtoms);

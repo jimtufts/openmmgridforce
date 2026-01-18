@@ -212,6 +212,7 @@ private:
 
     // Hessian (second derivative) computation support
     CUfunction hessianKernel;                    // Kernel for Hessian computation
+    CUfunction tiledHessianKernel;               // Kernel for tiled Hessian computation
     OpenMM::CudaArray hessianBuffer;            // Per-atom Hessian storage (6 floats per atom)
     std::vector<float> lastHessianBlocks;        // Persistent copy of last Hessian computation
 
