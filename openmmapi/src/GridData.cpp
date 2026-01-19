@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <cstring>
+#include <cstdint>
 
 using namespace GridForcePlugin;
 using namespace OpenMM;
