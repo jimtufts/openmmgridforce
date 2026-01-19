@@ -4,6 +4,10 @@
  * a specified set of particles, with no interaction outside that set.
  */
 
+// Fixed-point scale factor for Hessian accumulation (same as force buffers)
+// Using 2^24 to leave headroom for large Hessian values (~10^6 kJ/mol/nm^2)
+#define HESSIAN_SCALE 0x1000000
+
 // Helper function to decode linear pair index to (i,j) indices
 __device__ void decodePairIndex(int pairIdx, int* i, int* j, int numAtoms) {
     // Convert linear pair index to (i,j) where i < j
@@ -156,7 +160,9 @@ extern "C" __global__ void computeIsolatedNonbondedHessians(
     const real* __restrict__ sigmas,            // LJ sigma [numAtoms]
     const real* __restrict__ epsilons,          // LJ epsilon [numAtoms]
     const int2* __restrict__ exclusions,        // Excluded pairs [numExclusions]
-    float* __restrict__ hessianBlocks,          // Output: 3x3 blocks [numAtoms*numAtoms*9]
+    const int2* __restrict__ exceptions,        // Exception pairs [numExceptions]
+    const float3* __restrict__ exceptionParams, // Exception parameters (chargeProd, sigma, epsilon) [numExceptions]
+    unsigned long long* __restrict__ hessianBlocks, // Output: fixed-point 3x3 blocks [numAtoms*numAtoms*9]
     const int numAtoms,
     const int numPairs,
     const int paddedNumAtoms) {
@@ -185,18 +191,36 @@ extern "C" __global__ void computeIsolatedNonbondedHessians(
 #endif
     if (excluded) return;
 
-    // Get parameters (using combining rules - exceptions handled same as regular for Hessian)
+    // Check if this pair is an exception (1-4 interaction with custom parameters)
+    bool isException = false;
+    real qq, sigma, epsilon;
+#if NUM_EXCEPTIONS > 0
+    for (int k = 0; k < NUM_EXCEPTIONS; k++) {
+        int2 exc = exceptions[k];
+        if ((exc.x == i && exc.y == j) || (exc.x == j && exc.y == i)) {
+            isException = true;
+            float3 params = exceptionParams[k];
+            qq = params.x;          // chargeProd
+            sigma = params.y;       // sigma
+            epsilon = params.z;     // epsilon
+            break;
+        }
+    }
+#endif
+
+    // If not an exception, use standard combining rules
+    if (!isException) {
+        qq = charges[i] * charges[j];
+        sigma = (sigmas[i] + sigmas[j]) * 0.5f;  // Arithmetic mean
+        epsilon = SQRT(epsilons[i] * epsilons[j]);  // Geometric mean
+    }
+
+    // Get actual particle indices in the System
     int particleI = particleIndices[i];
     int particleJ = particleIndices[j];
 
     real4 posqI = posq[particleI];
     real4 posqJ = posq[particleJ];
-
-    // Use local charges array
-    real qq = charges[i] * charges[j];
-
-    real sigma = (sigmas[i] + sigmas[j]) * 0.5f;
-    real epsilon = SQRT(epsilons[i] * epsilons[j]);
 
     // Compute distance vector (pointing from j to i)
     real dx = posqI.x - posqJ.x;
@@ -257,49 +281,49 @@ extern "C" __global__ void computeIsolatedNonbondedHessians(
     int blockII = (i * numAtoms + i) * 9;
     int blockJJ = (j * numAtoms + j) * 9;
 
-    // H[i,i] += H_pair (symmetric 3x3)
-    atomicAdd(&hessianBlocks[blockII + 0], Hxx);  // xx
-    atomicAdd(&hessianBlocks[blockII + 1], Hxy);  // xy
-    atomicAdd(&hessianBlocks[blockII + 2], Hxz);  // xz
-    atomicAdd(&hessianBlocks[blockII + 3], Hxy);  // yx
-    atomicAdd(&hessianBlocks[blockII + 4], Hyy);  // yy
-    atomicAdd(&hessianBlocks[blockII + 5], Hyz);  // yz
-    atomicAdd(&hessianBlocks[blockII + 6], Hxz);  // zx
-    atomicAdd(&hessianBlocks[blockII + 7], Hyz);  // zy
-    atomicAdd(&hessianBlocks[blockII + 8], Hzz);  // zz
+    // H[i,i] += H_pair (symmetric 3x3) - using fixed-point for determinism
+    atomicAdd(&hessianBlocks[blockII + 0], static_cast<unsigned long long>((long long)(Hxx * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 1], static_cast<unsigned long long>((long long)(Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 2], static_cast<unsigned long long>((long long)(Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 3], static_cast<unsigned long long>((long long)(Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 4], static_cast<unsigned long long>((long long)(Hyy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 5], static_cast<unsigned long long>((long long)(Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 6], static_cast<unsigned long long>((long long)(Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 7], static_cast<unsigned long long>((long long)(Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockII + 8], static_cast<unsigned long long>((long long)(Hzz * HESSIAN_SCALE)));
 
     // H[j,j] += H_pair (same as H[i,i] contribution)
-    atomicAdd(&hessianBlocks[blockJJ + 0], Hxx);
-    atomicAdd(&hessianBlocks[blockJJ + 1], Hxy);
-    atomicAdd(&hessianBlocks[blockJJ + 2], Hxz);
-    atomicAdd(&hessianBlocks[blockJJ + 3], Hxy);
-    atomicAdd(&hessianBlocks[blockJJ + 4], Hyy);
-    atomicAdd(&hessianBlocks[blockJJ + 5], Hyz);
-    atomicAdd(&hessianBlocks[blockJJ + 6], Hxz);
-    atomicAdd(&hessianBlocks[blockJJ + 7], Hyz);
-    atomicAdd(&hessianBlocks[blockJJ + 8], Hzz);
+    atomicAdd(&hessianBlocks[blockJJ + 0], static_cast<unsigned long long>((long long)(Hxx * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 1], static_cast<unsigned long long>((long long)(Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 2], static_cast<unsigned long long>((long long)(Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 3], static_cast<unsigned long long>((long long)(Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 4], static_cast<unsigned long long>((long long)(Hyy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 5], static_cast<unsigned long long>((long long)(Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 6], static_cast<unsigned long long>((long long)(Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 7], static_cast<unsigned long long>((long long)(Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJJ + 8], static_cast<unsigned long long>((long long)(Hzz * HESSIAN_SCALE)));
 
     // Off-diagonal blocks: H[i,j] = H[j,i] = -H_pair
     int blockIJ = (i * numAtoms + j) * 9;
     int blockJI = (j * numAtoms + i) * 9;
 
-    atomicAdd(&hessianBlocks[blockIJ + 0], -Hxx);
-    atomicAdd(&hessianBlocks[blockIJ + 1], -Hxy);
-    atomicAdd(&hessianBlocks[blockIJ + 2], -Hxz);
-    atomicAdd(&hessianBlocks[blockIJ + 3], -Hxy);
-    atomicAdd(&hessianBlocks[blockIJ + 4], -Hyy);
-    atomicAdd(&hessianBlocks[blockIJ + 5], -Hyz);
-    atomicAdd(&hessianBlocks[blockIJ + 6], -Hxz);
-    atomicAdd(&hessianBlocks[blockIJ + 7], -Hyz);
-    atomicAdd(&hessianBlocks[blockIJ + 8], -Hzz);
+    atomicAdd(&hessianBlocks[blockIJ + 0], static_cast<unsigned long long>((long long)(-Hxx * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 1], static_cast<unsigned long long>((long long)(-Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 2], static_cast<unsigned long long>((long long)(-Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 3], static_cast<unsigned long long>((long long)(-Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 4], static_cast<unsigned long long>((long long)(-Hyy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 5], static_cast<unsigned long long>((long long)(-Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 6], static_cast<unsigned long long>((long long)(-Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 7], static_cast<unsigned long long>((long long)(-Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockIJ + 8], static_cast<unsigned long long>((long long)(-Hzz * HESSIAN_SCALE)));
 
-    atomicAdd(&hessianBlocks[blockJI + 0], -Hxx);
-    atomicAdd(&hessianBlocks[blockJI + 1], -Hxy);
-    atomicAdd(&hessianBlocks[blockJI + 2], -Hxz);
-    atomicAdd(&hessianBlocks[blockJI + 3], -Hxy);
-    atomicAdd(&hessianBlocks[blockJI + 4], -Hyy);
-    atomicAdd(&hessianBlocks[blockJI + 5], -Hyz);
-    atomicAdd(&hessianBlocks[blockJI + 6], -Hxz);
-    atomicAdd(&hessianBlocks[blockJI + 7], -Hyz);
-    atomicAdd(&hessianBlocks[blockJI + 8], -Hzz);
+    atomicAdd(&hessianBlocks[blockJI + 0], static_cast<unsigned long long>((long long)(-Hxx * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 1], static_cast<unsigned long long>((long long)(-Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 2], static_cast<unsigned long long>((long long)(-Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 3], static_cast<unsigned long long>((long long)(-Hxy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 4], static_cast<unsigned long long>((long long)(-Hyy * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 5], static_cast<unsigned long long>((long long)(-Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 6], static_cast<unsigned long long>((long long)(-Hxz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 7], static_cast<unsigned long long>((long long)(-Hyz * HESSIAN_SCALE)));
+    atomicAdd(&hessianBlocks[blockJI + 8], static_cast<unsigned long long>((long long)(-Hzz * HESSIAN_SCALE)));
 }

@@ -232,10 +232,11 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     }
 
     // Allocate Hessian buffer if needed (3N x 3N matrix, stored as 3x3 blocks)
+    // Use fixed-point (unsigned long long) for deterministic accumulation
     int hessianSize = 3 * numAtoms;
     int numBlocks3x3 = numAtoms * numAtoms;  // One 3x3 block per atom pair (i,j)
     if (hessianBuffer.getSize() != numBlocks3x3 * 9) {
-        hessianBuffer.initialize<float>(cu, numBlocks3x3 * 9, "isolatedNB_hessian");
+        hessianBuffer.initialize<unsigned long long>(cu, numBlocks3x3 * 9, "isolatedNB_hessian");
     }
 
     // Zero out the Hessian buffer
@@ -249,6 +250,8 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
     CUdeviceptr epsilonsPtr = epsilons.getDevicePointer();
     CUdeviceptr exclusionsPtr = exclusions.getDevicePointer();
+    CUdeviceptr exceptionsPtr = exceptions.getDevicePointer();
+    CUdeviceptr exceptionParamsPtr = exceptionParams.getDevicePointer();
     CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
 
     void* args[] = {
@@ -258,6 +261,8 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
         &sigmasPtr,
         &epsilonsPtr,
         &exclusionsPtr,
+        &exceptionsPtr,
+        &exceptionParamsPtr,
         &hessianPtr,
         &numAtoms,
         &numPairs,
@@ -269,11 +274,15 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     int numBlocksKernel = (numPairs + blockSize - 1) / blockSize;
     cu.executeKernel(hessianKernel, args, numBlocksKernel * blockSize, blockSize);
 
-    // Download Hessian and convert to double
-    vector<float> h_hessian(numBlocks3x3 * 9);
+    // Download fixed-point Hessian and convert to double
+    // Scale factor must match HESSIAN_SCALE in isolatedNonbonded.cu (0x1000000 = 16777216)
+    const double HESSIAN_SCALE_INV = 1.0 / 16777216.0;
+
+    vector<unsigned long long> h_hessian(numBlocks3x3 * 9);
     hessianBuffer.download(h_hessian);
 
-    // Convert to double and reformat as full 3N x 3N matrix
+    // Convert from fixed-point to double and reformat as full 3N x 3N matrix
+    // Cast to signed long long first to recover negative values via two's complement
     vector<double> result(hessianSize * hessianSize, 0.0);
     for (int i = 0; i < numAtoms; i++) {
         for (int j = 0; j < numAtoms; j++) {
@@ -282,7 +291,8 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
                 for (int dj = 0; dj < 3; dj++) {
                     int row = 3 * i + di;
                     int col = 3 * j + dj;
-                    result[row * hessianSize + col] = h_hessian[blockIdx * 9 + di * 3 + dj];
+                    long long signedVal = static_cast<long long>(h_hessian[blockIdx * 9 + di * 3 + dj]);
+                    result[row * hessianSize + col] = signedVal * HESSIAN_SCALE_INV;
                 }
             }
         }
