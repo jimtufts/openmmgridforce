@@ -162,8 +162,12 @@ def validate_system_paths(paths):
     return missing
 
 
-def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file, platform_properties=None):
+def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file, platform_properties=None, buffer_nm=2.0):
     """Generate a grid and save to file.
+
+    Args:
+        buffer_nm: Buffer to add around grid (nm). Default 2.0 nm to prevent
+                   atoms from exiting grid during minimization.
 
     Returns:
         Dict with grid parameters: counts, origin_nm, spacing_nm
@@ -177,7 +181,7 @@ def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
                      p[2].value_in_unit(nanometer)) for p in receptor_inpcrd.positions]
 
     box_params = parse_rec_box_pdb(paths['rec_box'])
-    grid_bounds = get_grid_bounds_for_openmm(box_params, grid_spacing)
+    grid_bounds = get_grid_bounds_for_openmm(box_params, grid_spacing, buffer_nm=buffer_nm)
 
     system = receptor_prmtop.createSystem()
     grid = gfp.GridForce()

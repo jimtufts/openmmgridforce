@@ -129,9 +129,9 @@ void CudaBondedHessian::initialize(const System& system, Context& context) {
         }
     }
 
-    // Allocate Hessian buffer (3N x 3N)
+    // Allocate Hessian buffer (3N x 3N) using fixed-point for deterministic accumulation
     int hessianSize = 3 * numAtoms;
-    hessianBuffer.initialize<float>(*cu, hessianSize * hessianSize, "bondedHessian_hessian");
+    hessianBuffer.initialize<unsigned long long>(*cu, hessianSize * hessianSize, "bondedHessian_hessian");
 
     // Load CUDA kernels
     map<string, string> defines;
@@ -228,13 +228,19 @@ std::vector<double> CudaBondedHessian::computeHessian(Context& context) {
         fprintf(stderr, "DEBUG: Finished torsionHessianKernel\n");
     }
 
-    // Download Hessian and convert to double
-    vector<float> h_hessian(totalElements);
+    // Download fixed-point Hessian and convert to double
+    // Scale factor must match HESSIAN_SCALE in bondedHessian.cu (0x1000000 = 16777216)
+    const double HESSIAN_SCALE_INV = 1.0 / 16777216.0;
+
+    vector<unsigned long long> h_hessian(totalElements);
     hessianBuffer.download(h_hessian);
 
+    // Convert from fixed-point to double
+    // Cast to signed long long first to recover negative values via two's complement
     vector<double> result(totalElements);
     for (int i = 0; i < totalElements; i++) {
-        result[i] = (double)h_hessian[i];
+        long long signedVal = static_cast<long long>(h_hessian[i]);
+        result[i] = signedVal * HESSIAN_SCALE_INV;
     }
 
     return result;

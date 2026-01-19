@@ -16,6 +16,9 @@
 #define M_PI_F 3.14159265358979323846f
 #define ONE_4PI_EPS0 138.935456f  // kJ*nm/(mol*e^2)
 
+// Fixed-point scale for deterministic atomicAdd (same as IsolatedNonbondedForce)
+#define HESSIAN_SCALE 0x1000000
+
 // ============================================================
 // Helper functions
 // ============================================================
@@ -146,7 +149,7 @@ extern "C" __global__ void computeBondHessians(
     const float4* __restrict__ posq,
     const int* __restrict__ bondAtoms,      // [numBonds * 2]: atom indices
     const float* __restrict__ bondParams,   // [numBonds * 2]: k, r0
-    float* __restrict__ globalHessian,
+    unsigned long long* __restrict__ globalHessian,
     int numBonds,
     int numAtoms
 ) {
@@ -168,7 +171,7 @@ extern "C" __global__ void computeBondHessians(
     float localHess[36];
     computeBondHessian(p1, p2, k, r0, localHess);
 
-    // Accumulate into global Hessian
+    // Accumulate into global Hessian using fixed-point for determinism
     int atomIndices[2] = {i1, i2};
     int stride = numAtoms * 3;
 
@@ -185,7 +188,8 @@ extern "C" __global__ void computeBondHessians(
                     int localCol = localJ * 3 + dj;
 
                     float val = localHess[localRow * 6 + localCol];
-                    atomicAdd(&globalHessian[globalRow * stride + globalCol], val);
+                    atomicAdd(&globalHessian[globalRow * stride + globalCol],
+                              static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
             }
         }
@@ -438,7 +442,7 @@ extern "C" __global__ void computeAngleHessians(
     const float4* __restrict__ posq,
     const int* __restrict__ angleAtoms,      // [numAngles * 3]: atom indices
     const float* __restrict__ angleParams,   // [numAngles * 2]: k, theta0
-    float* __restrict__ globalHessian,
+    unsigned long long* __restrict__ globalHessian,
     int numAngles,
     int numAtoms
 ) {
@@ -463,7 +467,7 @@ extern "C" __global__ void computeAngleHessians(
     float localHess[81];
     computeAngleHessian(p1, p2, p3, k, theta0, localHess);
 
-    // Accumulate into global Hessian
+    // Accumulate into global Hessian using fixed-point for determinism
     int atomIndices[3] = {i1, i2, i3};
     int stride = numAtoms * 3;
 
@@ -480,7 +484,8 @@ extern "C" __global__ void computeAngleHessians(
                     int localCol = localJ * 3 + dj;
 
                     float val = localHess[localRow * 9 + localCol];
-                    atomicAdd(&globalHessian[globalRow * stride + globalCol], val);
+                    atomicAdd(&globalHessian[globalRow * stride + globalCol],
+                              static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
             }
         }
@@ -915,7 +920,7 @@ extern "C" __global__ void computeTorsionHessians(
     const float4* __restrict__ posq,
     const int* __restrict__ torsionAtoms,      // [numTorsions * 4]: atom indices
     const float* __restrict__ torsionParams,   // [numTorsions * 3]: n, k, phi0
-    float* __restrict__ globalHessian,         // [numAtoms * 3 * numAtoms * 3]
+    unsigned long long* __restrict__ globalHessian,  // [numAtoms * 3 * numAtoms * 3]
     int numTorsions,
     int numAtoms
 ) {
@@ -955,7 +960,7 @@ extern "C" __global__ void computeTorsionHessians(
     // Map local indices (0-3) to global atom indices
     int atomIndices[4] = {i1, i2, i3, i4};
 
-    // Accumulate into global Hessian
+    // Accumulate into global Hessian using fixed-point for determinism
     int stride = numAtoms * 3;
     for (int localI = 0; localI < 4; localI++) {
         for (int localJ = 0; localJ < 4; localJ++) {
@@ -970,7 +975,8 @@ extern "C" __global__ void computeTorsionHessians(
                     int localCol = localJ * 3 + dj;
 
                     float val = localHess[localRow * 12 + localCol];
-                    atomicAdd(&globalHessian[globalRow * stride + globalCol], val);
+                    atomicAdd(&globalHessian[globalRow * stride + globalCol],
+                              static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
             }
         }
@@ -1169,7 +1175,7 @@ extern "C" __global__ void computeNonbondedPairHessians(
     const float4* __restrict__ posq,           // positions and charges
     const int* __restrict__ pairAtoms,         // [numPairs * 2]: atom indices
     const float* __restrict__ pairParams,      // [numPairs * 2]: sigma, epsilon
-    float* __restrict__ globalHessian,
+    unsigned long long* __restrict__ globalHessian,
     int numPairs,
     int numAtoms
 ) {
@@ -1193,7 +1199,7 @@ extern "C" __global__ void computeNonbondedPairHessians(
     float localHess[36];
     computeNonbondedPairHessian(p1, p2, q1, q2, sigma, epsilon, localHess);
 
-    // Accumulate into global Hessian
+    // Accumulate into global Hessian using fixed-point for determinism
     int atomIndices[2] = {i1, i2};
     int stride = numAtoms * 3;
 
@@ -1210,7 +1216,8 @@ extern "C" __global__ void computeNonbondedPairHessians(
                     int localCol = localJ * 3 + dj;
 
                     float val = localHess[localRow * 6 + localCol];
-                    atomicAdd(&globalHessian[globalRow * stride + globalCol], val);
+                    atomicAdd(&globalHessian[globalRow * stride + globalCol],
+                              static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
             }
         }
@@ -1226,17 +1233,14 @@ extern "C" __global__ void computeNonbondedPairHessians(
 
 /**
  * Initialize the global Hessian matrix to zero.
+ * Uses unsigned long long for fixed-point deterministic accumulation.
  */
 extern "C" __global__ void initializeHessian(
-    float* __restrict__ hessian,
+    unsigned long long* __restrict__ hessian,
     int size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        hessian[idx] = 0.0f;
-    }
-    // DEBUG: Set sentinel in first element to verify kernel runs
-    if (idx == 0) {
-        hessian[0] = 77777.0f;
+        hessian[idx] = 0ULL;
     }
 }
