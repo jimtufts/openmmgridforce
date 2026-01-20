@@ -1024,10 +1024,14 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &tileOverlapParam
         };
 
-        cu.executeKernel(tiledKernel, tiledArgs, kernelNumAtoms);
+        // Use larger block size to avoid OpenMM's thread block limit
+        // (OpenMM caps gridSize at numThreadBlocks, which with default ThreadBlockSize=64
+        // limits total threads to ~30,720 on typical GPUs)
+        cu.executeKernel(tiledKernel, tiledArgs, kernelNumAtoms, 256);
     } else {
         // Standard (non-tiled) execution path
-        cu.executeKernel(kernel, args, kernelNumAtoms);
+        // Use larger block size to avoid OpenMM's thread block limit
+        cu.executeKernel(kernel, args, kernelNumAtoms, 256);
     }
 
 #if DEBUG_GRIDFORCE
@@ -1253,7 +1257,8 @@ void CudaCalcGridForceKernel::computeHessian() {
             &tileOverlapParam
         };
 
-        cu.executeKernel(tiledHessianKernel, tiledArgs, kernelNumAtoms);
+        // Use larger block size to avoid OpenMM's thread block limit
+        cu.executeKernel(tiledHessianKernel, tiledArgs, kernelNumAtoms, 256);
     } else {
         // Standard (non-tiled) execution path
         CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
@@ -1279,7 +1284,8 @@ void CudaCalcGridForceKernel::computeHessian() {
             &particleIndicesPtr
         };
 
-        cu.executeKernel(hessianKernel, args, kernelNumAtoms);
+        // Use larger block size to avoid OpenMM's thread block limit
+        cu.executeKernel(hessianKernel, args, kernelNumAtoms, 256);
     }
 
     // Download results
@@ -1367,7 +1373,8 @@ void CudaCalcGridForceKernel::analyzeHessian(float temperature) {
         &kernelNumAtoms
     };
 
-    cu.executeKernel(analysisKernel, analysisArgs, kernelNumAtoms);
+    // Use larger block size to avoid OpenMM's thread block limit
+    cu.executeKernel(analysisKernel, analysisArgs, kernelNumAtoms, 256);
 
     // Clear total entropy buffer and sum
     vector<float> zeroEntropy(1, 0.0f);
