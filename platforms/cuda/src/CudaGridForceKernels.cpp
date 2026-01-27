@@ -852,9 +852,14 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
     CUdeviceptr countsPtr = g_counts.getDevicePointer();
     CUdeviceptr spacingPtr = g_spacing.getDevicePointer();
-    CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
-    CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
-                            (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
+    // valsPtr and derivsPtr are only used in non-tiled mode, defer initialization
+    CUdeviceptr valsPtr = 0;
+    CUdeviceptr derivsPtr = 0;
+    if (!tiledMode) {
+        valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
+        derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
+                    (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
+    }
     CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
 
     // Execute kernel - single launch for either particle groups or legacy mode

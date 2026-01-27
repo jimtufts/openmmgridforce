@@ -528,32 +528,43 @@ void TileManager::buildLookupTable(const std::set<TileID>& tiles) {
     }
 
     // Upload to GPU
-    // Check if arrays need to be (re)initialized
-    // CudaArray::initialize can only be called once, so we need to check size and reinitialize if needed
+    // CudaArray requires exact size match for upload, so we resize arrays as needed
+    // and pad vectors to match when uploading smaller data
 
     // Offsets: use int array with 3 ints per tile
-    if (!lookupTable_.tileOffsets.isInitialized() || lookupTable_.tileOffsets.getSize() != offsets.size()) {
-        // Need to create a new array - CudaArray doesn't support resize
-        // The old array will be destroyed when we assign a new one, but CudaArray is not copyable
-        // So we need to work around this by using a different approach
-        if (lookupTable_.tileOffsets.isInitialized()) {
-            // Resize by uploading to same buffer if size matches, else need workaround
-            // For now, just upload if size matches; otherwise recreate the context arrays
-        }
-        if (!lookupTable_.tileOffsets.isInitialized()) {
-            lookupTable_.tileOffsets.initialize<int>(cu_, offsets.size(), "tileOffsets");
-        }
+    if (!lookupTable_.tileOffsets.isInitialized()) {
+        lookupTable_.tileOffsets.initialize<int>(cu_, offsets.size(), "tileOffsets");
+    } else if (lookupTable_.tileOffsets.getSize() < offsets.size()) {
+        // Need larger buffer - resize to accommodate
+        lookupTable_.tileOffsets.resize(offsets.size());
+    }
+    // Pad vector to match array size if needed
+    size_t offsetsArraySize = lookupTable_.tileOffsets.getSize();
+    if (offsets.size() < offsetsArraySize) {
+        offsets.resize(offsetsArraySize, 0);
     }
     lookupTable_.tileOffsets.upload(offsets);
 
     // Pointers: device pointers (as unsigned long long)
     if (!lookupTable_.tileValuePtrs.isInitialized()) {
         lookupTable_.tileValuePtrs.initialize<unsigned long long>(cu_, valuePtrs.size(), "tileValuePtrs");
+    } else if (lookupTable_.tileValuePtrs.getSize() < valuePtrs.size()) {
+        lookupTable_.tileValuePtrs.resize(valuePtrs.size());
+    }
+    size_t valuePtrsArraySize = lookupTable_.tileValuePtrs.getSize();
+    if (valuePtrs.size() < valuePtrsArraySize) {
+        valuePtrs.resize(valuePtrsArraySize, 0);
     }
     lookupTable_.tileValuePtrs.upload(valuePtrs);
 
     if (!lookupTable_.tileDerivPtrs.isInitialized()) {
         lookupTable_.tileDerivPtrs.initialize<unsigned long long>(cu_, derivPtrs.size(), "tileDerivPtrs");
+    } else if (lookupTable_.tileDerivPtrs.getSize() < derivPtrs.size()) {
+        lookupTable_.tileDerivPtrs.resize(derivPtrs.size());
+    }
+    size_t derivPtrsArraySize = lookupTable_.tileDerivPtrs.getSize();
+    if (derivPtrs.size() < derivPtrsArraySize) {
+        derivPtrs.resize(derivPtrsArraySize, 0);
     }
     lookupTable_.tileDerivPtrs.upload(derivPtrs);
 

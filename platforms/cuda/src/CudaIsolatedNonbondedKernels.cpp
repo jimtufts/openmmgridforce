@@ -37,7 +37,6 @@
 
 #include <cstring>
 #include <map>
-#include <iostream>
 
 using namespace GridForcePlugin;
 using namespace OpenMM;
@@ -235,7 +234,7 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     // Use fixed-point (unsigned long long) for deterministic accumulation
     int hessianSize = 3 * numAtoms;
     int numBlocks3x3 = numAtoms * numAtoms;  // One 3x3 block per atom pair (i,j)
-    if (hessianBuffer.getSize() != numBlocks3x3 * 9) {
+    if (!hessianBuffer.isInitialized() || hessianBuffer.getSize() != numBlocks3x3 * 9) {
         hessianBuffer.initialize<unsigned long long>(cu, numBlocks3x3 * 9, "isolatedNB_hessian");
     }
 
