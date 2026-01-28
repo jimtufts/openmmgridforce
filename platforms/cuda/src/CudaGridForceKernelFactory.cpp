@@ -4,8 +4,10 @@
 #include "CudaGridForceKernelFactory.h"
 #include "CudaGridForceKernels.h"
 #include "CudaIsolatedNonbondedKernels.h"
+#include "CudaGBSAGridForceKernels.h"
 #include "GridForce.h"
 #include "IsolatedNonbondedForce.h"
+#include "GBSAGridForce.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/internal/windowsExport.h"
 #include "openmm/internal/ContextImpl.h"
@@ -21,6 +23,7 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
         platform.registerKernelFactory(CalcGridForceKernel::Name(), factory);
         platform.registerKernelFactory(CalcIsolatedNonbondedForceKernel::Name(), factory);
         platform.registerKernelFactory(CalcBondedHessianKernel::Name(), factory);
+        platform.registerKernelFactory(CalcGBSAGridForceKernel::Name(), factory);
     }
     catch (...) {
     }
@@ -37,5 +40,7 @@ KernelImpl* CudaGridForceKernelFactory::createKernelImpl(std::string name, const
         return new CudaCalcIsolatedNonbondedForceKernel(name, platform, cu);
     if (name == CalcBondedHessianKernel::Name())
         return new CudaCalcBondedHessianKernel(name, platform, cu);
+    if (name == CalcGBSAGridForceKernel::Name())
+        return new CudaCalcGBSAGridForceKernel(name, platform, cu);
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

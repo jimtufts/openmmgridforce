@@ -1,14 +1,16 @@
 /**
  * CUDA implementation of grid force calculation.
  * Main kernel for computing forces on ligand atoms from interpolated grid values.
+ *
+ * This kernel supports multiple interpolation methods and inv_power transformations.
+ * For the base case (no inv_power), it uses the shared GridInterpolation library.
+ * For inv_power modes, it uses specialized inline code for correct chain rule handling.
  */
 
 #define DEBUG_GRIDFORCE 0
 
-#include "include/InterpolationBasis.cuh"
+#include "include/GridInterpolation.cuh"
 #include "include/HermiteBasis.cuh"
-#include "include/TricubicCoefficients.cuh"
-#include "include/TriquinticCoefficients.cuh"
 #include "include/InvPowerChainRule.cuh"
 
 extern "C" __global__ void computeGridForce(
@@ -71,6 +73,31 @@ extern "C" __global__ void computeGridForce(
                     pos.z >= 0.0f && pos.z <= gridCorner.z);
 
     if (isInside && scalingFactor != 0.0f) {
+        // =====================================================================
+        // Fast path: Use shared GridInterpolation library when no inv_power transformation
+        // =====================================================================
+        if (invPowerMode == 0) {
+            // No inv_power transformation - use shared library directly
+            float3 absPosition = make_float3(posOrig.x, posOrig.y, posOrig.z);
+
+            InterpolationResult result = interpolateGrid(
+                gridValues, gridDerivatives, gridCounts, gridSpacing,
+                originX, originY, originZ, absPosition,
+                interpolationMethod, true, true);
+
+            if (result.isInside) {
+                threadEnergy = scalingFactor * result.value;
+                atomForce.x = -scalingFactor * result.gradient.x;
+                atomForce.y = -scalingFactor * result.gradient.y;
+                atomForce.z = -scalingFactor * result.gradient.z;
+            }
+            // Fall through to force buffer accumulation below
+        }
+        else {
+        // =====================================================================
+        // Slow path: inv_power transformation requires specialized code
+        // =====================================================================
+
         // Calculate grid indices
         int ix = min(max((int)(pos.x / gridSpacing[0]), 0), gridCounts[0] - 2);
         int iy = min(max((int)(pos.y / gridSpacing[1]), 0), gridCounts[1] - 2);
@@ -87,7 +114,7 @@ extern "C" __global__ void computeGridForce(
 
 #if DEBUG_GRIDFORCE
         if (index == 0) {
-            printf("[KERNEL atom=0] ========== TRILINEAR INTERP ==========\n");
+            printf("[KERNEL atom=0] ========== INV_POWER INTERP ==========\n");
             printf("[KERNEL atom=0] invPower=%.6f, invPowerMode=%d\n", invPower, invPowerMode);
             printf("[KERNEL atom=0] scalingFactor=%.6f\n", scalingFactor);
             printf("[KERNEL atom=0] Position: (%.6f, %.6f, %.6f)\n", pos.x, pos.y, pos.z);
@@ -444,6 +471,7 @@ extern "C" __global__ void computeGridForce(
         //                threadEnergy, atomForce.x, atomForce.y, atomForce.z);
         //     }
         // }
+        } // End of invPowerMode != 0 branch
     }
     else {
         // Apply harmonic restraint outside grid (if enabled)

@@ -16,6 +16,7 @@
 namespace std {
   %template(pairii) pair<int,int>;
   %template(vectord) vector<double>;
+  %template(vectorf) vector<float>;
   %template(vectorddd) vector< vector< vector<double> > >;
   %template(vectori) vector<int>;
   %template(vectorii) vector < vector<int> >;
@@ -30,11 +31,14 @@ namespace std {
 %{
 #include "GridForceTypes.h"
 #include "GridData.h"
+#include "DesolvationGrid.h"
 #include "GridForce.h"
 #include "GridForceKernels.h"
 #include "CachedGridData.h"
 #include "IsolatedNonbondedForce.h"
 #include "IsolatedNonbondedForceKernels.h"
+#include "GBSAGridForce.h"
+#include "GBSAGridForceKernels.h"
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
 #include "OpenMM.h"
@@ -62,8 +66,9 @@ namespace std {
 
 using namespace OpenMM;
 
-// Declare shared_ptr support for GridData (must be outside namespace)
+// Declare shared_ptr support for GridData, DesolvationGrid (must be outside namespace)
 %shared_ptr(GridForcePlugin::GridData)
+%shared_ptr(GridForcePlugin::DesolvationGrid)
 
 %pythoncode %{
 def _openmm_GridForce_director_call(force):
@@ -168,6 +173,139 @@ public:
     // Setters for construction
     void setValues(const std::vector<double>& vals);
     void setDerivatives(const std::vector<double>& derivs);
+};
+
+/**
+ * DesolvationGrid holds HCT grid values and correction terms for GBSA.
+ * Used by GBSAGridForce for efficient grid-based solvation calculations.
+ */
+class DesolvationGrid {
+public:
+    // Physical constants
+    static const double DEFAULT_PROBE_RADIUS;   // 0.14 nm (water probe)
+    static const double DIELECTRIC_OFFSET;      // 0.009 nm
+    static const int NUM_DERIVATIVES;           // 27 derivatives per point
+
+    DesolvationGrid();
+    DesolvationGrid(int nx, int ny, int nz, double spacing,
+                    double probeRadius,
+                    const std::vector<double>& rThresholds,
+                    bool hasDerivatives = false);
+
+    static std::shared_ptr<DesolvationGrid> loadFromFile(const std::string& filename);
+    void saveToFile(const std::string& filename) const;
+
+    // Dimension accessors
+    int getNx() const;
+    int getNy() const;
+    int getNz() const;
+    %apply int& OUTPUT {int& nx};
+    %apply int& OUTPUT {int& ny};
+    %apply int& OUTPUT {int& nz};
+    void getCounts(int& nx, int& ny, int& nz) const;
+    %clear int& nx;
+    %clear int& ny;
+    %clear int& nz;
+
+    double getSpacing() const;
+
+    %apply double& OUTPUT {double& ox};
+    %apply double& OUTPUT {double& oy};
+    %apply double& OUTPUT {double& oz};
+    void getOrigin(double& ox, double& oy, double& oz) const;
+    %clear double& ox;
+    %clear double& oy;
+    %clear double& oz;
+    void setOrigin(double x, double y, double z);
+
+    // Grid parameters
+    double getProbeRadius() const;
+    int getNumBins() const;
+    const std::vector<double>& getRThresholds() const;
+    int getBinForRadius(double offsetRadius) const;
+
+    // Data accessors (float32 arrays for memory efficiency)
+    const std::vector<float>& getHctProbe() const;
+    const std::vector<float>& getCorrectionN() const;
+    const std::vector<float>& getCorrectionA() const;
+    const std::vector<float>& getCorrectionB() const;
+
+    // Memory info
+    size_t getMemoryBytes() const;
+    int getFloatsPerPoint() const;
+
+    // Derivative support for triquintic/tricubic interpolation
+    bool hasDerivatives() const;
+    void setHasDerivatives(bool hasDerivs);
+    int getNumDerivsPerPoint() const;
+
+    // Data setters for construction
+    void setHctProbe(const std::vector<float>& data);
+    void setCorrectionN(const std::vector<float>& data);
+    void setCorrectionA(const std::vector<float>& data);
+    void setCorrectionB(const std::vector<float>& data);
+};
+
+/**
+ * GBSAGridForce computes Generalized Born solvation using grid-based HCT.
+ */
+class GBSAGridForce : public OpenMM::Force {
+public:
+    // Constants
+    static const double OBC_ALPHA;
+    static const double OBC_BETA;
+    static const double OBC_GAMMA;
+    static const double DIELECTRIC_OFFSET;
+    static const double DEFAULT_SOLUTE_DIELECTRIC;
+    static const double DEFAULT_SOLVENT_DIELECTRIC;
+    static const double DEFAULT_SA_SURFACE_TENSION;
+
+    GBSAGridForce();
+
+    int getNumAtoms() const;
+    void setNumAtoms(int n);
+
+    void setParticles(const std::vector<int>& particles);
+    const std::vector<int>& getParticles() const;
+
+    void setAtomParameters(int index, double charge, double radius, double scaleFactor);
+    %apply double& OUTPUT {double& charge};
+    %apply double& OUTPUT {double& radius};
+    %apply double& OUTPUT {double& scaleFactor};
+    void getAtomParameters(int index, double& charge, double& radius, double& scaleFactor) const;
+    %clear double& charge;
+    %clear double& radius;
+    %clear double& scaleFactor;
+
+    void setDesolvationGrid(std::shared_ptr<DesolvationGrid> grid);
+    std::shared_ptr<DesolvationGrid> getDesolvationGrid() const;
+    void loadDesolvationGrid(const std::string& filename);
+
+    void addExclusion(int atom1, int atom2);
+    int getNumExclusions() const;
+    %apply int& OUTPUT {int& atom1};
+    %apply int& OUTPUT {int& atom2};
+    void getExclusionParticles(int index, int& atom1, int& atom2) const;
+    %clear int& atom1;
+    %clear int& atom2;
+
+    int addParticleGroup(const std::string& name, const std::vector<int>& particleIndices);
+    int getNumParticleGroups() const;
+
+    double getSoluteDielectric() const;
+    void setSoluteDielectric(double dielectric);
+    double getSolventDielectric() const;
+    void setSolventDielectric(double dielectric);
+
+    bool getIncludeSurfaceArea() const;
+    void setIncludeSurfaceArea(bool include);
+    double getSurfaceTension() const;
+    void setSurfaceTension(double tension);
+
+    double getGroupEnergy(int groupIndex) const;
+    std::vector<double> getGroupBornRadii(int groupIndex) const;
+
+    bool usesPeriodicBoundaryConditions() const;
 };
 
 class GridForce : public OpenMM::Force {
