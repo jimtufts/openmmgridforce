@@ -8,7 +8,7 @@
  *   0 - Trilinear (8 points, C0 continuity)
  *   1 - Cubic B-spline (64 points, C2 continuity)
  *   2 - Tricubic Lekien-Marsden (8 corners + derivatives, C1 continuity)
- *   3 - Triquintic Hermite (8 corners + 27 derivatives each, C4 continuity)
+ *   3 - Triquintic Hermite (8 corners + 27 derivatives each, C2 continuity)
  *
  * Usage:
  *   #include "GridInterpolation.cuh"
@@ -387,7 +387,7 @@ __device__ inline InterpolationResult tricubicInterpolate(
  * Triquintic Hermite interpolation (method 3).
  * Uses 8 corner points with 27 derivatives each (216 coefficients).
  * Requires precomputed analytical derivatives in gridDerivatives.
- * Provides C4 continuity (smoothest option).
+ * Provides C2 continuity (smoothest option).
  *
  * Derivative storage (RASPA3 order): gridDerivatives[deriv_idx * totalPoints + point_idx]
  */
@@ -530,6 +530,263 @@ __device__ inline InterpolationResult interpolateGrid(
         default:
             return trilinearInterpolate(gridValues, gridCounts, gridSpacing,
                                         originX, originY, originZ, position, computeGradient, divideBySpacing);
+    }
+}
+
+// Maximum number of grids for multi-grid interpolation (static allocation)
+#define MULTI_GRID_MAX 8
+
+/**
+ * Result of multi-grid interpolation containing values and gradients.
+ * Uses static allocation for CUDA efficiency.
+ */
+struct MultiGridResult {
+    float values[MULTI_GRID_MAX];      // Interpolated values
+    float3 gradients[MULTI_GRID_MAX];  // Gradients in real space (per nm)
+    int numGrids;                       // Actual number of grids used
+    bool isInside;                      // Whether query point was inside grid
+};
+
+/**
+ * Trilinear interpolation of multiple grids with gradients.
+ * Computes grid cell once and applies to all grids efficiently.
+ *
+ * @param gridValues      Array of grid pointers (up to MULTI_GRID_MAX)
+ * @param numGrids        Number of grids to interpolate
+ * @param gridCounts      Grid dimensions {nx, ny, nz}
+ * @param gridSpacing     Grid spacing {dx, dy, dz} in nm
+ * @param originX/Y/Z     Grid origin coordinates in nm
+ * @param position        Query position in absolute coordinates (nm)
+ * @return MultiGridResult with values and gradients for all grids
+ */
+__device__ inline MultiGridResult trilinearInterpolateMultipleWithGradients(
+    const float* const* gridValues,
+    int numGrids,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridSpacing,
+    float originX, float originY, float originZ,
+    float3 position)
+{
+    MultiGridResult result;
+    result.numGrids = numGrids;
+
+    // Initialize to zero
+    for (int g = 0; g < numGrids; g++) {
+        result.values[g] = 0.0f;
+        result.gradients[g] = make_float3(0.0f, 0.0f, 0.0f);
+    }
+
+    int ix, iy, iz;
+    float fx, fy, fz;
+    result.isInside = computeGridCell(position, gridCounts, gridSpacing,
+                                       originX, originY, originZ,
+                                       ix, iy, iz, fx, fy, fz);
+
+    if (!result.isInside) {
+        return result;
+    }
+
+    // Precompute complementary fractions
+    float ox = 1.0f - fx;
+    float oy = 1.0f - fy;
+    float oz = 1.0f - fz;
+
+    // Grid indexing
+    int nyz = gridCounts[1] * gridCounts[2];
+    int nz = gridCounts[2];
+
+    // Corner indices: c[i][j][k] where i,j,k ∈ {0,1}
+    int baseIndex = ix * nyz + iy * nz + iz;
+    int c000 = baseIndex;
+    int c001 = baseIndex + 1;
+    int c010 = baseIndex + nz;
+    int c011 = baseIndex + nz + 1;
+    int c100 = baseIndex + nyz;
+    int c101 = baseIndex + nyz + 1;
+    int c110 = baseIndex + nyz + nz;
+    int c111 = baseIndex + nyz + nz + 1;
+
+    // Inverse spacing for gradient conversion
+    float invSpacingX = 1.0f / gridSpacing[0];
+    float invSpacingY = 1.0f / gridSpacing[1];
+    float invSpacingZ = 1.0f / gridSpacing[2];
+
+    // Process each grid
+    for (int g = 0; g < numGrids; g++) {
+        const float* grid = gridValues[g];
+
+        // Load corner values
+        float v000 = grid[c000];
+        float v001 = grid[c001];
+        float v010 = grid[c010];
+        float v011 = grid[c011];
+        float v100 = grid[c100];
+        float v101 = grid[c101];
+        float v110 = grid[c110];
+        float v111 = grid[c111];
+
+        // Trilinear interpolation for value
+        // v = ox*oy*oz*v000 + ox*oy*fz*v001 + ox*fy*oz*v010 + ox*fy*fz*v011
+        //   + fx*oy*oz*v100 + fx*oy*fz*v101 + fx*fy*oz*v110 + fx*fy*fz*v111
+        float vmm = oz * v000 + fz * v001;  // v at (0, 0, z)
+        float vmp = oz * v010 + fz * v011;  // v at (0, 1, z)
+        float vpm = oz * v100 + fz * v101;  // v at (1, 0, z)
+        float vpp = oz * v110 + fz * v111;  // v at (1, 1, z)
+
+        float vm = oy * vmm + fy * vmp;     // v at (0, y, z)
+        float vp = oy * vpm + fy * vpp;     // v at (1, y, z)
+
+        result.values[g] = ox * vm + fx * vp;
+
+        // Analytical gradient in fractional coordinates
+        // dv/dfx = vp - vm
+        float dv_dfx = vp - vm;
+
+        // dv/dfy = ox*(vmp - vmm) + fx*(vpp - vpm)
+        float dv_dfy = ox * (vmp - vmm) + fx * (vpp - vpm);
+
+        // dv/dfz = ox*(oy*(v001-v000) + fy*(v011-v010)) + fx*(oy*(v101-v100) + fy*(v111-v110))
+        float dv_dfz = ox * (oy * (v001 - v000) + fy * (v011 - v010)) +
+                       fx * (oy * (v101 - v100) + fy * (v111 - v110));
+
+        // Convert to real-space gradients
+        result.gradients[g].x = dv_dfx * invSpacingX;
+        result.gradients[g].y = dv_dfy * invSpacingY;
+        result.gradients[g].z = dv_dfz * invSpacingZ;
+    }
+
+    return result;
+}
+
+/**
+ * B-spline interpolation of multiple grids with gradients.
+ * Uses 4x4x4 stencil for C2 continuous interpolation.
+ *
+ * @param gridValues      Array of grid pointers (up to MULTI_GRID_MAX)
+ * @param numGrids        Number of grids to interpolate
+ * @param gridCounts      Grid dimensions {nx, ny, nz}
+ * @param gridSpacing     Grid spacing {dx, dy, dz} in nm
+ * @param originX/Y/Z     Grid origin coordinates in nm
+ * @param position        Query position in absolute coordinates (nm)
+ * @return MultiGridResult with values and gradients for all grids
+ */
+__device__ inline MultiGridResult bsplineInterpolateMultipleWithGradients(
+    const float* const* gridValues,
+    int numGrids,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridSpacing,
+    float originX, float originY, float originZ,
+    float3 position)
+{
+    MultiGridResult result;
+    result.numGrids = numGrids;
+
+    // Initialize to zero
+    for (int g = 0; g < numGrids; g++) {
+        result.values[g] = 0.0f;
+        result.gradients[g] = make_float3(0.0f, 0.0f, 0.0f);
+    }
+
+    int ix, iy, iz;
+    float fx, fy, fz;
+    result.isInside = computeGridCell(position, gridCounts, gridSpacing,
+                                       originX, originY, originZ,
+                                       ix, iy, iz, fx, fy, fz);
+
+    if (!result.isInside) {
+        return result;
+    }
+
+    int nyz = gridCounts[1] * gridCounts[2];
+    int nz = gridCounts[2];
+
+    // Precompute B-spline basis functions and derivatives
+    float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+    float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+    float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+
+    float dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+    float dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+    float dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+
+    // Inverse spacing for gradient conversion
+    float invSpacingX = 1.0f / gridSpacing[0];
+    float invSpacingY = 1.0f / gridSpacing[1];
+    float invSpacingZ = 1.0f / gridSpacing[2];
+
+    // Loop over 4x4x4 stencil
+    for (int i = 0; i < 4; i++) {
+        int gx = min(max(ix - 1 + i, 0), gridCounts[0] - 1);
+        for (int j = 0; j < 4; j++) {
+            int gy = min(max(iy - 1 + j, 0), gridCounts[1] - 1);
+            for (int k = 0; k < 4; k++) {
+                int gz = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
+                int gridIdx = gx * nyz + gy * nz + gz;
+
+                float weight = bx[i] * by[j] * bz[k];
+                float dwdx = dbx[i] * by[j] * bz[k];
+                float dwdy = bx[i] * dby[j] * bz[k];
+                float dwdz = bx[i] * by[j] * dbz[k];
+
+                for (int g = 0; g < numGrids; g++) {
+                    float val = gridValues[g][gridIdx];
+                    result.values[g] += weight * val;
+                    result.gradients[g].x += dwdx * val;
+                    result.gradients[g].y += dwdy * val;
+                    result.gradients[g].z += dwdz * val;
+                }
+            }
+        }
+    }
+
+    // Convert gradients to real space
+    for (int g = 0; g < numGrids; g++) {
+        result.gradients[g].x *= invSpacingX;
+        result.gradients[g].y *= invSpacingY;
+        result.gradients[g].z *= invSpacingZ;
+    }
+
+    return result;
+}
+
+/**
+ * Generic multi-grid interpolation with gradients.
+ * Dispatches to appropriate method implementation.
+ *
+ * @param gridValues      Array of grid pointers (up to MULTI_GRID_MAX)
+ * @param numGrids        Number of grids to interpolate
+ * @param gridCounts      Grid dimensions {nx, ny, nz}
+ * @param gridSpacing     Grid spacing {dx, dy, dz} in nm
+ * @param originX/Y/Z     Grid origin coordinates in nm
+ * @param position        Query position in absolute coordinates (nm)
+ * @param method          0=trilinear, 1=bspline, 2=tricubic, 3=triquintic
+ * @return MultiGridResult with values and gradients for all grids
+ *
+ * Note: Methods 2 and 3 (tricubic/triquintic) require derivative grids
+ * and are not yet implemented for multi-grid case.
+ */
+__device__ inline MultiGridResult interpolateMultipleGridsWithGradients(
+    const float* const* gridValues,
+    int numGrids,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridSpacing,
+    float originX, float originY, float originZ,
+    float3 position,
+    int method)
+{
+    switch (method) {
+        case 1:
+            return bsplineInterpolateMultipleWithGradients(
+                gridValues, numGrids, gridCounts, gridSpacing,
+                originX, originY, originZ, position);
+        case 2:
+        case 3:
+            // Tricubic and triquintic multi-grid not yet implemented
+            // Fall through to trilinear for now
+        default:
+            return trilinearInterpolateMultipleWithGradients(
+                gridValues, numGrids, gridCounts, gridSpacing,
+                originX, originY, originZ, position);
     }
 }
 

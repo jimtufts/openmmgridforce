@@ -302,6 +302,9 @@ public:
     double getSurfaceTension() const;
     void setSurfaceTension(double tension);
 
+    int getInterpolationMethod() const;
+    void setInterpolationMethod(int method);
+
     double getGroupEnergy(int groupIndex) const;
     std::vector<double> getGroupBornRadii(int groupIndex) const;
 

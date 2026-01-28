@@ -24,7 +24,8 @@ GBSAGridForce::GBSAGridForce()
       soluteDielectric(DEFAULT_SOLUTE_DIELECTRIC),
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
       includeSurfaceArea(false),
-      surfaceTension(DEFAULT_SA_SURFACE_TENSION) {
+      surfaceTension(DEFAULT_SA_SURFACE_TENSION),
+      interpolationMethod(0) {
 }
 
 void GBSAGridForce::setNumAtoms(int n) {
@@ -127,6 +128,13 @@ void GBSAGridForce::setIncludeSurfaceArea(bool include) {
 
 void GBSAGridForce::setSurfaceTension(double tension) {
     surfaceTension = tension;
+}
+
+void GBSAGridForce::setInterpolationMethod(int method) {
+    if (method < 0 || method > 3) {
+        throw OpenMMException("GBSAGridForce: interpolationMethod must be 0 (trilinear), 1 (bspline), 2 (tricubic), or 3 (triquintic)");
+    }
+    interpolationMethod = method;
 }
 
 double GBSAGridForce::getGroupEnergy(int groupIndex) const {

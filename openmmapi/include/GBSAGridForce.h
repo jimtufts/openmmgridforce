@@ -197,6 +197,24 @@ public:
      */
     void setSurfaceTension(double tension);
 
+    // ========== Interpolation Method ==========
+
+    /**
+     * Get the interpolation method used for grid evaluation.
+     * 0 = Trilinear (default, C0 continuity)
+     * 1 = B-spline (C2 continuity, less accurate)
+     * 2 = Tricubic (C1 continuity, requires derivatives in grid)
+     * 3 = Triquintic Hermite (C2 continuity, requires derivatives in grid)
+     */
+    int getInterpolationMethod() const { return interpolationMethod; }
+
+    /**
+     * Set the interpolation method for grid evaluation.
+     * Methods 2 (tricubic) and 3 (triquintic) require the desolvation grid
+     * to contain precomputed analytical derivatives.
+     */
+    void setInterpolationMethod(int method);
+
     // ========== Energy Reporting ==========
 
     /**
@@ -247,6 +265,9 @@ private:
     // Surface area term
     bool includeSurfaceArea;
     double surfaceTension;
+
+    // Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
+    int interpolationMethod;
 
     // Cached group energies (populated by kernel)
     mutable std::vector<double> groupEnergies;

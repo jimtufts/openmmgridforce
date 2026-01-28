@@ -45,6 +45,9 @@ private:
     bool includeSurfaceArea;
     float surfaceTension;
 
+    // Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
+    int interpolationMethod;
+
     // Device arrays - grid data
     OpenMM::CudaArray gridCounts;
     OpenMM::CudaArray gridHctProbe;

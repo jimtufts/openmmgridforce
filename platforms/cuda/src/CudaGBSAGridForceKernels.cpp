@@ -23,7 +23,7 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
     : CalcGBSAGridForceKernel(name, platform), cu(cu), hasInitializedKernel(false),
       numAtoms(0), numParticleGroups(0), originX(0), originY(0), originZ(0),
       gridSpacing(0), probeRadius(0), numBins(0), prefactor(0),
-      includeSurfaceArea(false), surfaceTension(0),
+      includeSurfaceArea(false), surfaceTension(0), interpolationMethod(0),
       computeReceptorHCTKernel(nullptr), computeLigandHCTKernel(nullptr),
       computeBornRadiiKernel(nullptr), computeGBEnergyKernel(nullptr),
       computeSAEnergyKernel(nullptr),
@@ -67,6 +67,7 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
 
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
+    interpolationMethod = force.getInterpolationMethod();
 
     // Upload grid dimensions
     int nx, ny, nz;
@@ -263,7 +264,7 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
         &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
         &originX, &originY, &originZ, &gridSpacing, &probeRadius,
-        &numBins, &totalParticles, &numAtoms, &hctReceptorPtr
+        &numBins, &totalParticles, &numAtoms, &interpolationMethod, &hctReceptorPtr
     };
     cu.executeKernel(computeReceptorHCTKernel, receptorArgs, numBlocks * blockSize, blockSize);
 
@@ -340,7 +341,7 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
             &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
             &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
             &originX, &originY, &originZ, &gridSpacing, &probeRadius,
-            &numBins, &totalParticles, &numAtoms, &forcePtr, &paddedNumAtoms
+            &numBins, &totalParticles, &numAtoms, &interpolationMethod, &forcePtr, &paddedNumAtoms
         };
         cu.executeKernel(computeReceptorHCTGradientForceKernel, receptorGradArgs, numBlocks * blockSize, blockSize);
     }
@@ -379,6 +380,7 @@ void CudaCalcGBSAGridForceKernel::updateParametersInContext(ContextImpl& context
 
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
+    interpolationMethod = force.getInterpolationMethod();
 }
 
 double CudaCalcGBSAGridForceKernel::getGroupEnergy(int groupIndex) const {
