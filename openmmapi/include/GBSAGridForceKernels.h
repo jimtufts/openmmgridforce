@@ -62,6 +62,18 @@ public:
     virtual double getGroupEnergy(int groupIndex) const = 0;
 
     /**
+     * Get the ligand desolvation energy for a particle group.
+     * This is the GB + optional SA energy for the ligand only.
+     */
+    virtual double getGroupLigandDesolvationEnergy(int groupIndex) const = 0;
+
+    /**
+     * Get the receptor desolvation energy for a particle group.
+     * Returns 0 if receptor desolvation is not enabled.
+     */
+    virtual double getGroupReceptorDesolvationEnergy(int groupIndex) const = 0;
+
+    /**
      * Get the Born radii for atoms in a particle group.
      */
     virtual std::vector<double> getGroupBornRadii(int groupIndex) const = 0;

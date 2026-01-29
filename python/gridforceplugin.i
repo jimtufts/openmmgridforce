@@ -244,6 +244,15 @@ public:
     void setCorrectionN(const std::vector<float>& data);
     void setCorrectionA(const std::vector<float>& data);
     void setCorrectionB(const std::vector<float>& data);
+
+    // Receptor desolvation support
+    bool hasReceptorDesolvation() const;
+    bool hasReceptorDesolvDerivatives() const;
+    const std::vector<float>& getReceptorDesolvEnergy() const;
+    const std::vector<float>& getReceptorDesolvDerivatives() const;
+    float getReceptorDesolvProbeRadius() const;
+    void setReceptorDesolvationData(const std::vector<float>& data, float probeRadius);
+    void setReceptorDesolvDerivatives(const std::vector<float>& derivs);
 };
 
 /**
@@ -305,7 +314,14 @@ public:
     int getInterpolationMethod() const;
     void setInterpolationMethod(int method);
 
+    // Receptor desolvation support
+    bool getIncludeReceptorDesolvation() const;
+    void setIncludeReceptorDesolvation(bool include);
+
+    // Energy reporting
     double getGroupEnergy(int groupIndex) const;
+    double getGroupLigandDesolvationEnergy(int groupIndex) const;
+    double getGroupReceptorDesolvationEnergy(int groupIndex) const;
     std::vector<double> getGroupBornRadii(int groupIndex) const;
 
     bool usesPeriodicBoundaryConditions() const;

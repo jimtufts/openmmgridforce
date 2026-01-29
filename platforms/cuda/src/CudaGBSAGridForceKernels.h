@@ -26,6 +26,8 @@ public:
     double execute(OpenMM::ContextImpl& context, bool includeForces, bool includeEnergy) override;
     void updateParametersInContext(OpenMM::ContextImpl& context, const GBSAGridForce& force) override;
     double getGroupEnergy(int groupIndex) const override;
+    double getGroupLigandDesolvationEnergy(int groupIndex) const override;
+    double getGroupReceptorDesolvationEnergy(int groupIndex) const override;
     std::vector<double> getGroupBornRadii(int groupIndex) const override;
 
 private:
@@ -48,6 +50,11 @@ private:
     // Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
     int interpolationMethod;
 
+    // Receptor desolvation
+    bool includeReceptorDesolvation;
+    float receptorDesolvProbeRadius;
+    bool hasReceptorDesolvDerivatives;
+
     // Device arrays - grid data
     OpenMM::CudaArray gridCounts;
     OpenMM::CudaArray gridHctProbe;
@@ -57,6 +64,10 @@ private:
     OpenMM::CudaArray gridCorrectionA;
     OpenMM::CudaArray gridCorrectionB;
     OpenMM::CudaArray rThresholds;
+
+    // Device arrays - receptor desolvation grid
+    OpenMM::CudaArray gridReceptorDesolv;           // Receptor energy grid [n_points]
+    OpenMM::CudaArray gridReceptorDesolvDerivs;     // Derivatives [27 * n_points] (optional)
 
     // Device arrays - atom parameters
     OpenMM::CudaArray charges;
@@ -70,7 +81,9 @@ private:
     // Device arrays - particle groups
     OpenMM::CudaArray particleIndices;
     OpenMM::CudaArray groupStartIndex;
-    OpenMM::CudaArray groupEnergies;
+    OpenMM::CudaArray groupEnergies;              // Total energy (backwards compat)
+    OpenMM::CudaArray groupLigandEnergies;        // Ligand desolvation only
+    OpenMM::CudaArray groupReceptorEnergies;      // Receptor desolvation only
 
     // Device arrays - intermediate results
     OpenMM::CudaArray hctReceptor;   // HCT from grid interpolation
@@ -89,9 +102,12 @@ private:
     CUfunction accumulateBornRadiiDerivativesKernel;
     CUfunction computeHCTChainRuleForcesKernel;
     CUfunction computeReceptorHCTGradientForceKernel;
+    CUfunction computeReceptorDesolvationKernel;
 
     // Host-side results cache
     mutable std::vector<float> groupEnergiesHost;
+    mutable std::vector<float> groupLigandEnergiesHost;
+    mutable std::vector<float> groupReceptorEnergiesHost;
     mutable std::vector<std::vector<float>> groupBornRadiiHost;
 };
 

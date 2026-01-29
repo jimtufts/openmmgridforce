@@ -15,6 +15,7 @@ using namespace std;
 // Define static constexpr members
 constexpr char DesolvationGrid::MAGIC[8];
 constexpr uint32_t DesolvationGrid::VERSION;
+constexpr uint32_t DesolvationGrid::MIN_SUPPORTED_VERSION;
 constexpr uint32_t DesolvationGrid::HEADER_SIZE;
 constexpr double DesolvationGrid::DEFAULT_PROBE_RADIUS;
 constexpr double DesolvationGrid::DIELECTRIC_OFFSET;
@@ -27,7 +28,10 @@ DesolvationGrid::DesolvationGrid()
       m_probeRadius(DEFAULT_PROBE_RADIUS),
       m_nyz(0),
       m_numPoints(0),
-      m_hasDerivatives(false) {
+      m_hasDerivatives(false),
+      m_hasReceptorDesolv(false),
+      m_hasReceptorDesolvDerivs(false),
+      m_receptorDesolvProbeRadius(0.0f) {
 }
 
 DesolvationGrid::DesolvationGrid(int nx, int ny, int nz, double spacing,
@@ -41,7 +45,10 @@ DesolvationGrid::DesolvationGrid(int nx, int ny, int nz, double spacing,
       m_rThresholds(rThresholds),
       m_nyz(ny * nz),
       m_numPoints(nx * ny * nz),
-      m_hasDerivatives(hasDerivatives) {
+      m_hasDerivatives(hasDerivatives),
+      m_hasReceptorDesolv(false),
+      m_hasReceptorDesolvDerivs(false),
+      m_receptorDesolvProbeRadius(0.0f) {
 
     // Validate inputs
     if (nx <= 0 || ny <= 0 || nz <= 0) {
@@ -77,10 +84,20 @@ int DesolvationGrid::getBinForRadius(double offsetRadius) const {
 
 size_t DesolvationGrid::getMemoryBytes() const {
     // Arrays are already sized correctly based on hasDerivatives flag
-    return m_hctProbe.size() * sizeof(float) +
-           m_correctionN.size() * sizeof(float) +
-           m_correctionA.size() * sizeof(float) +
-           m_correctionB.size() * sizeof(float);
+    size_t bytes = m_hctProbe.size() * sizeof(float) +
+                   m_correctionN.size() * sizeof(float) +
+                   m_correctionA.size() * sizeof(float) +
+                   m_correctionB.size() * sizeof(float);
+
+    // Add receptor desolvation if present
+    if (m_hasReceptorDesolv) {
+        bytes += m_receptorDesolvEnergy.size() * sizeof(float);
+        if (m_hasReceptorDesolvDerivs) {
+            bytes += m_receptorDesolvDerivs.size() * sizeof(float);
+        }
+    }
+
+    return bytes;
 }
 
 void DesolvationGrid::setHctProbe(const vector<float>& data) {
@@ -115,6 +132,52 @@ void DesolvationGrid::setCorrectionB(vector<float>&& data) {
     m_correctionB = std::move(data);
 }
 
+void DesolvationGrid::setReceptorDesolvationData(const vector<float>& data, float probeRadius) {
+    if (data.size() != static_cast<size_t>(m_numPoints)) {
+        throw OpenMMException("DesolvationGrid: Receptor desolvation data size mismatch. Expected " +
+            to_string(m_numPoints) + " but got " + to_string(data.size()));
+    }
+    m_receptorDesolvEnergy = data;
+    m_receptorDesolvProbeRadius = probeRadius;
+    m_hasReceptorDesolv = true;
+}
+
+void DesolvationGrid::setReceptorDesolvationData(vector<float>&& data, float probeRadius) {
+    if (data.size() != static_cast<size_t>(m_numPoints)) {
+        throw OpenMMException("DesolvationGrid: Receptor desolvation data size mismatch. Expected " +
+            to_string(m_numPoints) + " but got " + to_string(data.size()));
+    }
+    m_receptorDesolvEnergy = std::move(data);
+    m_receptorDesolvProbeRadius = probeRadius;
+    m_hasReceptorDesolv = true;
+}
+
+void DesolvationGrid::setReceptorDesolvDerivatives(const vector<float>& derivs) {
+    if (!m_hasReceptorDesolv) {
+        throw OpenMMException("DesolvationGrid: Must set receptor desolvation data before derivatives");
+    }
+    size_t expectedSize = static_cast<size_t>(NUM_DERIVATIVES) * m_numPoints;
+    if (derivs.size() != expectedSize) {
+        throw OpenMMException("DesolvationGrid: Receptor desolvation derivatives size mismatch. Expected " +
+            to_string(expectedSize) + " but got " + to_string(derivs.size()));
+    }
+    m_receptorDesolvDerivs = derivs;
+    m_hasReceptorDesolvDerivs = true;
+}
+
+void DesolvationGrid::setReceptorDesolvDerivatives(vector<float>&& derivs) {
+    if (!m_hasReceptorDesolv) {
+        throw OpenMMException("DesolvationGrid: Must set receptor desolvation data before derivatives");
+    }
+    size_t expectedSize = static_cast<size_t>(NUM_DERIVATIVES) * m_numPoints;
+    if (derivs.size() != expectedSize) {
+        throw OpenMMException("DesolvationGrid: Receptor desolvation derivatives size mismatch. Expected " +
+            to_string(expectedSize) + " but got " + to_string(derivs.size()));
+    }
+    m_receptorDesolvDerivs = std::move(derivs);
+    m_hasReceptorDesolvDerivs = true;
+}
+
 shared_ptr<DesolvationGrid> DesolvationGrid::loadFromFile(const string& filename) {
     ifstream file(filename.c_str(), ios::binary);
     if (!file.is_open()) {
@@ -128,11 +191,12 @@ shared_ptr<DesolvationGrid> DesolvationGrid::loadFromFile(const string& filename
         throw OpenMMException("DesolvationGrid: Invalid file format (bad magic): " + filename);
     }
 
-    // Read version
+    // Read version (support v2 and v3)
     uint32_t version;
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
-    if (version != VERSION) {
-        throw OpenMMException("DesolvationGrid: Unsupported version: " + to_string(version));
+    if (version < MIN_SUPPORTED_VERSION || version > VERSION) {
+        throw OpenMMException("DesolvationGrid: Unsupported version: " + to_string(version) +
+            " (supported: " + to_string(MIN_SUPPORTED_VERSION) + "-" + to_string(VERSION) + ")");
     }
 
     // Read header size
@@ -200,6 +264,43 @@ shared_ptr<DesolvationGrid> DesolvationGrid::loadFromFile(const string& filename
 
     if (!file.good()) {
         throw OpenMMException("DesolvationGrid: Error reading file: " + filename);
+    }
+
+    // Read receptor desolvation data (v3+)
+    if (version >= 3) {
+        uint8_t hasReceptorDesolv;
+        file.read(reinterpret_cast<char*>(&hasReceptorDesolv), sizeof(uint8_t));
+
+        if (hasReceptorDesolv) {
+            // Read probe radius for receptor desolvation
+            float recDesolvProbeRadius;
+            file.read(reinterpret_cast<char*>(&recDesolvProbeRadius), sizeof(float));
+
+            // Read has derivatives flag
+            uint8_t hasRecDesolvDerivs;
+            file.read(reinterpret_cast<char*>(&hasRecDesolvDerivs), sizeof(uint8_t));
+
+            // Read energy values
+            grid->m_receptorDesolvEnergy.resize(numPoints);
+            file.read(reinterpret_cast<char*>(grid->m_receptorDesolvEnergy.data()),
+                      numPoints * sizeof(float));
+
+            grid->m_receptorDesolvProbeRadius = recDesolvProbeRadius;
+            grid->m_hasReceptorDesolv = true;
+
+            // Read derivatives if present
+            if (hasRecDesolvDerivs) {
+                size_t derivSize = static_cast<size_t>(NUM_DERIVATIVES) * numPoints;
+                grid->m_receptorDesolvDerivs.resize(derivSize);
+                file.read(reinterpret_cast<char*>(grid->m_receptorDesolvDerivs.data()),
+                          derivSize * sizeof(float));
+                grid->m_hasReceptorDesolvDerivs = true;
+            }
+
+            if (!file.good()) {
+                throw OpenMMException("DesolvationGrid: Error reading receptor desolvation data: " + filename);
+            }
+        }
     }
 
     file.close();
@@ -289,6 +390,29 @@ void DesolvationGrid::saveToFile(const string& filename) const {
     if (numBins > 8) {
         file.write(reinterpret_cast<const char*>(m_rThresholds.data() + 8),
                    (numBins - 8) * sizeof(double));
+    }
+
+    // Write receptor desolvation data (v3 feature)
+    uint8_t hasReceptorDesolv = m_hasReceptorDesolv ? 1 : 0;
+    file.write(reinterpret_cast<const char*>(&hasReceptorDesolv), sizeof(uint8_t));
+
+    if (m_hasReceptorDesolv) {
+        // Write probe radius
+        file.write(reinterpret_cast<const char*>(&m_receptorDesolvProbeRadius), sizeof(float));
+
+        // Write has derivatives flag
+        uint8_t hasRecDesolvDerivs = m_hasReceptorDesolvDerivs ? 1 : 0;
+        file.write(reinterpret_cast<const char*>(&hasRecDesolvDerivs), sizeof(uint8_t));
+
+        // Write energy values
+        file.write(reinterpret_cast<const char*>(m_receptorDesolvEnergy.data()),
+                   numPoints * sizeof(float));
+
+        // Write derivatives if present
+        if (m_hasReceptorDesolvDerivs) {
+            file.write(reinterpret_cast<const char*>(m_receptorDesolvDerivs.data()),
+                       m_receptorDesolvDerivs.size() * sizeof(float));
+        }
     }
 
     if (!file.good()) {

@@ -215,13 +215,40 @@ public:
      */
     void setInterpolationMethod(int method);
 
+    // ========== Receptor Desolvation ==========
+
+    /**
+     * Get whether receptor desolvation is enabled.
+     * Receptor desolvation computes the receptor's energy change due to ligand screening.
+     */
+    bool getIncludeReceptorDesolvation() const { return includeReceptorDesolvation; }
+
+    /**
+     * Set whether to include receptor desolvation energy.
+     * Requires the desolvation grid to have receptor desolvation data.
+     */
+    void setIncludeReceptorDesolvation(bool include);
+
     // ========== Energy Reporting ==========
 
     /**
-     * Get the GB energy for a specific particle group.
+     * Get the total GB energy for a specific particle group (ligand + receptor desolvation).
      * Only valid after calling getState() on the Context.
      */
     double getGroupEnergy(int groupIndex) const;
+
+    /**
+     * Get the ligand desolvation energy for a particle group (GB + optional SA).
+     * Only valid after calling getState() on the Context.
+     */
+    double getGroupLigandDesolvationEnergy(int groupIndex) const;
+
+    /**
+     * Get the receptor desolvation energy for a particle group.
+     * Returns 0 if receptor desolvation is not enabled.
+     * Only valid after calling getState() on the Context.
+     */
+    double getGroupReceptorDesolvationEnergy(int groupIndex) const;
 
     /**
      * Get the Born radii for atoms in a particle group.
@@ -266,11 +293,16 @@ private:
     bool includeSurfaceArea;
     double surfaceTension;
 
+    // Receptor desolvation
+    bool includeReceptorDesolvation;
+
     // Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
     int interpolationMethod;
 
     // Cached group energies (populated by kernel)
-    mutable std::vector<double> groupEnergies;
+    mutable std::vector<double> groupEnergies;           // Total energy (ligand + receptor)
+    mutable std::vector<double> groupLigandEnergies;     // Ligand desolvation only
+    mutable std::vector<double> groupReceptorEnergies;   // Receptor desolvation only
     mutable std::vector<std::vector<double>> groupBornRadii;
 
     friend class GBSAGridForceImpl;

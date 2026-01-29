@@ -25,6 +25,7 @@ GBSAGridForce::GBSAGridForce()
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
       includeSurfaceArea(false),
       surfaceTension(DEFAULT_SA_SURFACE_TENSION),
+      includeReceptorDesolvation(false),
       interpolationMethod(0) {
 }
 
@@ -137,11 +138,30 @@ void GBSAGridForce::setInterpolationMethod(int method) {
     interpolationMethod = method;
 }
 
+void GBSAGridForce::setIncludeReceptorDesolvation(bool include) {
+    includeReceptorDesolvation = include;
+}
+
 double GBSAGridForce::getGroupEnergy(int groupIndex) const {
     if (groupIndex < 0 || groupIndex >= static_cast<int>(groupEnergies.size())) {
         throw OpenMMException("GBSAGridForce: group energy not available (call getState first)");
     }
     return groupEnergies[groupIndex];
+}
+
+double GBSAGridForce::getGroupLigandDesolvationEnergy(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupLigandEnergies.size())) {
+        throw OpenMMException("GBSAGridForce: ligand desolvation energy not available (call getState first)");
+    }
+    return groupLigandEnergies[groupIndex];
+}
+
+double GBSAGridForce::getGroupReceptorDesolvationEnergy(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupReceptorEnergies.size())) {
+        // Return 0 if receptor desolvation not enabled (for backwards compatibility)
+        return 0.0;
+    }
+    return groupReceptorEnergies[groupIndex];
 }
 
 vector<double> GBSAGridForce::getGroupBornRadii(int groupIndex) const {
