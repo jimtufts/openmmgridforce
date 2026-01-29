@@ -30,6 +30,43 @@ public:
     double getGroupReceptorDesolvationEnergy(int groupIndex) const override;
     std::vector<double> getGroupBornRadii(int groupIndex) const override;
 
+    /**
+     * Generate the desolvation grid on GPU.
+     *
+     * @param receptorPositions  Receptor atom positions [numReceptorAtoms * 3]
+     * @param receptorRadii      Receptor intrinsic radii [numReceptorAtoms]
+     * @param receptorScales     Receptor OBC scale factors [numReceptorAtoms]
+     * @param numReceptorAtoms   Number of receptor atoms
+     * @param probeRadius        Probe intrinsic radius (nm)
+     * @param rThresholds        R thresholds for correction bins
+     * @param origin             Grid origin [3]
+     * @param counts             Grid dimensions [3]
+     * @param spacing            Grid spacing (uniform, nm)
+     * @param computeDerivatives Whether to compute derivatives (for tricubic/triquintic)
+     * @param gridHctProbe       Output: HCT values
+     * @param gridCorrectionN    Output: N correction values
+     * @param gridCorrectionA    Output: A correction values
+     * @param gridCorrectionB    Output: B correction values
+     * @param gridDerivatives    Output: Derivatives (if computeDerivatives=true)
+     */
+    void generateGrid(
+        const std::vector<double>& receptorPositions,
+        const std::vector<double>& receptorRadii,
+        const std::vector<double>& receptorScales,
+        int numReceptorAtoms,
+        double probeRadius,
+        const std::vector<double>& rThresholds,
+        const double* origin,
+        const int* counts,
+        double spacing,
+        bool computeDerivatives,
+        std::vector<float>& gridHctProbe,
+        std::vector<float>& gridCorrectionN,
+        std::vector<float>& gridCorrectionA,
+        std::vector<float>& gridCorrectionB,
+        std::vector<float>& gridDerivatives
+    );
+
 private:
     OpenMM::CudaContext& cu;
     bool hasInitializedKernel;
@@ -92,7 +129,7 @@ private:
     OpenMM::CudaArray dE_dR;         // dE/dR_born for chain rule
     OpenMM::CudaArray dE_dHCT;       // dE/dHCT for chain rule
 
-    // CUDA kernels
+    // CUDA kernels - runtime evaluation
     CUfunction computeReceptorHCTKernel;
     CUfunction computeLigandHCTKernel;
     CUfunction computeBornRadiiKernel;
@@ -103,6 +140,12 @@ private:
     CUfunction computeHCTChainRuleForcesKernel;
     CUfunction computeReceptorHCTGradientForceKernel;
     CUfunction computeReceptorDesolvationKernel;
+
+    // CUDA kernels - grid generation
+    CUfunction generateLigandHCTGridKernel;
+    CUfunction generateLigandHCTGridWithCorrectionsKernel;
+    CUfunction generateLigandHCTGridWithDerivativesKernel;
+    CUmodule generationModule;
 
     // Host-side results cache
     mutable std::vector<float> groupEnergiesHost;

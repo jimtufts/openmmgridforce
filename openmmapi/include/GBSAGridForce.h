@@ -113,6 +113,121 @@ public:
      */
     void loadDesolvationGrid(const std::string& filename);
 
+    // ========== Auto Grid Generation ==========
+
+    /**
+     * Enable/disable automatic grid generation.
+     * When enabled, the grid will be generated on GPU at initialization time
+     * using the receptor parameters set via setReceptorAtoms/setReceptorPositions.
+     */
+    void setAutoGenerateGrid(bool enable);
+
+    /**
+     * Get whether auto grid generation is enabled.
+     */
+    bool getAutoGenerateGrid() const { return autoGenerateGrid; }
+
+    /**
+     * Set receptor atom indices for grid generation.
+     */
+    void setReceptorAtoms(const std::vector<int>& atoms);
+
+    /**
+     * Get receptor atom indices.
+     */
+    const std::vector<int>& getReceptorAtoms() const { return receptorAtoms; }
+
+    /**
+     * Set receptor atom positions for grid generation.
+     * Positions should be in nm, flattened as [x0,y0,z0,x1,y1,z1,...].
+     */
+    void setReceptorPositions(const std::vector<double>& positions);
+
+    /**
+     * Get receptor positions.
+     */
+    const std::vector<double>& getReceptorPositions() const { return receptorPositions; }
+
+    /**
+     * Set receptor atom radii for grid generation.
+     */
+    void setReceptorRadii(const std::vector<double>& radii);
+
+    /**
+     * Get receptor radii.
+     */
+    const std::vector<double>& getReceptorRadii() const { return receptorRadii_; }
+
+    /**
+     * Set receptor atom scale factors for grid generation.
+     */
+    void setReceptorScaleFactors(const std::vector<double>& scales);
+
+    /**
+     * Get receptor scale factors.
+     */
+    const std::vector<double>& getReceptorScaleFactors() const { return receptorScaleFactors; }
+
+    /**
+     * Set the grid origin for auto-generation.
+     */
+    void setGridOrigin(double x, double y, double z);
+
+    /**
+     * Get the grid origin.
+     */
+    void getGridOrigin(double& x, double& y, double& z) const;
+
+    /**
+     * Set grid dimensions (counts) for auto-generation.
+     */
+    void setGridCounts(int nx, int ny, int nz);
+
+    /**
+     * Get grid dimensions.
+     */
+    void getGridCounts(int& nx, int& ny, int& nz) const;
+
+    /**
+     * Set grid spacing for auto-generation (nm).
+     */
+    void setGridSpacing(double spacing);
+
+    /**
+     * Get grid spacing.
+     */
+    double getGridSpacing() const { return gridSpacing_; }
+
+    /**
+     * Set probe radius for grid generation (nm).
+     */
+    void setProbeRadius(double radius);
+
+    /**
+     * Get probe radius.
+     */
+    double getProbeRadius() const { return probeRadius_; }
+
+    /**
+     * Set R thresholds for correction bins (nm).
+     */
+    void setRThresholds(const std::vector<double>& thresholds);
+
+    /**
+     * Get R thresholds.
+     */
+    const std::vector<double>& getRThresholds() const { return rThresholds_; }
+
+    /**
+     * Set whether to compute derivatives during grid generation (for tricubic/triquintic).
+     */
+    void setComputeGridDerivatives(bool compute);
+
+    /**
+     * Get whether derivatives will be computed.
+     */
+    bool getComputeGridDerivatives() const { return computeGridDerivatives; }
+
     // ========== Exclusions ==========
 
     /**
@@ -284,6 +399,19 @@ private:
 
     // Desolvation grid
     std::shared_ptr<DesolvationGrid> desolvationGrid;
+
+    // Auto grid generation
+    bool autoGenerateGrid;
+    std::vector<int> receptorAtoms;
+    std::vector<double> receptorPositions;
+    std::vector<double> receptorRadii_;
+    std::vector<double> receptorScaleFactors;
+    double gridOrigin[3];
+    int gridCounts_[3];
+    double gridSpacing_;
+    double probeRadius_;
+    std::vector<double> rThresholds_;
+    bool computeGridDerivatives;
 
     // Solvent parameters
     double soluteDielectric;

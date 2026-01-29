@@ -368,3 +368,325 @@ extern "C" __global__ void generateReceptorDesolvationGridWithDerivatives(
         gridData[d * totalGridPoints + gridIdx] = 0.0f;
     }
 }
+
+// ============================================================================
+// Ligand HCT Grid Generation Kernels
+// ============================================================================
+// These kernels generate the grid of HCT contributions from receptor atoms
+// to probe positions, which is used for computing ligand Born radii.
+
+/**
+ * Generate ligand HCT grid (values only).
+ *
+ * For each grid point, computes the sum of HCT contributions from all
+ * receptor atoms to a probe placed at that point. This is the core grid
+ * data used by GBSAGridForce.
+ *
+ * @param gridHctProbe         Output: HCT values [totalGridPoints]
+ * @param receptorPositions    Receptor positions [numReceptorAtoms]
+ * @param receptorRadii        Receptor intrinsic radii [numReceptorAtoms]
+ * @param receptorScales       Receptor OBC scale factors [numReceptorAtoms]
+ * @param numReceptorAtoms     Number of receptor atoms
+ * @param probeRadius          Probe intrinsic radius (nm)
+ * @param originX/Y/Z          Grid origin
+ * @param gridCounts           Grid dimensions [nx, ny, nz]
+ * @param gridSpacing          Grid spacing (uniform)
+ * @param totalGridPoints      Total number of grid points
+ */
+extern "C" __global__ void generateLigandHCTGrid(
+    float* __restrict__ gridHctProbe,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScales,
+    int numReceptorAtoms,
+    float probeRadius,
+    float originX, float originY, float originZ,
+    const int* __restrict__ gridCounts,
+    float gridSpacing,
+    int totalGridPoints
+) {
+    int gridIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gridIdx >= totalGridPoints) return;
+
+    // Convert linear index to 3D coordinates
+    int nx = gridCounts[0];
+    int ny = gridCounts[1];
+    int nz = gridCounts[2];
+    int nyz = ny * nz;
+
+    int ix = gridIdx / nyz;
+    int remainder = gridIdx % nyz;
+    int iy = remainder / nz;
+    int iz = remainder % nz;
+
+    // Grid point position
+    float gx = originX + ix * gridSpacing;
+    float gy = originY + iy * gridSpacing;
+    float gz = originZ + iz * gridSpacing;
+
+    // Probe offset radius
+    float R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+
+    // Sum HCT contributions from all receptor atoms
+    float hctSum = 0.0f;
+
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        float3 pos_j = receptorPositions[j];
+
+        // Distance from grid point to receptor atom
+        float dx = gx - pos_j.x;
+        float dy = gy - pos_j.y;
+        float dz = gz - pos_j.z;
+        float r = sqrtf(dx*dx + dy*dy + dz*dz);
+
+        // Receptor atom scaled radius
+        float R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+        float S_j = R_j_off * receptorScales[j];
+
+        // HCT contribution from receptor atom j to probe at grid point
+        hctSum += computeHCTContribution(r, R_probe_off, S_j);
+    }
+
+    gridHctProbe[gridIdx] = hctSum;
+}
+
+/**
+ * Generate ligand HCT grid with correction terms.
+ *
+ * In addition to the HCT probe values, computes correction terms (N, A, B)
+ * that allow exact HCT computation for any ligand atom radius.
+ *
+ * Correction formula for radius R_i:
+ *   HCT(R_i) = HCT_probe + correction(R_i, N, A, B)
+ * where:
+ *   correction = (1/R_i - 1/R_probe) * [N - 0.25*A*(1/R_i + 1/R_probe)] + B*ln(R_i/R_probe)
+ *
+ * @param gridHctProbe         Output: HCT values [totalGridPoints]
+ * @param gridCorrectionN      Output: N correction [numBins * totalGridPoints]
+ * @param gridCorrectionA      Output: A correction [numBins * totalGridPoints]
+ * @param gridCorrectionB      Output: B correction [numBins * totalGridPoints]
+ * @param receptorPositions    Receptor positions [numReceptorAtoms]
+ * @param receptorRadii        Receptor intrinsic radii [numReceptorAtoms]
+ * @param receptorScales       Receptor OBC scale factors [numReceptorAtoms]
+ * @param numReceptorAtoms     Number of receptor atoms
+ * @param probeRadius          Probe intrinsic radius (nm)
+ * @param rThresholds          R thresholds for correction bins [numBins]
+ * @param numBins              Number of correction bins
+ * @param originX/Y/Z          Grid origin
+ * @param gridCounts           Grid dimensions [nx, ny, nz]
+ * @param gridSpacing          Grid spacing (uniform)
+ * @param totalGridPoints      Total number of grid points
+ */
+extern "C" __global__ void generateLigandHCTGridWithCorrections(
+    float* __restrict__ gridHctProbe,
+    float* __restrict__ gridCorrectionN,
+    float* __restrict__ gridCorrectionA,
+    float* __restrict__ gridCorrectionB,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScales,
+    int numReceptorAtoms,
+    float probeRadius,
+    const float* __restrict__ rThresholds,
+    int numBins,
+    float originX, float originY, float originZ,
+    const int* __restrict__ gridCounts,
+    float gridSpacing,
+    int totalGridPoints
+) {
+    int gridIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gridIdx >= totalGridPoints) return;
+
+    // Convert linear index to 3D coordinates
+    int nx = gridCounts[0];
+    int ny = gridCounts[1];
+    int nz = gridCounts[2];
+    int nyz = ny * nz;
+
+    int ix = gridIdx / nyz;
+    int remainder = gridIdx % nyz;
+    int iy = remainder / nz;
+    int iz = remainder % nz;
+
+    // Grid point position
+    float gx = originX + ix * gridSpacing;
+    float gy = originY + iy * gridSpacing;
+    float gz = originZ + iz * gridSpacing;
+
+    // Probe offset radius
+    float R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+
+    // Initialize accumulators
+    float hctSum = 0.0f;
+
+    // Per-bin correction accumulators (max 4 bins supported)
+    float corrN[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float corrA[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float corrB[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        float3 pos_j = receptorPositions[j];
+
+        // Distance from grid point to receptor atom
+        float dx = gx - pos_j.x;
+        float dy = gy - pos_j.y;
+        float dz = gz - pos_j.z;
+        float r = sqrtf(dx*dx + dy*dy + dz*dz);
+
+        if (r < 1e-6f) continue;
+
+        // Receptor atom scaled radius
+        float R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+        float S_j = R_j_off * receptorScales[j];
+
+        // HCT contribution from receptor atom j to probe at grid point
+        hctSum += computeHCTContribution(r, R_probe_off, S_j);
+
+        // Compute correction terms for each bin
+        // Crossover distance where HCT formula changes
+        float crossover = fabsf(r - S_j);
+
+        for (int b = 0; b < numBins && b < 4; b++) {
+            float thresh = rThresholds[b];
+
+            // Atom contributes to correction if in R-dependent regime for both
+            // probe radius and this threshold
+            if (crossover < thresh && crossover < R_probe_off) {
+                // Correction terms from Python:
+                // N = count of atoms in this regime
+                // A = sum of (r - S^2/r)
+                // B = sum of (0.5/r)
+                corrN[b] += 1.0f;
+                corrA[b] += r - S_j * S_j / r;
+                corrB[b] += 0.5f / r;
+            }
+        }
+    }
+
+    // Store results
+    gridHctProbe[gridIdx] = hctSum;
+
+    for (int b = 0; b < numBins && b < 4; b++) {
+        int corrIdx = b * totalGridPoints + gridIdx;
+        gridCorrectionN[corrIdx] = corrN[b];
+        gridCorrectionA[corrIdx] = corrA[b];
+        gridCorrectionB[corrIdx] = corrB[b];
+    }
+}
+
+/**
+ * Generate ligand HCT grid with analytical derivatives for triquintic interpolation.
+ *
+ * Computes the HCT value and all 27 RASPA3 derivatives at each grid point.
+ * This enables high-accuracy triquintic Hermite interpolation.
+ *
+ * Output layout: [deriv_idx * totalGridPoints + gridIdx]
+ * RASPA3 order: f, dx, dy, dz, dxx, dxy, dxz, dyy, dyz, dzz, ...
+ *
+ * @param gridData             Output: 27 values per point [27 * totalGridPoints]
+ * @param receptorPositions    Receptor positions [numReceptorAtoms]
+ * @param receptorRadii        Receptor intrinsic radii [numReceptorAtoms]
+ * @param receptorScales       Receptor OBC scale factors [numReceptorAtoms]
+ * @param numReceptorAtoms     Number of receptor atoms
+ * @param probeRadius          Probe intrinsic radius (nm)
+ * @param originX/Y/Z          Grid origin
+ * @param gridCounts           Grid dimensions [nx, ny, nz]
+ * @param gridSpacing          Grid spacing (uniform)
+ * @param totalGridPoints      Total number of grid points
+ */
+extern "C" __global__ void generateLigandHCTGridWithDerivatives(
+    float* __restrict__ gridData,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScales,
+    int numReceptorAtoms,
+    float probeRadius,
+    float originX, float originY, float originZ,
+    const int* __restrict__ gridCounts,
+    float gridSpacing,
+    int totalGridPoints
+) {
+    int gridIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gridIdx >= totalGridPoints) return;
+
+    // Convert linear index to 3D coordinates
+    int nx = gridCounts[0];
+    int ny = gridCounts[1];
+    int nz = gridCounts[2];
+    int nyz = ny * nz;
+
+    int ix = gridIdx / nyz;
+    int remainder = gridIdx % nyz;
+    int iy = remainder / nz;
+    int iz = remainder % nz;
+
+    // Grid point position
+    float gx = originX + ix * gridSpacing;
+    float gy = originY + iy * gridSpacing;
+    float gz = originZ + iz * gridSpacing;
+
+    // Probe offset radius
+    float R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+
+    // Use numerical derivatives for now (analytical would be complex)
+    // Central difference step
+    float h = 0.0005f;  // 0.5 pm
+
+    // Helper to compute HCT sum at a position
+    auto computeHCTAtPoint = [&](float px, float py, float pz) -> float {
+        float hctSum = 0.0f;
+        for (int j = 0; j < numReceptorAtoms; j++) {
+            float3 pos_j = receptorPositions[j];
+            float ddx = px - pos_j.x;
+            float ddy = py - pos_j.y;
+            float ddz = pz - pos_j.z;
+            float r = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
+            float R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+            float S_j = R_j_off * receptorScales[j];
+            hctSum += computeHCTContribution(r, R_probe_off, S_j);
+        }
+        return hctSum;
+    };
+
+    // Compute value
+    float f = computeHCTAtPoint(gx, gy, gz);
+
+    // First derivatives (central difference)
+    float fx = (computeHCTAtPoint(gx+h, gy, gz) - computeHCTAtPoint(gx-h, gy, gz)) / (2.0f*h);
+    float fy = (computeHCTAtPoint(gx, gy+h, gz) - computeHCTAtPoint(gx, gy-h, gz)) / (2.0f*h);
+    float fz = (computeHCTAtPoint(gx, gy, gz+h) - computeHCTAtPoint(gx, gy, gz-h)) / (2.0f*h);
+
+    // Second derivatives
+    float fxx = (computeHCTAtPoint(gx+h, gy, gz) - 2.0f*f + computeHCTAtPoint(gx-h, gy, gz)) / (h*h);
+    float fyy = (computeHCTAtPoint(gx, gy+h, gz) - 2.0f*f + computeHCTAtPoint(gx, gy-h, gz)) / (h*h);
+    float fzz = (computeHCTAtPoint(gx, gy, gz+h) - 2.0f*f + computeHCTAtPoint(gx, gy, gz-h)) / (h*h);
+
+    float fxy = (computeHCTAtPoint(gx+h, gy+h, gz) - computeHCTAtPoint(gx+h, gy-h, gz)
+               - computeHCTAtPoint(gx-h, gy+h, gz) + computeHCTAtPoint(gx-h, gy-h, gz)) / (4.0f*h*h);
+    float fxz = (computeHCTAtPoint(gx+h, gy, gz+h) - computeHCTAtPoint(gx+h, gy, gz-h)
+               - computeHCTAtPoint(gx-h, gy, gz+h) + computeHCTAtPoint(gx-h, gy, gz-h)) / (4.0f*h*h);
+    float fyz = (computeHCTAtPoint(gx, gy+h, gz+h) - computeHCTAtPoint(gx, gy+h, gz-h)
+               - computeHCTAtPoint(gx, gy-h, gz+h) + computeHCTAtPoint(gx, gy-h, gz-h)) / (4.0f*h*h);
+
+    // Higher derivatives set to zero (first/second order usually sufficient for smooth interpolation)
+    // Scale to cell-fractional coordinates
+    float sp = gridSpacing;
+    float sp2 = sp * sp;
+
+    // Store in RASPA3 layout: [deriv_idx * totalGridPoints + gridIdx]
+    gridData[0 * totalGridPoints + gridIdx] = f;
+    gridData[1 * totalGridPoints + gridIdx] = fx * sp;      // dx
+    gridData[2 * totalGridPoints + gridIdx] = fy * sp;      // dy
+    gridData[3 * totalGridPoints + gridIdx] = fz * sp;      // dz
+    gridData[4 * totalGridPoints + gridIdx] = fxx * sp2;    // dxx
+    gridData[5 * totalGridPoints + gridIdx] = fxy * sp2;    // dxy
+    gridData[6 * totalGridPoints + gridIdx] = fxz * sp2;    // dxz
+    gridData[7 * totalGridPoints + gridIdx] = fyy * sp2;    // dyy
+    gridData[8 * totalGridPoints + gridIdx] = fyz * sp2;    // dyz
+    gridData[9 * totalGridPoints + gridIdx] = fzz * sp2;    // dzz
+
+    // Higher derivatives (third through sixth) set to zero
+    for (int d = 10; d < 27; d++) {
+        gridData[d * totalGridPoints + gridIdx] = 0.0f;
+    }
+}

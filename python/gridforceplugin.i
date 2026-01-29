@@ -324,6 +324,52 @@ public:
     double getGroupReceptorDesolvationEnergy(int groupIndex) const;
     std::vector<double> getGroupBornRadii(int groupIndex) const;
 
+    // Auto grid generation
+    void setAutoGenerateGrid(bool enable);
+    bool getAutoGenerateGrid() const;
+
+    void setReceptorAtoms(const std::vector<int>& atoms);
+    const std::vector<int>& getReceptorAtoms() const;
+
+    void setReceptorPositions(const std::vector<double>& positions);
+    const std::vector<double>& getReceptorPositions() const;
+
+    void setReceptorRadii(const std::vector<double>& radii);
+    const std::vector<double>& getReceptorRadii() const;
+
+    void setReceptorScaleFactors(const std::vector<double>& scales);
+    const std::vector<double>& getReceptorScaleFactors() const;
+
+    void setGridOrigin(double x, double y, double z);
+    %apply double& OUTPUT {double& x};
+    %apply double& OUTPUT {double& y};
+    %apply double& OUTPUT {double& z};
+    void getGridOrigin(double& x, double& y, double& z) const;
+    %clear double& x;
+    %clear double& y;
+    %clear double& z;
+
+    void setGridCounts(int nx, int ny, int nz);
+    %apply int& OUTPUT {int& nx};
+    %apply int& OUTPUT {int& ny};
+    %apply int& OUTPUT {int& nz};
+    void getGridCounts(int& nx, int& ny, int& nz) const;
+    %clear int& nx;
+    %clear int& ny;
+    %clear int& nz;
+
+    void setGridSpacing(double spacing);
+    double getGridSpacing() const;
+
+    void setProbeRadius(double radius);
+    double getProbeRadius() const;
+
+    void setRThresholds(const std::vector<double>& thresholds);
+    const std::vector<double>& getRThresholds() const;
+
+    void setComputeGridDerivatives(bool compute);
+    bool getComputeGridDerivatives() const;
+
     bool usesPeriodicBoundaryConditions() const;
 };
 

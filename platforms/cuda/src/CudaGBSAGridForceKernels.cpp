@@ -33,7 +33,11 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
       accumulateBornRadiiDerivativesKernel(nullptr),
       computeHCTChainRuleForcesKernel(nullptr),
       computeReceptorHCTGradientForceKernel(nullptr),
-      computeReceptorDesolvationKernel(nullptr) {
+      computeReceptorDesolvationKernel(nullptr),
+      generateLigandHCTGridKernel(nullptr),
+      generateLigandHCTGridWithCorrectionsKernel(nullptr),
+      generateLigandHCTGridWithDerivativesKernel(nullptr),
+      generationModule(nullptr) {
 }
 
 CudaCalcGBSAGridForceKernel::~CudaCalcGBSAGridForceKernel() {
@@ -49,6 +53,66 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
     }
 
     auto grid = force.getDesolvationGrid();
+
+    // Auto-generate grid if enabled and no grid is set
+    if (force.getAutoGenerateGrid() && !grid) {
+        // Validate generation parameters
+        int nx, ny, nz;
+        force.getGridCounts(nx, ny, nz);
+        if (nx <= 0 || ny <= 0 || nz <= 0) {
+            throw OpenMMException("GBSAGridForce: grid counts must be set for auto-generation");
+        }
+
+        const auto& recPos = force.getReceptorPositions();
+        const auto& recRadii = force.getReceptorRadii();
+        const auto& recScales = force.getReceptorScaleFactors();
+        int numRecAtoms = static_cast<int>(recRadii.size());
+
+        if (recPos.size() != static_cast<size_t>(numRecAtoms * 3)) {
+            throw OpenMMException("GBSAGridForce: receptor positions size must be 3 * numReceptorAtoms");
+        }
+        if (recScales.size() != static_cast<size_t>(numRecAtoms)) {
+            throw OpenMMException("GBSAGridForce: receptor scale factors size must match numReceptorAtoms");
+        }
+
+        double ox, oy, oz;
+        force.getGridOrigin(ox, oy, oz);
+        double origin[3] = {ox, oy, oz};
+        int counts[3] = {nx, ny, nz};
+
+        // Generate grid on GPU
+        vector<float> hctProbe, corrN, corrA, corrB, derivatives;
+        generateGrid(recPos, recRadii, recScales, numRecAtoms,
+                     force.getProbeRadius(), force.getRThresholds(),
+                     origin, counts, force.getGridSpacing(),
+                     force.getComputeGridDerivatives(),
+                     hctProbe, corrN, corrA, corrB, derivatives);
+
+        // Create DesolvationGrid from generated data
+        const auto& thresholds = force.getRThresholds();
+        bool hasDerivs = force.getComputeGridDerivatives() && !derivatives.empty();
+        grid = make_shared<DesolvationGrid>(nx, ny, nz,
+                                            force.getGridSpacing(),
+                                            force.getProbeRadius(),
+                                            vector<double>(thresholds.begin(), thresholds.end()),
+                                            hasDerivs);
+        grid->setOrigin(ox, oy, oz);
+
+        // Set grid data
+        if (hasDerivs) {
+            // When derivatives are present, setHctProbe expects the full 27*n_points array
+            grid->setHctProbe(derivatives);
+        } else {
+            grid->setHctProbe(hctProbe);
+        }
+        grid->setCorrectionN(corrN);
+        grid->setCorrectionA(corrA);
+        grid->setCorrectionB(corrB);
+
+        // Store grid on force (const_cast needed since force is const)
+        const_cast<GBSAGridForce&>(force).setDesolvationGrid(grid);
+    }
+
     if (!grid) {
         throw OpenMMException("GBSAGridForce: no desolvation grid set");
     }
@@ -517,4 +581,176 @@ vector<double> CudaCalcGBSAGridForceKernel::getGroupBornRadii(int groupIndex) co
     vector<double> result(groupBornRadiiHost[groupIndex].begin(),
                           groupBornRadiiHost[groupIndex].end());
     return result;
+}
+
+void CudaCalcGBSAGridForceKernel::generateGrid(
+    const vector<double>& receptorPositions,
+    const vector<double>& receptorRadii,
+    const vector<double>& receptorScales,
+    int numReceptorAtoms,
+    double probeRadiusIn,
+    const vector<double>& rThresholdsIn,
+    const double* origin,
+    const int* counts,
+    double spacing,
+    bool computeDerivatives,
+    vector<float>& outHctProbe,
+    vector<float>& outCorrectionN,
+    vector<float>& outCorrectionA,
+    vector<float>& outCorrectionB,
+    vector<float>& outDerivatives
+) {
+    cu.setAsCurrent();
+
+    // Validate input
+    if (receptorPositions.size() != static_cast<size_t>(numReceptorAtoms * 3)) {
+        throw OpenMMException("GBSAGridForce: receptorPositions size must be 3 * numReceptorAtoms");
+    }
+
+    int nx = counts[0];
+    int ny = counts[1];
+    int nz = counts[2];
+    int totalGridPoints = nx * ny * nz;
+    int numBinsIn = static_cast<int>(rThresholdsIn.size());
+
+    // Load kernel module if not already done
+    if (generationModule == nullptr) {
+        generationModule = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+        generateLigandHCTGridKernel = cu.getKernel(generationModule, "generateLigandHCTGrid");
+        generateLigandHCTGridWithCorrectionsKernel = cu.getKernel(generationModule, "generateLigandHCTGridWithCorrections");
+        generateLigandHCTGridWithDerivativesKernel = cu.getKernel(generationModule, "generateLigandHCTGridWithDerivatives");
+    }
+
+    // Convert to float arrays
+    vector<float3> positionsF(numReceptorAtoms);
+    vector<float> radiiF(numReceptorAtoms);
+    vector<float> scalesF(numReceptorAtoms);
+
+    for (int i = 0; i < numReceptorAtoms; i++) {
+        positionsF[i] = make_float3(
+            static_cast<float>(receptorPositions[i*3]),
+            static_cast<float>(receptorPositions[i*3 + 1]),
+            static_cast<float>(receptorPositions[i*3 + 2])
+        );
+        radiiF[i] = static_cast<float>(receptorRadii[i]);
+        scalesF[i] = static_cast<float>(receptorScales[i]);
+    }
+
+    vector<float> thresholdsF(numBinsIn);
+    for (int i = 0; i < numBinsIn; i++) {
+        thresholdsF[i] = static_cast<float>(rThresholdsIn[i]);
+    }
+
+    float originXf = static_cast<float>(origin[0]);
+    float originYf = static_cast<float>(origin[1]);
+    float originZf = static_cast<float>(origin[2]);
+    float spacingF = static_cast<float>(spacing);
+    float probeRadiusF = static_cast<float>(probeRadiusIn);
+
+    // Allocate GPU memory
+    CudaArray d_positions, d_radii, d_scales, d_thresholds, d_counts;
+    CudaArray d_hctProbe, d_corrN, d_corrA, d_corrB, d_derivatives;
+
+    d_positions.initialize<float3>(cu, numReceptorAtoms, "genRecPositions");
+    d_radii.initialize<float>(cu, numReceptorAtoms, "genRecRadii");
+    d_scales.initialize<float>(cu, numReceptorAtoms, "genRecScales");
+    d_thresholds.initialize<float>(cu, numBinsIn, "genThresholds");
+    d_counts.initialize<int>(cu, 3, "genCounts");
+
+    d_positions.upload(positionsF);
+    d_radii.upload(radiiF);
+    d_scales.upload(scalesF);
+    d_thresholds.upload(thresholdsF);
+    vector<int> countsVec = {nx, ny, nz};
+    d_counts.upload(countsVec);
+
+    // Allocate output arrays
+    d_hctProbe.initialize<float>(cu, totalGridPoints, "genHctProbe");
+    d_corrN.initialize<float>(cu, numBinsIn * totalGridPoints, "genCorrN");
+    d_corrA.initialize<float>(cu, numBinsIn * totalGridPoints, "genCorrA");
+    d_corrB.initialize<float>(cu, numBinsIn * totalGridPoints, "genCorrB");
+
+    int blockSize = 256;
+    int numBlocks = (totalGridPoints + blockSize - 1) / blockSize;
+
+    if (computeDerivatives) {
+        // Generate with 27 derivatives per point
+        d_derivatives.initialize<float>(cu, 27 * totalGridPoints, "genDerivatives");
+
+        void* args[] = {
+            &d_derivatives.getDevicePointer(),
+            &d_positions.getDevicePointer(),
+            &d_radii.getDevicePointer(),
+            &d_scales.getDevicePointer(),
+            &numReceptorAtoms,
+            &probeRadiusF,
+            &originXf, &originYf, &originZf,
+            &d_counts.getDevicePointer(),
+            &spacingF,
+            &totalGridPoints
+        };
+        cu.executeKernel(generateLigandHCTGridWithDerivativesKernel, args, numBlocks * blockSize, blockSize);
+
+        // Download derivatives (includes value at index 0)
+        outDerivatives.resize(27 * totalGridPoints);
+        d_derivatives.download(outDerivatives);
+
+        // Extract HCT values from derivative array (index 0 for each point)
+        outHctProbe.resize(totalGridPoints);
+        for (int i = 0; i < totalGridPoints; i++) {
+            outHctProbe[i] = outDerivatives[i];  // First derivative plane is the value
+        }
+
+        // Also compute correction grids (always needed, use separate kernel)
+        void* corrArgs[] = {
+            &d_hctProbe.getDevicePointer(),
+            &d_corrN.getDevicePointer(),
+            &d_corrA.getDevicePointer(),
+            &d_corrB.getDevicePointer(),
+            &d_positions.getDevicePointer(),
+            &d_radii.getDevicePointer(),
+            &d_scales.getDevicePointer(),
+            &numReceptorAtoms,
+            &probeRadiusF,
+            &d_thresholds.getDevicePointer(),
+            &numBinsIn,
+            &originXf, &originYf, &originZf,
+            &d_counts.getDevicePointer(),
+            &spacingF,
+            &totalGridPoints
+        };
+        cu.executeKernel(generateLigandHCTGridWithCorrectionsKernel, corrArgs, numBlocks * blockSize, blockSize);
+    } else {
+        // Generate values and corrections only
+        void* args[] = {
+            &d_hctProbe.getDevicePointer(),
+            &d_corrN.getDevicePointer(),
+            &d_corrA.getDevicePointer(),
+            &d_corrB.getDevicePointer(),
+            &d_positions.getDevicePointer(),
+            &d_radii.getDevicePointer(),
+            &d_scales.getDevicePointer(),
+            &numReceptorAtoms,
+            &probeRadiusF,
+            &d_thresholds.getDevicePointer(),
+            &numBinsIn,
+            &originXf, &originYf, &originZf,
+            &d_counts.getDevicePointer(),
+            &spacingF,
+            &totalGridPoints
+        };
+        cu.executeKernel(generateLigandHCTGridWithCorrectionsKernel, args, numBlocks * blockSize, blockSize);
+
+        outHctProbe.resize(totalGridPoints);
+        d_hctProbe.download(outHctProbe);
+    }
+
+    // Download correction grids
+    outCorrectionN.resize(numBinsIn * totalGridPoints);
+    outCorrectionA.resize(numBinsIn * totalGridPoints);
+    outCorrectionB.resize(numBinsIn * totalGridPoints);
+
+    d_corrN.download(outCorrectionN);
+    d_corrA.download(outCorrectionA);
+    d_corrB.download(outCorrectionB);
 }

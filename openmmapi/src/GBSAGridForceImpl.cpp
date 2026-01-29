@@ -22,11 +22,13 @@ void GBSAGridForceImpl::initialize(ContextImpl& context) {
     if (owner.getNumAtoms() == 0) {
         throw OpenMMException("GBSAGridForce: no atoms defined");
     }
-    if (!owner.getDesolvationGrid()) {
+
+    // Grid must be set unless auto-generation is enabled
+    if (!owner.getDesolvationGrid() && !owner.getAutoGenerateGrid()) {
         throw OpenMMException("GBSAGridForce: no desolvation grid set");
     }
 
-    // Create kernel
+    // Create kernel (kernel will handle auto-generation if enabled)
     kernel = context.getPlatform().createKernel(CalcGBSAGridForceKernel::Name(), context);
     kernel.getAs<CalcGBSAGridForceKernel>().initialize(context.getSystem(), owner);
 }

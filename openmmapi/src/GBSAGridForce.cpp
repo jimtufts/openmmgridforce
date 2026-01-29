@@ -21,6 +21,13 @@ constexpr double GBSAGridForce::DEFAULT_SA_SURFACE_TENSION;
 
 GBSAGridForce::GBSAGridForce()
     : numAtoms(0),
+      autoGenerateGrid(false),
+      gridOrigin{0.0, 0.0, 0.0},
+      gridCounts_{0, 0, 0},
+      gridSpacing_(0.05),
+      probeRadius_(0.14),
+      rThresholds_({0.12, 0.16}),
+      computeGridDerivatives(false),
       soluteDielectric(DEFAULT_SOLUTE_DIELECTRIC),
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
       includeSurfaceArea(false),
@@ -73,6 +80,78 @@ void GBSAGridForce::setDesolvationGrid(shared_ptr<DesolvationGrid> grid) {
 
 void GBSAGridForce::loadDesolvationGrid(const string& filename) {
     desolvationGrid = DesolvationGrid::loadFromFile(filename);
+}
+
+void GBSAGridForce::setAutoGenerateGrid(bool enable) {
+    autoGenerateGrid = enable;
+}
+
+void GBSAGridForce::setReceptorAtoms(const vector<int>& atoms) {
+    receptorAtoms = atoms;
+}
+
+void GBSAGridForce::setReceptorPositions(const vector<double>& positions) {
+    receptorPositions = positions;
+}
+
+void GBSAGridForce::setReceptorRadii(const vector<double>& radiiIn) {
+    receptorRadii_ = radiiIn;
+}
+
+void GBSAGridForce::setReceptorScaleFactors(const vector<double>& scales) {
+    receptorScaleFactors = scales;
+}
+
+void GBSAGridForce::setGridOrigin(double x, double y, double z) {
+    gridOrigin[0] = x;
+    gridOrigin[1] = y;
+    gridOrigin[2] = z;
+}
+
+void GBSAGridForce::getGridOrigin(double& x, double& y, double& z) const {
+    x = gridOrigin[0];
+    y = gridOrigin[1];
+    z = gridOrigin[2];
+}
+
+void GBSAGridForce::setGridCounts(int nx, int ny, int nz) {
+    if (nx <= 0 || ny <= 0 || nz <= 0) {
+        throw OpenMMException("GBSAGridForce: grid counts must be positive");
+    }
+    gridCounts_[0] = nx;
+    gridCounts_[1] = ny;
+    gridCounts_[2] = nz;
+}
+
+void GBSAGridForce::getGridCounts(int& nx, int& ny, int& nz) const {
+    nx = gridCounts_[0];
+    ny = gridCounts_[1];
+    nz = gridCounts_[2];
+}
+
+void GBSAGridForce::setGridSpacing(double spacing) {
+    if (spacing <= 0) {
+        throw OpenMMException("GBSAGridForce: grid spacing must be positive");
+    }
+    gridSpacing_ = spacing;
+}
+
+void GBSAGridForce::setProbeRadius(double radius) {
+    if (radius <= 0) {
+        throw OpenMMException("GBSAGridForce: probe radius must be positive");
+    }
+    probeRadius_ = radius;
+}
+
+void GBSAGridForce::setRThresholds(const vector<double>& thresholds) {
+    if (thresholds.empty()) {
+        throw OpenMMException("GBSAGridForce: R thresholds cannot be empty");
+    }
+    rThresholds_ = thresholds;
+}
+
+void GBSAGridForce::setComputeGridDerivatives(bool compute) {
+    computeGridDerivatives = compute;
 }
 
 void GBSAGridForce::addExclusion(int atom1, int atom2) {
