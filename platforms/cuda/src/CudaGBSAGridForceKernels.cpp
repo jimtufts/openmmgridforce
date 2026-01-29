@@ -24,6 +24,7 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
       numAtoms(0), numParticleGroups(0), originX(0), originY(0), originZ(0),
       gridSpacing(0), probeRadius(0), numBins(0), prefactor(0),
       includeSurfaceArea(false), surfaceTension(0), interpolationMethod(0),
+      hasHctDerivatives(false),
       computeReceptorHCTKernel(nullptr), computeLigandHCTKernel(nullptr),
       computeBornRadiiKernel(nullptr), computeGBEnergyKernel(nullptr),
       computeSAEnergyKernel(nullptr),
@@ -78,8 +79,41 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
 
     // Upload grid data
     int numPoints = nx * ny * nz;
-    gridHctProbe.initialize<float>(cu, numPoints, "gbsaGridHctProbe");
-    gridHctProbe.upload(grid->getHctProbe());
+
+    // Handle HCT grid with optional derivatives
+    const auto& hctData = grid->getHctProbe();
+    hasHctDerivatives = grid->hasDerivatives();
+
+    if (hasHctDerivatives) {
+        // Derivatives are stored in derivative-major layout: [deriv_idx * n_points + point_idx]
+        // The full RASPA3 array has 27 derivatives per point
+        int numDerivs = grid->getNumDerivsPerPoint();  // 27
+
+        // Validate data size
+        size_t expectedSize = static_cast<size_t>(numDerivs) * numPoints;
+        if (hctData.size() != expectedSize) {
+            throw OpenMMException("GBSAGridForce: HCT derivative data size mismatch. Expected " +
+                std::to_string(expectedSize) + " but got " + std::to_string(hctData.size()));
+        }
+
+        // Upload function values (first n_points of RASPA3 array) to gridHctProbe
+        // This is used for trilinear fallback when derivatives aren't available
+        vector<float> hctValues(hctData.begin(), hctData.begin() + numPoints);
+        gridHctProbe.initialize<float>(cu, numPoints, "gbsaGridHctProbe");
+        gridHctProbe.upload(hctValues);
+
+        // Upload full derivative array to gridHctDerivatives
+        gridHctDerivatives.initialize<float>(cu, hctData.size(), "gbsaGridHctDerivatives");
+        gridHctDerivatives.upload(hctData);
+    } else {
+        // No derivatives - just upload function values
+        if (hctData.size() != static_cast<size_t>(numPoints)) {
+            throw OpenMMException("GBSAGridForce: HCT probe data size mismatch. Expected " +
+                std::to_string(numPoints) + " but got " + std::to_string(hctData.size()));
+        }
+        gridHctProbe.initialize<float>(cu, numPoints, "gbsaGridHctProbe");
+        gridHctProbe.upload(hctData);
+    }
 
     int corrSize = numBins * numPoints;
     gridCorrectionN.initialize<float>(cu, corrSize, "gbsaGridCorrectionN");
@@ -242,6 +276,7 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
     CUdeviceptr chargesPtr = charges.getDevicePointer();
     CUdeviceptr gridCountsPtr = gridCounts.getDevicePointer();
     CUdeviceptr gridHctProbePtr = gridHctProbe.getDevicePointer();
+    CUdeviceptr gridHctDerivativesPtr = hasHctDerivatives ? gridHctDerivatives.getDevicePointer() : 0;
     CUdeviceptr gridCorrectionNPtr = gridCorrectionN.getDevicePointer();
     CUdeviceptr gridCorrectionAPtr = gridCorrectionA.getDevicePointer();
     CUdeviceptr gridCorrectionBPtr = gridCorrectionB.getDevicePointer();
@@ -260,7 +295,7 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
     // Step 1: Compute receptor HCT via grid interpolation
     void* receptorArgs[] = {
         &posqPtr, &particleIndicesPtr, &radiiPtr,
-        &gridCountsPtr, &gridHctProbePtr,
+        &gridCountsPtr, &gridHctProbePtr, &gridHctDerivativesPtr,
         &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
         &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
         &originX, &originY, &originZ, &gridSpacing, &probeRadius,
@@ -337,7 +372,7 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         void* receptorGradArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr,
             &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
-            &gridCountsPtr, &gridHctProbePtr,
+            &gridCountsPtr, &gridHctProbePtr, &gridHctDerivativesPtr,
             &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
             &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
             &originX, &originY, &originZ, &gridSpacing, &probeRadius,

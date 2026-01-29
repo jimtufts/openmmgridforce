@@ -51,6 +51,8 @@ private:
     // Device arrays - grid data
     OpenMM::CudaArray gridCounts;
     OpenMM::CudaArray gridHctProbe;
+    OpenMM::CudaArray gridHctDerivatives;  // HCT derivatives for tricubic/triquintic
+    bool hasHctDerivatives;                // Whether derivatives are available
     OpenMM::CudaArray gridCorrectionN;
     OpenMM::CudaArray gridCorrectionA;
     OpenMM::CudaArray gridCorrectionB;
