@@ -511,6 +511,21 @@ vector<double> CudaCalcGBSAGridForceKernel::getGroupBornRadii(int groupIndex) co
     if (groupIndex < 0 || groupIndex >= static_cast<int>(groupBornRadiiHost.size())) {
         throw OpenMMException("GBSAGridForce: invalid group index");
     }
+
+    // Download Born radii if not cached
+    if (groupBornRadiiHost[groupIndex].empty()) {
+        vector<int> groupStarts(numParticleGroups + 1);
+        groupStartIndex.download(groupStarts);
+        int startIdx = groupStarts[groupIndex];
+        int endIdx = groupStarts[groupIndex + 1];
+
+        vector<float> allBornRadii(bornRadii.getSize());
+        bornRadii.download(allBornRadii);
+
+        groupBornRadiiHost[groupIndex].assign(allBornRadii.begin() + startIdx,
+                                               allBornRadii.begin() + endIdx);
+    }
+
     vector<double> result(groupBornRadiiHost[groupIndex].begin(),
                           groupBornRadiiHost[groupIndex].end());
     return result;

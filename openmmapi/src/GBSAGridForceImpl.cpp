@@ -46,10 +46,12 @@ double GBSAGridForceImpl::calcForcesAndEnergy(ContextImpl& context,
 
         owner.groupEnergies.resize(numGroups);
         owner.groupLigandEnergies.resize(numGroups);
+        owner.groupBornRadii.resize(numGroups);
 
         for (int g = 0; g < numGroups; g++) {
             owner.groupEnergies[g] = kernel.getAs<CalcGBSAGridForceKernel>().getGroupEnergy(g);
             owner.groupLigandEnergies[g] = kernel.getAs<CalcGBSAGridForceKernel>().getGroupLigandDesolvationEnergy(g);
+            owner.groupBornRadii[g] = kernel.getAs<CalcGBSAGridForceKernel>().getGroupBornRadii(g);
         }
 
         return energy;
