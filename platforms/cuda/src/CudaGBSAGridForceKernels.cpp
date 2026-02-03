@@ -24,8 +24,7 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
       numAtoms(0), numParticleGroups(0), originX(0), originY(0), originZ(0),
       gridSpacing(0), probeRadius(0), numBins(0), prefactor(0),
       includeSurfaceArea(false), surfaceTension(0), interpolationMethod(0),
-      includeReceptorDesolvation(false), receptorDesolvProbeRadius(0),
-      hasHctDerivatives(false), hasReceptorDesolvDerivatives(false),
+      hasHctDerivatives(false),
       computeReceptorHCTKernel(nullptr), computeLigandHCTKernel(nullptr),
       computeBornRadiiKernel(nullptr), computeGBEnergyKernel(nullptr),
       computeSAEnergyKernel(nullptr),
@@ -33,7 +32,6 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
       accumulateBornRadiiDerivativesKernel(nullptr),
       computeHCTChainRuleForcesKernel(nullptr),
       computeReceptorHCTGradientForceKernel(nullptr),
-      computeReceptorDesolvationKernel(nullptr),
       generateLigandHCTGridKernel(nullptr),
       generateLigandHCTGridWithCorrectionsKernel(nullptr),
       generateLigandHCTGridWithDerivativesKernel(nullptr),
@@ -197,25 +195,6 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
     rThresholds.initialize<float>(cu, numBins, "gbsaRThresholds");
     rThresholds.upload(thresholdsFloat);
 
-    // Check for receptor desolvation data
-    includeReceptorDesolvation = force.getIncludeReceptorDesolvation() && grid->hasReceptorDesolvation();
-    if (includeReceptorDesolvation) {
-        receptorDesolvProbeRadius = grid->getReceptorDesolvProbeRadius();
-        hasReceptorDesolvDerivatives = grid->hasReceptorDesolvDerivatives();
-
-        // Upload receptor desolvation energy grid
-        const auto& recDesolvData = grid->getReceptorDesolvEnergy();
-        gridReceptorDesolv.initialize<float>(cu, numPoints, "gbsaReceptorDesolv");
-        gridReceptorDesolv.upload(recDesolvData);
-
-        // Upload derivatives if available
-        if (hasReceptorDesolvDerivatives) {
-            const auto& recDesolvDerivs = grid->getReceptorDesolvDerivatives();
-            gridReceptorDesolvDerivs.initialize<float>(cu, recDesolvDerivs.size(), "gbsaReceptorDesolvDerivs");
-            gridReceptorDesolvDerivs.upload(recDesolvDerivs);
-        }
-    }
-
     // Upload atom parameters
     vector<float> chargesVec(numAtoms), radiiVec(numAtoms), scalesVec(numAtoms);
     for (int i = 0; i < numAtoms; i++) {
@@ -284,11 +263,9 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         groupStartIndex.upload(groupStarts);
         groupEnergies.initialize<float>(cu, numParticleGroups, "gbsaGroupEnergies");
         groupLigandEnergies.initialize<float>(cu, numParticleGroups, "gbsaGroupLigandEnergies");
-        groupReceptorEnergies.initialize<float>(cu, numParticleGroups, "gbsaGroupReceptorEnergies");
 
         groupEnergiesHost.resize(numParticleGroups);
         groupLigandEnergiesHost.resize(numParticleGroups);
-        groupReceptorEnergiesHost.resize(numParticleGroups);
         groupBornRadiiHost.resize(numParticleGroups);
     } else {
         // Legacy mode: use particles from force or all atoms
@@ -313,10 +290,8 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         groupStartIndex.upload(groupStarts);
         groupEnergies.initialize<float>(cu, 1, "gbsaGroupEnergies");
         groupLigandEnergies.initialize<float>(cu, 1, "gbsaGroupLigandEnergies");
-        groupReceptorEnergies.initialize<float>(cu, 1, "gbsaGroupReceptorEnergies");
         groupEnergiesHost.resize(1);
         groupLigandEnergiesHost.resize(1);
-        groupReceptorEnergiesHost.resize(1);
         groupBornRadiiHost.resize(1);
     }
 
@@ -340,7 +315,6 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
     accumulateBornRadiiDerivativesKernel = cu.getKernel(module, "accumulateBornRadiiDerivatives");
     computeHCTChainRuleForcesKernel = cu.getKernel(module, "computeHCTChainRuleForces");
     computeReceptorHCTGradientForceKernel = cu.getKernel(module, "computeReceptorHCTGradientForce");
-    computeReceptorDesolvationKernel = cu.getKernel(module, "computeReceptorDesolvation");
 
     hasInitializedKernel = true;
 }
@@ -361,7 +335,6 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
     vector<float> zeros(numParticleGroups, 0.0f);
     groupEnergies.upload(zeros);
     groupLigandEnergies.upload(zeros);
-    groupReceptorEnergies.upload(zeros);
 
     // Get device pointers
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
@@ -477,44 +450,19 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         cu.executeKernel(computeReceptorHCTGradientForceKernel, receptorGradArgs, numBlocks * blockSize, blockSize);
     }
 
-    // Step 7: Receptor desolvation energy (if enabled)
-    if (includeReceptorDesolvation) {
-        CUdeviceptr gridReceptorDesolvPtr = gridReceptorDesolv.getDevicePointer();
-        CUdeviceptr gridReceptorDesolvDerivsPtr = hasReceptorDesolvDerivatives ?
-            gridReceptorDesolvDerivs.getDevicePointer() : 0;
-        CUdeviceptr groupReceptorEnergiesPtr = groupReceptorEnergies.getDevicePointer();
-        int hasDerivativesInt = hasReceptorDesolvDerivatives ? 1 : 0;
-
-        void* recDesolvArgs[] = {
-            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-            &gridCountsPtr, &gridReceptorDesolvPtr, &gridReceptorDesolvDerivsPtr,
-            &groupStartPtr, &numParticleGroups,
-            &originX, &originY, &originZ, &gridSpacing, &receptorDesolvProbeRadius,
-            &totalParticles, &numAtoms, &interpolationMethod, &hasDerivativesInt,
-            &groupReceptorEnergiesPtr, &forcePtr, &paddedNumAtoms
-        };
-        cu.executeKernel(computeReceptorDesolvationKernel, recDesolvArgs, numBlocks * blockSize, blockSize);
-    }
-
     // Download group energies
-    groupEnergies.download(groupEnergiesHost);  // Ligand desolvation
+    groupEnergies.download(groupEnergiesHost);
     groupLigandEnergies.download(groupLigandEnergiesHost);
-    if (includeReceptorDesolvation) {
-        groupReceptorEnergies.download(groupReceptorEnergiesHost);
-    }
 
     // Copy ligand energies for separate reporting
     for (int g = 0; g < numParticleGroups; g++) {
         groupLigandEnergiesHost[g] = groupEnergiesHost[g];
     }
 
-    // Sum total energy (ligand + receptor)
+    // Sum total energy
     double totalEnergy = 0.0;
     for (int g = 0; g < numParticleGroups; g++) {
         totalEnergy += groupEnergiesHost[g];
-        if (includeReceptorDesolvation) {
-            totalEnergy += groupReceptorEnergiesHost[g];
-        }
     }
 
     return totalEnergy;
@@ -549,12 +497,7 @@ double CudaCalcGBSAGridForceKernel::getGroupEnergy(int groupIndex) const {
     if (groupIndex < 0 || groupIndex >= static_cast<int>(groupEnergiesHost.size())) {
         throw OpenMMException("GBSAGridForce: invalid group index");
     }
-    // Total energy = ligand + receptor
-    double total = groupLigandEnergiesHost[groupIndex];
-    if (includeReceptorDesolvation && groupIndex < static_cast<int>(groupReceptorEnergiesHost.size())) {
-        total += groupReceptorEnergiesHost[groupIndex];
-    }
-    return total;
+    return groupLigandEnergiesHost[groupIndex];
 }
 
 double CudaCalcGBSAGridForceKernel::getGroupLigandDesolvationEnergy(int groupIndex) const {
@@ -562,16 +505,6 @@ double CudaCalcGBSAGridForceKernel::getGroupLigandDesolvationEnergy(int groupInd
         throw OpenMMException("GBSAGridForce: invalid group index");
     }
     return groupLigandEnergiesHost[groupIndex];
-}
-
-double CudaCalcGBSAGridForceKernel::getGroupReceptorDesolvationEnergy(int groupIndex) const {
-    if (!includeReceptorDesolvation) {
-        return 0.0;
-    }
-    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupReceptorEnergiesHost.size())) {
-        throw OpenMMException("GBSAGridForce: invalid group index");
-    }
-    return groupReceptorEnergiesHost[groupIndex];
 }
 
 vector<double> CudaCalcGBSAGridForceKernel::getGroupBornRadii(int groupIndex) const {

@@ -27,10 +27,6 @@
  *
  * Derivative storage order (27 values per point, same as GridForce):
  *   0=f, 1=fx, 2=fy, 3=fz, 4=fxx, 5=fxy, 6=fxz, 7=fyy, 8=fyz, 9=fzz, ...
- *
- * Optional receptor desolvation grid:
- *   - receptorDesolvEnergy[n_points]: Energy change when probe at each point
- *   - At runtime: E_receptor_desolv = sum_i(grid(pos_i) * (S_i/S_probe)^3)
  * -------------------------------------------------------------------------- */
 
 #ifndef OPENMM_DESOLVATIONGRID_H_
@@ -222,58 +218,6 @@ public:
     void setCorrectionB(const std::vector<float>& data);
     void setCorrectionB(std::vector<float>&& data);
 
-    // ========== Receptor Desolvation (Optional) ==========
-
-    /**
-     * Check if the grid has receptor desolvation data.
-     * Receptor desolvation enables computing the receptor's energy change
-     * due to ligand screening, using S³ scaling at runtime.
-     */
-    bool hasReceptorDesolvation() const { return m_hasReceptorDesolv; }
-
-    /**
-     * Check if the receptor desolvation grid has derivatives for tricubic/triquintic.
-     */
-    bool hasReceptorDesolvDerivatives() const { return m_hasReceptorDesolvDerivs; }
-
-    /**
-     * Get the receptor desolvation energy grid (values only).
-     * Layout: [iz + nz * (iy + ny * ix)] for point (ix, iy, iz)
-     * Each value is the receptor GB energy change when a probe is at that point.
-     */
-    const std::vector<float>& getReceptorDesolvEnergy() const { return m_receptorDesolvEnergy; }
-
-    /**
-     * Get the receptor desolvation derivatives grid.
-     * Layout: [deriv_idx * n_points + point_idx] (derivative-major, same as HCT)
-     * Contains 27 derivatives per point for triquintic interpolation.
-     */
-    const std::vector<float>& getReceptorDesolvDerivatives() const { return m_receptorDesolvDerivs; }
-
-    /**
-     * Get the probe radius used for receptor desolvation grid generation.
-     * Used for S³ scaling at runtime: scale = (S_ligand / S_probe)³
-     */
-    float getReceptorDesolvProbeRadius() const { return m_receptorDesolvProbeRadius; }
-
-    /**
-     * Set receptor desolvation data (values only, for trilinear interpolation).
-     *
-     * @param data        Energy grid [n_points], same layout as HCT grid
-     * @param probeRadius Probe radius used during generation (nm)
-     */
-    void setReceptorDesolvationData(const std::vector<float>& data, float probeRadius);
-    void setReceptorDesolvationData(std::vector<float>&& data, float probeRadius);
-
-    /**
-     * Set receptor desolvation derivatives (for tricubic/triquintic interpolation).
-     * Must call setReceptorDesolvationData first.
-     *
-     * @param derivs  Derivatives grid [27 * n_points], derivative-major layout
-     */
-    void setReceptorDesolvDerivatives(const std::vector<float>& derivs);
-    void setReceptorDesolvDerivatives(std::vector<float>&& derivs);
-
 private:
     // Grid dimensions
     std::vector<int> m_counts;     // [nx, ny, nz]
@@ -299,13 +243,6 @@ private:
     std::vector<float> m_correctionN;  // [derivs * n_bins * n_points]
     std::vector<float> m_correctionA;  // [derivs * n_bins * n_points]
     std::vector<float> m_correctionB;  // [derivs * n_bins * n_points]
-
-    // Receptor desolvation data (optional)
-    bool m_hasReceptorDesolv;                       // Whether receptor desolv grid is present
-    bool m_hasReceptorDesolvDerivs;                 // Whether derivatives are available
-    float m_receptorDesolvProbeRadius;              // Probe radius for S³ scaling
-    std::vector<float> m_receptorDesolvEnergy;     // [n_points] energy values
-    std::vector<float> m_receptorDesolvDerivs;     // [27 * n_points] derivatives (optional)
 };
 
 } // namespace GridForcePlugin

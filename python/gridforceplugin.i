@@ -39,6 +39,8 @@ namespace std {
 #include "IsolatedNonbondedForceKernels.h"
 #include "GBSAGridForce.h"
 #include "GBSAGridForceKernels.h"
+#include "IsolatedGBSAForce.h"
+#include "IsolatedGBSAForceKernels.h"
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
 #include "OpenMM.h"
@@ -244,15 +246,6 @@ public:
     void setCorrectionN(const std::vector<float>& data);
     void setCorrectionA(const std::vector<float>& data);
     void setCorrectionB(const std::vector<float>& data);
-
-    // Receptor desolvation support
-    bool hasReceptorDesolvation() const;
-    bool hasReceptorDesolvDerivatives() const;
-    const std::vector<float>& getReceptorDesolvEnergy() const;
-    const std::vector<float>& getReceptorDesolvDerivatives() const;
-    float getReceptorDesolvProbeRadius() const;
-    void setReceptorDesolvationData(const std::vector<float>& data, float probeRadius);
-    void setReceptorDesolvDerivatives(const std::vector<float>& derivs);
 };
 
 /**
@@ -314,14 +307,9 @@ public:
     int getInterpolationMethod() const;
     void setInterpolationMethod(int method);
 
-    // Receptor desolvation support
-    bool getIncludeReceptorDesolvation() const;
-    void setIncludeReceptorDesolvation(bool include);
-
     // Energy reporting
     double getGroupEnergy(int groupIndex) const;
     double getGroupLigandDesolvationEnergy(int groupIndex) const;
-    double getGroupReceptorDesolvationEnergy(int groupIndex) const;
     std::vector<double> getGroupBornRadii(int groupIndex) const;
 
     // Auto grid generation
@@ -371,6 +359,141 @@ public:
     bool getComputeGridDerivatives() const;
 
     bool usesPeriodicBoundaryConditions() const;
+};
+
+/**
+ * IsolatedGBSAForce computes pairwise GBSA solvation for isolated particle groups.
+ */
+class IsolatedGBSAForce : public OpenMM::Force {
+public:
+    // GB method for computing Born radii
+    enum GBMethod {
+        HCT = 0,     // Raw HCT descreening (no OBC correction)
+        OBC_II = 1   // OBC-II with tanh correction (production)
+    };
+
+    // Mode for receptor contributions
+    enum ReceptorMode {
+        NONE = 0,     // Ligand-only (no receptor)
+        GRID = 1,     // Receptor HCT from desolvation grid
+        PAIRWISE = 2  // Full pairwise receptor-ligand HCT
+    };
+
+    // Constants
+    static const double OBC_ALPHA;
+    static const double OBC_BETA;
+    static const double OBC_GAMMA;
+    static const double DIELECTRIC_OFFSET;
+    static const double DEFAULT_SOLUTE_DIELECTRIC;
+    static const double DEFAULT_SOLVENT_DIELECTRIC;
+    static const double DEFAULT_SA_SURFACE_TENSION;
+    static const double NO_CUTOFF;
+
+    IsolatedGBSAForce();
+
+    int getNumAtoms() const;
+    void setNumAtoms(int n);
+
+    void setParticles(const std::vector<int>& particles);
+    const std::vector<int>& getParticles() const;
+
+    void setAtomParameters(int index, double charge, double radius, double scaleFactor);
+    %apply double& OUTPUT {double& charge};
+    %apply double& OUTPUT {double& radius};
+    %apply double& OUTPUT {double& scaleFactor};
+    void getAtomParameters(int index, double& charge, double& radius, double& scaleFactor) const;
+    %clear double& charge;
+    %clear double& radius;
+    %clear double& scaleFactor;
+
+    // GB method
+    GBMethod getGBMethod() const;
+    void setGBMethod(GBMethod method);
+
+    // Solvent parameters
+    double getSoluteDielectric() const;
+    void setSoluteDielectric(double dielectric);
+    double getSolventDielectric() const;
+    void setSolventDielectric(double dielectric);
+
+    // Surface area term
+    bool getIncludeSurfaceArea() const;
+    void setIncludeSurfaceArea(bool include);
+    double getSurfaceTension() const;
+    void setSurfaceTension(double tension);
+
+    // Cutoff
+    double getCutoffDistance() const;
+    void setCutoffDistance(double distance);
+
+    // Receptor mode
+    ReceptorMode getReceptorMode() const;
+    void setReceptorMode(ReceptorMode mode);
+
+    // Grid mode configuration
+    void setDesolvationGrid(std::shared_ptr<DesolvationGrid> grid);
+    std::shared_ptr<DesolvationGrid> getDesolvationGrid() const;
+    void loadDesolvationGrid(const std::string& filename);
+    int getInterpolationMethod() const;
+    void setInterpolationMethod(int method);
+
+    // Pairwise mode configuration
+    void setNumReceptorAtoms(int n);
+    int getNumReceptorAtoms() const;
+    void setReceptorAtomParameters(int index, double charge, double radius, double scaleFactor);
+    %apply double& OUTPUT {double& rec_charge};
+    %apply double& OUTPUT {double& rec_radius};
+    %apply double& OUTPUT {double& rec_scaleFactor};
+    void getReceptorAtomParameters(int index, double& rec_charge, double& rec_radius, double& rec_scaleFactor) const;
+    %clear double& rec_charge;
+    %clear double& rec_radius;
+    %clear double& rec_scaleFactor;
+    void setReceptorPositions(const std::vector<double>& positions);
+    const std::vector<double>& getReceptorPositions() const;
+
+    // Particle groups
+    int addParticleGroup(const std::string& name, const std::vector<int>& indices);
+    int getNumParticleGroups() const;
+
+    // Energy reporting
+    double getGroupEnergy(int groupIndex) const;
+    double getGroupLigandSelfEnergy(int groupIndex) const;
+    double getGroupReceptorContribution(int groupIndex) const;
+    double getGroupReceptorDesolvation(int groupIndex) const;
+    double getGroupCrossTermEnergy(int groupIndex) const;
+    std::vector<double> getGroupBornRadii(int groupIndex) const;
+    std::vector<double> getGroupAtomEnergies(int groupIndex) const;
+
+    // Hessian
+    std::vector<double> computeHessian(OpenMM::Context& context);
+
+    void updateParametersInContext(OpenMM::Context& context);
+    bool usesPeriodicBoundaryConditions() const;
+
+    %pythoncode %{
+    def getHessianMatrix(self, context):
+        """
+        Compute and return the full Hessian matrix as a numpy array.
+
+        This computes the analytical Hessian (second derivatives) of the
+        GBSA potential with respect to all atomic coordinates.
+
+        Args:
+            context: OpenMM Context containing current positions
+
+        Returns:
+            numpy.ndarray: Shape (3N, 3N) Hessian matrix where N is the number
+                           of atoms. Units are kJ/(mol·nm²).
+
+        Example:
+            >>> H = gbsa_force.getHessianMatrix(context)
+            >>> eigenvalues = np.linalg.eigvalsh(H)
+        """
+        import numpy as np
+        flat = np.array(self.computeHessian(context))
+        n = self.getNumAtoms()
+        return flat.reshape(3*n, 3*n)
+    %}
 };
 
 class GridForce : public OpenMM::Force {
@@ -811,6 +934,11 @@ public:
 class CalcIsolatedNonbondedForceKernel : public OpenMM::KernelImpl {
 public:
     static std::string Name() {return "CalcIsolatedNonbondedForce";}
+};
+
+class CalcIsolatedGBSAForceKernel : public OpenMM::KernelImpl {
+public:
+    static std::string Name() {return "CalcIsolatedGBSAForce";}
 };
 
 } // namespace
