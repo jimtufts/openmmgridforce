@@ -2106,10 +2106,13 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
 
         float de = bornForces_rec * t3 * r_inv;
 
-        // Force on ligand
-        force_lig.x += de * dx;
-        force_lig.y += de * dy;
-        force_lig.z += de * dz;
+        // Force on ligand (the screening atom)
+        // The ligand screens the receptor, so by Newton's 3rd law the force on ligand
+        // is opposite to what would be on the receptor. This is analogous to force_j
+        // in the ligand-ligand HCT chain rule, which uses -= not +=.
+        force_lig.x -= de * dx;
+        force_lig.y -= de * dy;
+        force_lig.z -= de * dz;
     }
 
     // Accumulate forces
