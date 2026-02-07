@@ -108,9 +108,9 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
     float oy = 1.0f - fy;
     float oz = 1.0f - fz;
 
-    if (method == 1) {
+    if (method == 1 || method == 4) {
         // B-spline interpolation using shared library
-        // Set up grid pointers for multi-grid interpolation
+        // method 1 = cubic B-spline (4x4x4), method 4 = quintic B-spline (6x6x6)
         // Compute correction offset based on format
         int corrOffset;
         if (hasBinnedKDEDerivatives) {
@@ -127,9 +127,13 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                                   gridCorrectionA + corrOffset,
                                   gridCorrectionB + corrOffset};
 
-        MultiGridResult mgResult = bsplineInterpolateMultipleWithGradients(
-            grids, 4, gridCounts, gridSpacingArr,
-            originX, originY, originZ, position);
+        MultiGridResult mgResult = (method == 4)
+            ? quinticBsplineInterpolateMultipleWithGradients(
+                grids, 4, gridCounts, gridSpacingArr,
+                originX, originY, originZ, position)
+            : bsplineInterpolateMultipleWithGradients(
+                grids, 4, gridCounts, gridSpacingArr,
+                originX, originY, originZ, position);
 
         float hct = mgResult.values[0];
         float N = mgResult.values[1];

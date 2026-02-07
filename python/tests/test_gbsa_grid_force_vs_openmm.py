@@ -42,7 +42,6 @@ from gridforceplugin import GBSAGridForce, DesolvationGrid
 ASTEX_BASE = '/scratch/AstexDiv_comprehensive'
 DEFAULT_SYSTEMS = ['1g9v', '1gkc', '1gm8', '1gpk', '1hnn']
 GB_TOLERANCE = 2.0  # kJ/mol - acceptable grid discretization error
-GB_TOLERANCE_BSPLINE = 2.5  # kJ/mol - B-spline needs slightly looser tolerance
 SA_TOLERANCE = 5.0  # kJ/mol - looser tolerance for SA (known issues)
 
 
@@ -239,14 +238,15 @@ INTERP_METHOD_NAMES = {
     0: 'Trilinear',
     1: 'B-spline',
     2: 'Tricubic',
-    3: 'Triquintic'
+    3: 'Triquintic',
+    4: 'Quintic B-spline'
 }
 
 
 def compute_gbsa_grid_force_energy(lig_positions, lig_charges, lig_radii, lig_scales,
                                     rec_positions, rec_radii, rec_scales,
                                     grid_spacing=0.05, margin=0.3, include_sa=False,
-                                    interpolation_method=2):
+                                    interpolation_method=2, bspline_prefilter_order=0):
     """
     Compute energy using GBSAGridForce with CUDA grid generation.
 
@@ -256,6 +256,7 @@ def compute_gbsa_grid_force_energy(lig_positions, lig_charges, lig_radii, lig_sc
 
     Args:
         interpolation_method: 0=trilinear, 1=bspline, 2=tricubic, 3=triquintic
+        bspline_prefilter_order: 0=none, 3=cubic, 5=quintic
     """
     n_lig = len(lig_positions)
     n_rec = len(rec_positions)
@@ -284,8 +285,8 @@ def compute_gbsa_grid_force_energy(lig_positions, lig_charges, lig_radii, lig_sc
     gbsa_force.setAutoGenerateGrid(True)
 
     # Methods 2 (tricubic) and 3 (triquintic) require derivatives
-    # Methods 0 (trilinear) and 1 (bspline) work with values only
-    compute_derivatives = (interpolation_method >= 2)
+    # Methods 0 (trilinear), 1 (bspline), and 4 (quintic bspline) work with values only
+    compute_derivatives = (interpolation_method in (2, 3))
     gbsa_force.setComputeGridDerivatives(compute_derivatives)
 
     gbsa_force.setGridSpacing(grid_spacing)
@@ -301,8 +302,10 @@ def compute_gbsa_grid_force_energy(lig_positions, lig_charges, lig_radii, lig_sc
     # Smaller bandwidth = sharper transitions, closer to hard cutoff accuracy
     gbsa_force.setKDEBandwidth(0.005)  # 0.5 Angstrom = very sharp
 
-    # Set interpolation method
+    # Set interpolation method and prefilter
     gbsa_force.setInterpolationMethod(interpolation_method)
+    if bspline_prefilter_order > 0:
+        gbsa_force.setBSplinePrefilterOrder(bspline_prefilter_order)
 
     gbsa_force.setParticles(list(range(n_lig)))
     system.addForce(gbsa_force)
@@ -370,7 +373,7 @@ def test_gbsa_grid_force_gb_only(interpolation_methods=None):
         interpolation_methods: List of methods to test (0-3), or None for all methods
     """
     if interpolation_methods is None:
-        interpolation_methods = [0, 1, 2, 3]  # All methods
+        interpolation_methods = [0, 1, 2, 3, 4]  # All methods
 
     print("\n" + "="*70)
     print("TEST: GBSAGridForce vs IsolatedGBSAForce PAIRWISE (GB only, no SA)")
@@ -401,15 +404,17 @@ def test_gbsa_grid_force_gb_only(interpolation_methods=None):
             )
 
             # CUDA grid generation with specified interpolation method
+            # B-spline methods use matching prefilter order
+            prefilter = {1: 3, 4: 5}.get(method, 0)
             E_grid, counts = compute_gbsa_grid_force_energy(
                 lig_pos, lig_charges, lig_radii, lig_scales,
                 rec_pos, rec_radii, rec_scales, include_sa=False,
-                interpolation_method=method
+                interpolation_method=method,
+                bspline_prefilter_order=prefilter
             )
 
             diff = E_grid - E_isolated
-            # B-spline (method 1) has slightly looser tolerance
-            tolerance = GB_TOLERANCE_BSPLINE if method == 1 else GB_TOLERANCE
+            tolerance = GB_TOLERANCE
             passed = abs(diff) < tolerance
             results.append({
                 'system': system_name,
@@ -425,16 +430,15 @@ def test_gbsa_grid_force_gb_only(interpolation_methods=None):
 
         diffs = [abs(r['diff']) for r in results]
         method_passed = all(r['passed'] for r in results)
-        tolerance_used = GB_TOLERANCE_BSPLINE if method == 1 else GB_TOLERANCE
         all_results[method] = {
             'results': results,
             'mean_diff': np.mean(diffs),
             'max_diff': np.max(diffs),
             'passed': method_passed,
-            'tolerance': tolerance_used
+            'tolerance': GB_TOLERANCE
         }
 
-        print(f"  {method_name} Mean |diff|: {np.mean(diffs):.2f} kJ/mol (tolerance: {tolerance_used:.1f})")
+        print(f"  {method_name} Mean |diff|: {np.mean(diffs):.2f} kJ/mol (tolerance: {GB_TOLERANCE:.1f})")
         print(f"  {method_name} Max  |diff|: {np.max(diffs):.2f} kJ/mol")
         print(f"  {method_name} Result: {'PASS' if method_passed else 'FAIL'}")
 
@@ -507,7 +511,7 @@ def test_gbsa_grid_force_with_sa(interpolation_methods=None):
         interpolation_methods: List of methods to test (0-3), or None for all methods
     """
     if interpolation_methods is None:
-        interpolation_methods = [0, 1, 2, 3]  # All methods
+        interpolation_methods = [0, 1, 2, 3, 4]  # All methods
 
     print("\n" + "="*70)
     print("TEST: GBSAGridForce vs IsolatedGBSAForce PAIRWISE (GB + SA)")
@@ -539,10 +543,12 @@ def test_gbsa_grid_force_with_sa(interpolation_methods=None):
             )
 
             # CUDA grid generation with specified interpolation method
+            prefilter = 3 if method == 1 else 0
             E_grid, counts = compute_gbsa_grid_force_energy(
                 lig_pos, lig_charges, lig_radii, lig_scales,
                 rec_pos, rec_radii, rec_scales, include_sa=True,
-                interpolation_method=method
+                interpolation_method=method,
+                bspline_prefilter_order=prefilter
             )
 
             diff = E_grid - E_isolated
@@ -598,17 +604,17 @@ def main():
     parser.add_argument('--test', choices=['gb', 'sa', 'all'], default='all',
                         help='Which tests to run: gb (no SA), sa (with SA), or all')
     parser.add_argument('--methods', type=str, default='all',
-                        help='Interpolation methods to test: "all" or comma-separated list (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)')
+                        help='Interpolation methods to test: "all" or comma-separated list (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic, 4=quintic bspline)')
     args = parser.parse_args()
 
     # Parse interpolation methods
     if args.methods == 'all':
-        interp_methods = [0, 1, 2, 3]
+        interp_methods = [0, 1, 2, 3, 4]
     else:
         interp_methods = [int(m.strip()) for m in args.methods.split(',')]
         for m in interp_methods:
-            if m not in [0, 1, 2, 3]:
-                print(f"Error: Invalid interpolation method {m}. Must be 0-3.")
+            if m not in [0, 1, 2, 3, 4]:
+                print(f"Error: Invalid interpolation method {m}. Must be 0-4.")
                 return 1
 
     print(f"Testing interpolation methods: {[INTERP_METHOD_NAMES[m] for m in interp_methods]}")

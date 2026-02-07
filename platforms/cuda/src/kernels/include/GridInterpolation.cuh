@@ -846,6 +846,103 @@ __device__ inline MultiGridResult bsplineInterpolateMultipleWithGradients(
 }
 
 /**
+ * Quintic B-spline interpolation of multiple grids with gradients.
+ * Uses 6x6x6 stencil for C3 continuous interpolation.
+ *
+ * @param gridValues      Array of grid pointers (up to MULTI_GRID_MAX)
+ * @param numGrids        Number of grids to interpolate
+ * @param gridCounts      Grid dimensions {nx, ny, nz}
+ * @param gridSpacing     Grid spacing {dx, dy, dz} in nm
+ * @param originX/Y/Z     Grid origin coordinates in nm
+ * @param position        Query position in absolute coordinates (nm)
+ * @return MultiGridResult with values and gradients for all grids
+ */
+__device__ inline MultiGridResult quinticBsplineInterpolateMultipleWithGradients(
+    const float* const* gridValues,
+    int numGrids,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridSpacing,
+    float originX, float originY, float originZ,
+    float3 position)
+{
+    MultiGridResult result;
+    result.numGrids = numGrids;
+
+    // Initialize to zero
+    for (int g = 0; g < numGrids; g++) {
+        result.values[g] = 0.0f;
+        result.gradients[g] = make_float3(0.0f, 0.0f, 0.0f);
+    }
+
+    int ix, iy, iz;
+    float fx, fy, fz;
+    result.isInside = computeGridCell(position, gridCounts, gridSpacing,
+                                       originX, originY, originZ,
+                                       ix, iy, iz, fx, fy, fz);
+
+    if (!result.isInside) {
+        return result;
+    }
+
+    int nyz = gridCounts[1] * gridCounts[2];
+    int nz = gridCounts[2];
+
+    // Precompute quintic B-spline basis functions and derivatives
+    float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+                   qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
+    float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+                   qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
+    float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+                   qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
+
+    float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+                    qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
+    float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+                    qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
+    float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+                    qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
+
+    // Inverse spacing for gradient conversion
+    float invSpacingX = 1.0f / gridSpacing[0];
+    float invSpacingY = 1.0f / gridSpacing[1];
+    float invSpacingZ = 1.0f / gridSpacing[2];
+
+    // Loop over 6x6x6 stencil: offsets -2..+3 from cell corner
+    for (int i = 0; i < 6; i++) {
+        int gx = min(max(ix - 2 + i, 0), gridCounts[0] - 1);
+        for (int j = 0; j < 6; j++) {
+            int gy = min(max(iy - 2 + j, 0), gridCounts[1] - 1);
+            for (int k = 0; k < 6; k++) {
+                int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
+                int gridIdx = gx * nyz + gy * nz + gz;
+
+                float weight = bx[i] * by[j] * bz[k];
+                float dwdx = dbx[i] * by[j] * bz[k];
+                float dwdy = bx[i] * dby[j] * bz[k];
+                float dwdz = bx[i] * by[j] * dbz[k];
+
+                for (int g = 0; g < numGrids; g++) {
+                    float val = gridValues[g][gridIdx];
+                    result.values[g] += weight * val;
+                    result.gradients[g].x += dwdx * val;
+                    result.gradients[g].y += dwdy * val;
+                    result.gradients[g].z += dwdz * val;
+                }
+            }
+        }
+    }
+
+    // Convert gradients to real space
+    for (int g = 0; g < numGrids; g++) {
+        result.gradients[g].x *= invSpacingX;
+        result.gradients[g].y *= invSpacingY;
+        result.gradients[g].z *= invSpacingZ;
+    }
+
+    return result;
+}
+
+/**
  * Generic multi-grid interpolation with gradients.
  * Dispatches to appropriate method implementation.
  *
@@ -855,7 +952,7 @@ __device__ inline MultiGridResult bsplineInterpolateMultipleWithGradients(
  * @param gridSpacing     Grid spacing {dx, dy, dz} in nm
  * @param originX/Y/Z     Grid origin coordinates in nm
  * @param position        Query position in absolute coordinates (nm)
- * @param method          0=trilinear, 1=bspline, 2=tricubic, 3=triquintic
+ * @param method          0=trilinear, 1=bspline, 2=tricubic, 3=triquintic, 4=quintic bspline
  * @return MultiGridResult with values and gradients for all grids
  *
  * Note: Methods 2 and 3 (tricubic/triquintic) require derivative grids
@@ -873,6 +970,10 @@ __device__ inline MultiGridResult interpolateMultipleGridsWithGradients(
     switch (method) {
         case 1:
             return bsplineInterpolateMultipleWithGradients(
+                gridValues, numGrids, gridCounts, gridSpacing,
+                originX, originY, originZ, position);
+        case 4:
+            return quinticBsplineInterpolateMultipleWithGradients(
                 gridValues, numGrids, gridCounts, gridSpacing,
                 originX, originY, originZ, position);
         case 2:

@@ -105,13 +105,6 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
                                             hasDerivs);
         grid->setOrigin(ox, oy, oz);
 
-        // Set grid data
-        if (hasDerivs) {
-            // When derivatives are present, setHctProbe expects the full 27*n_points array
-            grid->setHctProbe(derivatives);
-        } else {
-            grid->setHctProbe(hctProbe);
-        }
         // Apply B-spline prefilter at generation time if requested
         int bsplineOrder = force.getBSplinePrefilterOrder();
         if (bsplineOrder > 0 && !hasDerivs) {
@@ -140,6 +133,13 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
             }
         }
 
+        // Set grid data (after prefiltering so prefiltered coefficients are uploaded)
+        if (hasDerivs) {
+            // When derivatives are present, setHctProbe expects the full 27*n_points array
+            grid->setHctProbe(derivatives);
+        } else {
+            grid->setHctProbe(hctProbe);
+        }
         grid->setCorrectionN(corrN);
         grid->setCorrectionA(corrA);
         grid->setCorrectionB(corrB);
@@ -740,7 +740,13 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
             &spacingF,
             &totalGridPoints
         };
-        cu.executeKernel(generateBinnedGridsWithKDEDerivativesKernel, args, numBlocks * blockSize, blockSize);
+        // Use cuLaunchKernel directly to bypass OpenMM's numThreadBlocks cap,
+        // which limits grid dimensions and causes incomplete grid generation
+        // at fine spacings (e.g. 256K+ grid points).
+        CUresult result = cuLaunchKernel(generateBinnedGridsWithKDEDerivativesKernel,
+            numBlocks, 1, 1, blockSize, 1, 1, 0, cu.getCurrentStream(), args, NULL);
+        if (result != CUDA_SUCCESS)
+            throw OpenMMException("Error launching generateBinnedGridsWithKDEDerivatives kernel");
 
         // Download HCT derivatives (27 per point, RASPA3 layout)
         outDerivatives.resize(27 * totalGridPoints);
@@ -791,7 +797,13 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
             &spacingF,
             &totalGridPoints
         };
-        cu.executeKernel(generateBinnedGridsWithKDEKernel, args, numBlocks * blockSize, blockSize);
+        // Use cuLaunchKernel directly to bypass OpenMM's numThreadBlocks cap,
+        // which limits grid dimensions and causes incomplete grid generation
+        // at fine spacings (e.g. 256K+ grid points).
+        CUresult result = cuLaunchKernel(generateBinnedGridsWithKDEKernel,
+            numBlocks, 1, 1, blockSize, 1, 1, 0, cu.getCurrentStream(), args, NULL);
+        if (result != CUDA_SUCCESS)
+            throw OpenMMException("Error launching generateBinnedGridsWithKDE kernel");
 
         outHctProbe.resize(totalGridPoints);
         d_hctProbe.download(outHctProbe);

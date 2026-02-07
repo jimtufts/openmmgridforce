@@ -235,8 +235,8 @@ void GBSAGridForce::setSurfaceTension(double tension) {
 }
 
 void GBSAGridForce::setInterpolationMethod(int method) {
-    if (method < 0 || method > 3) {
-        throw OpenMMException("GBSAGridForce: interpolationMethod must be 0 (trilinear), 1 (bspline), 2 (tricubic), or 3 (triquintic)");
+    if (method < 0 || method > 4) {
+        throw OpenMMException("GBSAGridForce: interpolationMethod must be 0 (trilinear), 1 (bspline), 2 (tricubic), 3 (triquintic), or 4 (quintic bspline)");
     }
     interpolationMethod = method;
 }
