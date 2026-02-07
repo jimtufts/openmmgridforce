@@ -799,6 +799,28 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::getGroupAtomEnergies(int groupIn
     return result;
 }
 
+vector<double> CudaCalcIsolatedGBSAForceKernel::getReceptorBornRadii(int groupIndex) const {
+    if (receptorMode != IsolatedGBSAForce::PAIRWISE) {
+        throw OpenMMException("IsolatedGBSAForce: receptor Born radii only available in PAIRWISE mode");
+    }
+    if (groupIndex < 0 || groupIndex >= numParticleGroups) {
+        throw OpenMMException("IsolatedGBSAForce: invalid group index");
+    }
+
+    // Ensure cache is sized correctly
+    if (groupReceptorBornRadiiHost.size() < static_cast<size_t>(numParticleGroups)) {
+        groupReceptorBornRadiiHost.resize(numParticleGroups);
+    }
+
+    // Download receptor Born radii (always recompute - could cache based on group if needed)
+    vector<float> recBornRadii(numReceptorAtoms);
+    receptorBornRadii.download(recBornRadii);
+    groupReceptorBornRadiiHost[groupIndex] = recBornRadii;
+
+    vector<double> result(recBornRadii.begin(), recBornRadii.end());
+    return result;
+}
+
 vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& context) {
     // Hessian computation for GBSA is complex - implement later
     throw OpenMMException("IsolatedGBSAForce: Hessian computation not yet implemented");

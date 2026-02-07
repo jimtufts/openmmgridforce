@@ -83,8 +83,21 @@ private:
     bool includeSurfaceArea;
     float surfaceTension;
 
+    // KDE correction parameters
+    float kdeThreshold;   // Distance threshold for KDE correction (nm)
+    float kdeBandwidth;   // KDE sigmoid bandwidth (nm)
+    float kdeEpsilonB;    // Smoothing parameter for B grid 1/sqrt(r²+ε²)
+
     // Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
     int interpolationMethod;
+
+    // Correction grid format flags:
+    // - useKDECorrections: True when using high-order interpolation for corrections
+    // - hasBinnedKDEDerivatives: True when corrections are binned with 27 derivs per bin
+    //   Layout: [bin * 27 * numPoints + deriv * numPoints + point]
+    //   When false but useKDECorrections=true: pure KDE format [27 * numPoints] (deprecated)
+    bool useKDECorrections;
+    bool hasBinnedKDEDerivatives;  // New: binned corrections with derivatives
 
     // Device arrays - grid data
     OpenMM::CudaArray gridCounts;
@@ -129,10 +142,16 @@ private:
     CUfunction computeHCTChainRuleForcesKernel;
     CUfunction computeReceptorHCTGradientForceKernel;
 
-    // CUDA kernels - grid generation
+    // CUDA kernels - grid generation (legacy)
     CUfunction generateLigandHCTGridKernel;
     CUfunction generateLigandHCTGridWithCorrectionsKernel;
     CUfunction generateLigandHCTGridWithDerivativesKernel;
+    CUfunction generateBinnedGridsWithKDEKernel;  // Binned grids with KDE smoothing
+    CUfunction generateBinnedGridsWithKDEDerivativesKernel;  // Binned grids with KDE + 27 derivs per bin
+
+    // CUDA kernels - 4-grid generation with analytical derivatives
+    CUfunction generateDesolvationGrids4Kernel;
+    CUfunction generateHCTProbeGridKernel;
     CUmodule generationModule;
 
     // Host-side results cache

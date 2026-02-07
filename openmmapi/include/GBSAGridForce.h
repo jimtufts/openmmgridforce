@@ -51,7 +51,7 @@ public:
     // Solvent parameters
     static constexpr double DEFAULT_SOLUTE_DIELECTRIC = 1.0;
     static constexpr double DEFAULT_SOLVENT_DIELECTRIC = 78.5;
-    static constexpr double DEFAULT_SA_SURFACE_TENSION = 0.0054;  // kJ/mol/nm²
+    static constexpr double DEFAULT_SA_SURFACE_TENSION = 2.25936;  // kJ/mol/nm² (matches OpenMM)
 
     /**
      * Create a GBSAGridForce.
@@ -228,6 +228,45 @@ public:
      */
     bool getComputeGridDerivatives() const { return computeGridDerivatives; }
 
+    // ========== KDE Smoothing Parameters ==========
+
+    /**
+     * Set KDE threshold for smooth cutoff (nm).
+     * Atoms with |r - S| < threshold contribute with weight ≈ 1.
+     * Default: 0.02 nm
+     */
+    void setKDEThreshold(double threshold);
+
+    /**
+     * Get KDE threshold.
+     */
+    double getKDEThreshold() const { return kdeThreshold_; }
+
+    /**
+     * Set KDE bandwidth for sigmoid smoothing (nm).
+     * Smaller values give sharper cutoffs; larger values are smoother.
+     * As bandwidth → 0, converges to hard-cutoff binned approach.
+     * Default: 0.04 nm
+     */
+    void setKDEBandwidth(double bandwidth);
+
+    /**
+     * Get KDE bandwidth.
+     */
+    double getKDEBandwidth() const { return kdeBandwidth_; }
+
+    /**
+     * Set KDE epsilon_B smoothing parameter (nm).
+     * Used in B grid: 0.5/sqrt(r² + ε²) instead of 0.5/r for numerical stability.
+     * Default: 0.03 nm
+     */
+    void setKDEEpsilonB(double epsilon);
+
+    /**
+     * Get KDE epsilon_B.
+     */
+    double getKDEEpsilonB() const { return kdeEpsilonB_; }
+
     // ========== Exclusions ==========
 
     /**
@@ -330,6 +369,19 @@ public:
      */
     void setInterpolationMethod(int method);
 
+    /**
+     * Set the B-spline prefilter order for grid generation.
+     * When set, the B-spline prefilter is applied to grid values at generation time.
+     * @param order  B-spline degree: 0 (none), 3 (cubic), or 5 (quintic)
+     */
+    void setBSplinePrefilterOrder(int order);
+
+    /**
+     * Get the current B-spline prefilter order.
+     * @return  B-spline degree (0, 3, or 5)
+     */
+    int getBSplinePrefilterOrder() const { return bsplinePrefilterOrder; }
+
     // ========== Energy Reporting ==========
 
     /**
@@ -392,6 +444,11 @@ private:
     std::vector<double> rThresholds_;
     bool computeGridDerivatives;
 
+    // KDE smoothing parameters
+    double kdeThreshold_;
+    double kdeBandwidth_;
+    double kdeEpsilonB_;
+
     // Solvent parameters
     double soluteDielectric;
     double solventDielectric;
@@ -402,6 +459,9 @@ private:
 
     // Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
     int interpolationMethod;
+
+    // B-spline prefilter order (0=none, 3=cubic, 5=quintic)
+    int bsplinePrefilterOrder;
 
     // Cached group energies (populated by kernel)
     mutable std::vector<double> groupEnergies;           // Total energy

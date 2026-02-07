@@ -61,7 +61,7 @@ public:
     // Default solvent parameters
     static constexpr double DEFAULT_SOLUTE_DIELECTRIC = 1.0;
     static constexpr double DEFAULT_SOLVENT_DIELECTRIC = 78.5;
-    static constexpr double DEFAULT_SA_SURFACE_TENSION = 0.0054;  // kJ/mol/nm^2
+    static constexpr double DEFAULT_SA_SURFACE_TENSION = 2.25936;  // kJ/mol/nm^2 (matches OpenMM)
 
     // Cutoff
     static constexpr double NO_CUTOFF = -1.0;  // Special value meaning no cutoff
@@ -293,6 +293,39 @@ public:
      */
     std::vector<double> getGroupAtomEnergies(int groupIndex) const;
 
+    /**
+     * Get the ligand surface area energy for a particle group.
+     * Computed from ligand Born radii (which include receptor descreening).
+     * Uses ACE formula: SA_i = surfaceTension * 4π * (R_i + probe)² * (R_i / R_born_i)^6
+     *
+     * This is the ligand's contribution to the SA term. When a receptor is present,
+     * the ligand Born radii are smaller (more buried) so the ligand SA is reduced.
+     */
+    double getGroupLigandSurfaceArea(int groupIndex) const;
+
+    /**
+     * Get per-atom ligand surface area energies.
+     * Each element is the ACE contribution from that ligand atom.
+     */
+    std::vector<double> getGroupAtomSurfaceAreas(int groupIndex) const;
+
+    /**
+     * Get the receptor Born radii (PAIRWISE mode only).
+     * These include the ligand's contribution to receptor HCT.
+     */
+    std::vector<double> getReceptorBornRadii(int groupIndex) const;
+
+    /**
+     * Get the receptor surface area energy change due to ligand (PAIRWISE mode only).
+     * This is computed as: SA(receptor with ligand) - SA(receptor in vacuum)
+     * where SA(vacuum) is estimated using intrinsic radii as Born radii.
+     *
+     * Note: This is an approximation. The "vacuum" reference uses R_born = R_intrinsic,
+     * which is exact for isolated atoms but may differ slightly from the true vacuum
+     * Born radii of the receptor in complex conformations.
+     */
+    double getGroupReceptorSurfaceAreaChange(int groupIndex) const;
+
     // ========== Parameter Updates ==========
 
     /**
@@ -368,6 +401,7 @@ private:
     mutable std::vector<double> groupCrossTermEnergies;
     mutable std::vector<std::vector<double>> groupBornRadii;
     mutable std::vector<std::vector<double>> groupAtomEnergies;
+    mutable std::vector<std::vector<double>> groupReceptorBornRadii;  // PAIRWISE mode only
 
     friend class IsolatedGBSAForceImpl;
 };

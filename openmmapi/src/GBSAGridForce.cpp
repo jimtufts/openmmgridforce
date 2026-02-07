@@ -28,11 +28,15 @@ GBSAGridForce::GBSAGridForce()
       probeRadius_(0.14),
       rThresholds_({0.12, 0.16}),
       computeGridDerivatives(false),
+      kdeThreshold_(0.02),
+      kdeBandwidth_(0.04),
+      kdeEpsilonB_(0.03),
       soluteDielectric(DEFAULT_SOLUTE_DIELECTRIC),
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
       includeSurfaceArea(false),
       surfaceTension(DEFAULT_SA_SURFACE_TENSION),
-      interpolationMethod(0) {
+      interpolationMethod(0),
+      bsplinePrefilterOrder(0) {
 }
 
 void GBSAGridForce::setNumAtoms(int n) {
@@ -153,6 +157,27 @@ void GBSAGridForce::setComputeGridDerivatives(bool compute) {
     computeGridDerivatives = compute;
 }
 
+void GBSAGridForce::setKDEThreshold(double threshold) {
+    if (threshold < 0) {
+        throw OpenMMException("GBSAGridForce: KDE threshold must be non-negative");
+    }
+    kdeThreshold_ = threshold;
+}
+
+void GBSAGridForce::setKDEBandwidth(double bandwidth) {
+    if (bandwidth <= 0) {
+        throw OpenMMException("GBSAGridForce: KDE bandwidth must be positive");
+    }
+    kdeBandwidth_ = bandwidth;
+}
+
+void GBSAGridForce::setKDEEpsilonB(double epsilon) {
+    if (epsilon < 0) {
+        throw OpenMMException("GBSAGridForce: KDE epsilon_B must be non-negative");
+    }
+    kdeEpsilonB_ = epsilon;
+}
+
 void GBSAGridForce::addExclusion(int atom1, int atom2) {
     if (atom1 < 0 || atom1 >= numAtoms || atom2 < 0 || atom2 >= numAtoms) {
         throw OpenMMException("GBSAGridForce: exclusion atom index out of range");
@@ -214,6 +239,13 @@ void GBSAGridForce::setInterpolationMethod(int method) {
         throw OpenMMException("GBSAGridForce: interpolationMethod must be 0 (trilinear), 1 (bspline), 2 (tricubic), or 3 (triquintic)");
     }
     interpolationMethod = method;
+}
+
+void GBSAGridForce::setBSplinePrefilterOrder(int order) {
+    if (order != 0 && order != 3 && order != 5) {
+        throw OpenMMException("GBSAGridForce: B-spline prefilter order must be 0 (none), 3 (cubic), or 5 (quintic)");
+    }
+    bsplinePrefilterOrder = order;
 }
 
 double GBSAGridForce::getGroupEnergy(int groupIndex) const {

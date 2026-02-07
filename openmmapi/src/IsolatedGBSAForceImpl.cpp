@@ -61,6 +61,11 @@ double IsolatedGBSAForceImpl::calcForcesAndEnergy(ContextImpl& context,
         owner.groupBornRadii.resize(numGroups);
         owner.groupAtomEnergies.resize(numGroups);
 
+        // Resize receptor Born radii for PAIRWISE mode
+        if (owner.getReceptorMode() == IsolatedGBSAForce::PAIRWISE) {
+            owner.groupReceptorBornRadii.resize(numGroups);
+        }
+
         for (int g = 0; g < numGroups; g++) {
             owner.groupEnergies[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupEnergy(g);
             owner.groupLigandSelfEnergies[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupLigandSelfEnergy(g);
@@ -69,6 +74,11 @@ double IsolatedGBSAForceImpl::calcForcesAndEnergy(ContextImpl& context,
             owner.groupCrossTermEnergies[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupCrossTermEnergy(g);
             owner.groupBornRadii[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupBornRadii(g);
             owner.groupAtomEnergies[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupAtomEnergies(g);
+
+            // Get receptor Born radii for PAIRWISE mode
+            if (owner.getReceptorMode() == IsolatedGBSAForce::PAIRWISE) {
+                owner.groupReceptorBornRadii[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getReceptorBornRadii(g);
+            }
         }
 
         return energy;

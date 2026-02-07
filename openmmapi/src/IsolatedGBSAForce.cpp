@@ -209,6 +209,106 @@ vector<double> IsolatedGBSAForce::getGroupAtomEnergies(int groupIndex) const {
     return groupAtomEnergies[groupIndex];
 }
 
+double IsolatedGBSAForce::getGroupLigandSurfaceArea(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupBornRadii.size())) {
+        throw OpenMMException("IsolatedGBSAForce: group Born radii not available (call getState first)");
+    }
+    const vector<double>& bornRadii = groupBornRadii[groupIndex];
+
+    // ACE formula: SA_i = surfaceTension * 4π * (R_i + probe)² * (R_i / R_born_i)^6
+    const double probeRadius = 0.14;  // nm
+    const double fourPi = 4.0 * 3.14159265358979323846;
+
+    double totalSA = 0.0;
+    for (int i = 0; i < numAtoms; i++) {
+        double R_i = radii[i];
+        double R_born = bornRadii[i];
+        if (R_born > 0) {
+            double r_ratio = R_i / R_born;
+            double r_ratio_6 = r_ratio * r_ratio * r_ratio * r_ratio * r_ratio * r_ratio;
+            double surface = fourPi * (R_i + probeRadius) * (R_i + probeRadius);
+            totalSA += surfaceTension * surface * r_ratio_6;
+        }
+    }
+    return totalSA;
+}
+
+vector<double> IsolatedGBSAForce::getGroupAtomSurfaceAreas(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupBornRadii.size())) {
+        throw OpenMMException("IsolatedGBSAForce: group Born radii not available (call getState first)");
+    }
+    const vector<double>& bornRadii = groupBornRadii[groupIndex];
+
+    const double probeRadius = 0.14;  // nm
+    const double fourPi = 4.0 * 3.14159265358979323846;
+
+    vector<double> atomSAs(numAtoms);
+    for (int i = 0; i < numAtoms; i++) {
+        double R_i = radii[i];
+        double R_born = bornRadii[i];
+        if (R_born > 0) {
+            double r_ratio = R_i / R_born;
+            double r_ratio_6 = r_ratio * r_ratio * r_ratio * r_ratio * r_ratio * r_ratio;
+            double surface = fourPi * (R_i + probeRadius) * (R_i + probeRadius);
+            atomSAs[i] = surfaceTension * surface * r_ratio_6;
+        } else {
+            atomSAs[i] = 0.0;
+        }
+    }
+    return atomSAs;
+}
+
+vector<double> IsolatedGBSAForce::getReceptorBornRadii(int groupIndex) const {
+    if (receptorMode != PAIRWISE) {
+        throw OpenMMException("IsolatedGBSAForce: receptor Born radii only available in PAIRWISE mode");
+    }
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupReceptorBornRadii.size())) {
+        throw OpenMMException("IsolatedGBSAForce: receptor Born radii not available (call getState first)");
+    }
+    return groupReceptorBornRadii[groupIndex];
+}
+
+double IsolatedGBSAForce::getGroupReceptorSurfaceAreaChange(int groupIndex) const {
+    if (receptorMode != PAIRWISE) {
+        throw OpenMMException("IsolatedGBSAForce: receptor SA change only available in PAIRWISE mode");
+    }
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupReceptorBornRadii.size())) {
+        throw OpenMMException("IsolatedGBSAForce: receptor Born radii not available (call getState first)");
+    }
+    const vector<double>& recBornRadii = groupReceptorBornRadii[groupIndex];
+
+    // ACE formula: SA_i = surfaceTension * 4π * (R_i + probe)² * (R_i / R_born_i)^6
+    const double probeRadius = 0.14;  // nm
+    const double fourPi = 4.0 * 3.14159265358979323846;
+
+    // Compute SA with ligand-descreened Born radii
+    double saWithLigand = 0.0;
+    for (int i = 0; i < numReceptorAtoms; i++) {
+        double R_i = receptorRadii[i];
+        double R_born = recBornRadii[i];
+        if (R_born > 0) {
+            double r_ratio = R_i / R_born;
+            double r_ratio_6 = r_ratio * r_ratio * r_ratio * r_ratio * r_ratio * r_ratio;
+            double surface = fourPi * (R_i + probeRadius) * (R_i + probeRadius);
+            saWithLigand += surfaceTension * surface * r_ratio_6;
+        }
+    }
+
+    // Compute "vacuum" SA (approximation: Born radius = intrinsic radius when fully exposed)
+    // In vacuum, HCT = 0 so Born radius would be the intrinsic radius
+    double saVacuum = 0.0;
+    for (int i = 0; i < numReceptorAtoms; i++) {
+        double R_i = receptorRadii[i];
+        // In vacuum, R_born = R_i, so r_ratio = 1, r_ratio^6 = 1
+        double surface = fourPi * (R_i + probeRadius) * (R_i + probeRadius);
+        saVacuum += surfaceTension * surface;
+    }
+
+    // Return the change (positive = increased SA when ligand present, which shouldn't happen
+    // normally - ligand typically buries receptor surface, reducing SA)
+    return saWithLigand - saVacuum;
+}
+
 void IsolatedGBSAForce::updateParametersInContext(Context& context) {
     dynamic_cast<IsolatedGBSAForceImpl&>(getImplInContext(context)).updateParametersInContext(getContextImpl(context));
 }

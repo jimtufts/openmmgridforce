@@ -9,6 +9,8 @@ SET(HEADER_ORDER
     "TriquinticCoefficients.cuh"
     "InvPowerChainRule.cuh"
     "TanhChainRule.cuh"
+    "HCTChainRule.cuh"
+    "KDEChainRule.cuh"
     "LJAnalyticalDerivatives.cuh"
     "GridInterpolation.cuh"
 )
@@ -31,7 +33,9 @@ STRING(REPLACE " " ";" KERNEL_FILE_LIST "${KERNEL_FILES}")
 FOREACH(file ${KERNEL_FILE_LIST})
     FILE(READ ${file} file_source)
     # Remove #include directives for our local headers since we're inlining them
+    # Match both "include/foo.cuh" and "foo.cuh" formats
     STRING(REGEX REPLACE "#include \"include/[^\"]+\"\n" "" file_source "${file_source}")
+    STRING(REGEX REPLACE "#include \"[^\"]+\\.cuh\"\n" "" file_source "${file_source}")
     SET(SOURCE_CODE "${SOURCE_CODE}${file_source}")
 ENDFOREACH()
 

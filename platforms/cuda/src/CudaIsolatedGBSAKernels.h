@@ -34,6 +34,7 @@ public:
     double getGroupCrossTermEnergy(int groupIndex) const override;
     std::vector<double> getGroupBornRadii(int groupIndex) const override;
     std::vector<double> getGroupAtomEnergies(int groupIndex) const override;
+    std::vector<double> getReceptorBornRadii(int groupIndex) const override;
 
     // Hessian computation
     std::vector<double> computeHessian(OpenMM::ContextImpl& context) override;
@@ -157,6 +158,7 @@ private:
     mutable std::vector<float> groupCrossTermEnergiesHost;
     mutable std::vector<std::vector<float>> groupBornRadiiHost;
     mutable std::vector<std::vector<float>> groupAtomEnergiesHost;
+    mutable std::vector<std::vector<float>> groupReceptorBornRadiiHost;  // PAIRWISE mode only
 };
 
 } // namespace GridForcePlugin

@@ -4,12 +4,14 @@
 
 #include "CudaGBSAGridForceKernels.h"
 #include "CudaGridForceKernelSources.h"
+#include "BSplinePrefilter.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/cuda/CudaBondedUtilities.h"
 #include "openmm/cuda/CudaForceInfo.h"
 #include "openmm/OpenMMException.h"
 #include <cmath>
 #include <iostream>
+#include <fstream>
 
 using namespace GridForcePlugin;
 using namespace OpenMM;
@@ -24,7 +26,7 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
       numAtoms(0), numParticleGroups(0), originX(0), originY(0), originZ(0),
       gridSpacing(0), probeRadius(0), numBins(0), prefactor(0),
       includeSurfaceArea(false), surfaceTension(0), interpolationMethod(0),
-      hasHctDerivatives(false),
+      hasHctDerivatives(false), useKDECorrections(false), hasBinnedKDEDerivatives(false),
       computeReceptorHCTKernel(nullptr), computeLigandHCTKernel(nullptr),
       computeBornRadiiKernel(nullptr), computeGBEnergyKernel(nullptr),
       computeSAEnergyKernel(nullptr),
@@ -35,6 +37,8 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
       generateLigandHCTGridKernel(nullptr),
       generateLigandHCTGridWithCorrectionsKernel(nullptr),
       generateLigandHCTGridWithDerivativesKernel(nullptr),
+      generateBinnedGridsWithKDEKernel(nullptr),
+      generateBinnedGridsWithKDEDerivativesKernel(nullptr),
       generationModule(nullptr) {
 }
 
@@ -78,6 +82,11 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         double origin[3] = {ox, oy, oz};
         int counts[3] = {nx, ny, nz};
 
+        // Extract KDE parameters before grid generation
+        kdeThreshold = static_cast<float>(force.getKDEThreshold());
+        kdeBandwidth = static_cast<float>(force.getKDEBandwidth());
+        kdeEpsilonB = static_cast<float>(force.getKDEEpsilonB());
+
         // Generate grid on GPU
         vector<float> hctProbe, corrN, corrA, corrB, derivatives;
         generateGrid(recPos, recRadii, recScales, numRecAtoms,
@@ -103,6 +112,34 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         } else {
             grid->setHctProbe(hctProbe);
         }
+        // Apply B-spline prefilter at generation time if requested
+        int bsplineOrder = force.getBSplinePrefilterOrder();
+        if (bsplineOrder > 0 && !hasDerivs) {
+            bsplinePrefilter3DByOrder(hctProbe, nx, ny, nz, bsplineOrder);
+            // Prefilter each bin of each correction grid independently
+            int numBinsLocal = static_cast<int>(force.getRThresholds().size());
+            if (numBinsLocal > 0 && corrN.size() == static_cast<size_t>(numBinsLocal) * nx * ny * nz) {
+                int numPts = nx * ny * nz;
+                for (int bin = 0; bin < numBinsLocal; bin++) {
+                    // Extract bin slice, prefilter, copy back
+                    vector<float> binSlice(corrN.begin() + bin * numPts,
+                                           corrN.begin() + (bin + 1) * numPts);
+                    bsplinePrefilter3DByOrder(binSlice, nx, ny, nz, bsplineOrder);
+                    copy(binSlice.begin(), binSlice.end(), corrN.begin() + bin * numPts);
+
+                    binSlice.assign(corrA.begin() + bin * numPts,
+                                    corrA.begin() + (bin + 1) * numPts);
+                    bsplinePrefilter3DByOrder(binSlice, nx, ny, nz, bsplineOrder);
+                    copy(binSlice.begin(), binSlice.end(), corrA.begin() + bin * numPts);
+
+                    binSlice.assign(corrB.begin() + bin * numPts,
+                                    corrB.begin() + (bin + 1) * numPts);
+                    bsplinePrefilter3DByOrder(binSlice, nx, ny, nz, bsplineOrder);
+                    copy(binSlice.begin(), binSlice.end(), corrB.begin() + bin * numPts);
+                }
+            }
+        }
+
         grid->setCorrectionN(corrN);
         grid->setCorrectionA(corrA);
         grid->setCorrectionB(corrB);
@@ -133,6 +170,11 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
     interpolationMethod = force.getInterpolationMethod();
+
+    // KDE smoothing parameters for grid generation
+    kdeThreshold = static_cast<float>(force.getKDEThreshold());
+    kdeBandwidth = static_cast<float>(force.getKDEBandwidth());
+    kdeEpsilonB = static_cast<float>(force.getKDEEpsilonB());
 
     // Upload grid dimensions
     int nx, ny, nz;
@@ -179,15 +221,61 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         gridHctProbe.upload(hctData);
     }
 
-    int corrSize = numBins * numPoints;
-    gridCorrectionN.initialize<float>(cu, corrSize, "gbsaGridCorrectionN");
-    gridCorrectionN.upload(grid->getCorrectionN());
+    // Upload correction grids - detect mode by size
+    // Pure KDE mode: [27 * numPoints] - not binned, deprecated
+    // Binned mode: [numBins * numPoints] for trilinear lookup by radius bin
+    // Binned+KDE derivatives mode: [numBins * 27 * numPoints] for tricubic/triquintic per bin
+    const auto& corrNData = grid->getCorrectionN();
+    size_t expectedKDESize = static_cast<size_t>(27) * numPoints;
+    size_t expectedBinnedSize = static_cast<size_t>(numBins) * numPoints;
+    size_t expectedBinnedKDESize = static_cast<size_t>(numBins) * 27 * numPoints;
 
-    gridCorrectionA.initialize<float>(cu, corrSize, "gbsaGridCorrectionA");
-    gridCorrectionA.upload(grid->getCorrectionA());
+    if (corrNData.size() == expectedBinnedKDESize) {
+        // Binned+KDE derivatives mode - correction grids have 27 derivatives per bin
+        // Layout: [bin * 27 * numPoints + deriv * numPoints + point]
+        useKDECorrections = true;  // Use high-order interpolation for corrections
+        hasBinnedKDEDerivatives = true;  // Binned format with derivatives
+        gridCorrectionN.initialize<float>(cu, corrNData.size(), "gbsaGridCorrectionN");
+        gridCorrectionN.upload(corrNData);
 
-    gridCorrectionB.initialize<float>(cu, corrSize, "gbsaGridCorrectionB");
-    gridCorrectionB.upload(grid->getCorrectionB());
+        gridCorrectionA.initialize<float>(cu, grid->getCorrectionA().size(), "gbsaGridCorrectionA");
+        gridCorrectionA.upload(grid->getCorrectionA());
+
+        gridCorrectionB.initialize<float>(cu, grid->getCorrectionB().size(), "gbsaGridCorrectionB");
+        gridCorrectionB.upload(grid->getCorrectionB());
+    } else if (corrNData.size() == expectedKDESize) {
+        // Pure KDE mode (deprecated) - correction grids have 27 derivatives, no bins
+        useKDECorrections = true;
+        hasBinnedKDEDerivatives = false;
+        gridCorrectionN.initialize<float>(cu, corrNData.size(), "gbsaGridCorrectionN");
+        gridCorrectionN.upload(corrNData);
+
+        gridCorrectionA.initialize<float>(cu, grid->getCorrectionA().size(), "gbsaGridCorrectionA");
+        gridCorrectionA.upload(grid->getCorrectionA());
+
+        gridCorrectionB.initialize<float>(cu, grid->getCorrectionB().size(), "gbsaGridCorrectionB");
+        gridCorrectionB.upload(grid->getCorrectionB());
+    } else if (corrNData.size() == expectedBinnedSize || numBins == 0) {
+        // Binned mode - correction grids indexed by radius bin (trilinear only)
+        useKDECorrections = false;
+        hasBinnedKDEDerivatives = false;
+        int corrSize = numBins * numPoints;
+        if (corrSize == 0) corrSize = numPoints;  // Handle single-bin case
+        gridCorrectionN.initialize<float>(cu, corrSize, "gbsaGridCorrectionN");
+        gridCorrectionN.upload(corrNData);
+
+        gridCorrectionA.initialize<float>(cu, corrSize, "gbsaGridCorrectionA");
+        gridCorrectionA.upload(grid->getCorrectionA());
+
+        gridCorrectionB.initialize<float>(cu, corrSize, "gbsaGridCorrectionB");
+        gridCorrectionB.upload(grid->getCorrectionB());
+    } else {
+        throw OpenMMException("GBSAGridForce: correction grid size mismatch. Expected " +
+            std::to_string(expectedBinnedKDESize) + " (binned+KDE) or " +
+            std::to_string(expectedKDESize) + " (KDE) or " +
+            std::to_string(expectedBinnedSize) + " (binned) but got " +
+            std::to_string(corrNData.size()));
+    }
 
     // Upload R thresholds
     const auto& thresholds = grid->getRThresholds();
@@ -368,7 +456,8 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
         &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
         &originX, &originY, &originZ, &gridSpacing, &probeRadius,
-        &numBins, &totalParticles, &numAtoms, &interpolationMethod, &hctReceptorPtr
+        &numBins, &totalParticles, &numAtoms, &interpolationMethod,
+        &useKDECorrections, &hasBinnedKDEDerivatives, &hctReceptorPtr
     };
     cu.executeKernel(computeReceptorHCTKernel, receptorArgs, numBlocks * blockSize, blockSize);
 
@@ -445,7 +534,8 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
             &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
             &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
             &originX, &originY, &originZ, &gridSpacing, &probeRadius,
-            &numBins, &totalParticles, &numAtoms, &interpolationMethod, &forcePtr, &paddedNumAtoms
+            &numBins, &totalParticles, &numAtoms, &interpolationMethod,
+            &useKDECorrections, &hasBinnedKDEDerivatives, &forcePtr, &paddedNumAtoms
         };
         cu.executeKernel(computeReceptorHCTGradientForceKernel, receptorGradArgs, numBlocks * blockSize, blockSize);
     }
@@ -567,6 +657,11 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
         generateLigandHCTGridKernel = cu.getKernel(generationModule, "generateLigandHCTGrid");
         generateLigandHCTGridWithCorrectionsKernel = cu.getKernel(generationModule, "generateLigandHCTGridWithCorrections");
         generateLigandHCTGridWithDerivativesKernel = cu.getKernel(generationModule, "generateLigandHCTGridWithDerivatives");
+        generateBinnedGridsWithKDEKernel = cu.getKernel(generationModule, "generateBinnedGridsWithKDE");
+        generateBinnedGridsWithKDEDerivativesKernel = cu.getKernel(generationModule, "generateBinnedGridsWithKDEDerivatives");
+        // New 4-grid generation kernels (all in same module)
+        generateDesolvationGrids4Kernel = cu.getKernel(generationModule, "generateDesolvationGrids4");
+        generateHCTProbeGridKernel = cu.getKernel(generationModule, "generateHCTProbeGrid");
     }
 
     // Convert to float arrays
@@ -595,9 +690,8 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
     float spacingF = static_cast<float>(spacing);
     float probeRadiusF = static_cast<float>(probeRadiusIn);
 
-    // Allocate GPU memory
+    // Allocate GPU memory for receptor data
     CudaArray d_positions, d_radii, d_scales, d_thresholds, d_counts;
-    CudaArray d_hctProbe, d_corrN, d_corrA, d_corrB, d_derivatives;
 
     d_positions.initialize<float3>(cu, numReceptorAtoms, "genRecPositions");
     d_radii.initialize<float>(cu, numReceptorAtoms, "genRecRadii");
@@ -612,64 +706,73 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
     vector<int> countsVec = {nx, ny, nz};
     d_counts.upload(countsVec);
 
-    // Allocate output arrays
+    int blockSize = 256;
+    int numBlocks = (totalGridPoints + blockSize - 1) / blockSize;
+
+    if (computeDerivatives) {
+        // Use generateBinnedGridsWithKDEDerivatives kernel: generates HCT grid with 27 derivatives
+        // plus binned correction grids with 27 derivatives per bin.
+        // Output layouts:
+        //   gridHctDerivatives: [27 * totalGridPoints] in RASPA3 order
+        //   gridCorrectionN/A/B: [numBins * 27 * totalGridPoints] - bin-major, then deriv, then point
+        CudaArray d_hctDerivs, d_corrN, d_corrA, d_corrB;
+        d_hctDerivs.initialize<float>(cu, 27 * totalGridPoints, "genHctDerivs");
+        d_corrN.initialize<float>(cu, numBinsIn * 27 * totalGridPoints, "genCorrN");
+        d_corrA.initialize<float>(cu, numBinsIn * 27 * totalGridPoints, "genCorrA");
+        d_corrB.initialize<float>(cu, numBinsIn * 27 * totalGridPoints, "genCorrB");
+
+        void* args[] = {
+            &d_hctDerivs.getDevicePointer(),
+            &d_corrN.getDevicePointer(),
+            &d_corrA.getDevicePointer(),
+            &d_corrB.getDevicePointer(),
+            &d_positions.getDevicePointer(),
+            &d_radii.getDevicePointer(),
+            &d_scales.getDevicePointer(),
+            &numReceptorAtoms,
+            &probeRadiusF,
+            &d_thresholds.getDevicePointer(),
+            &numBinsIn,
+            &kdeBandwidth,
+            &kdeEpsilonB,
+            &originXf, &originYf, &originZf,
+            &d_counts.getDevicePointer(),
+            &spacingF,
+            &totalGridPoints
+        };
+        cu.executeKernel(generateBinnedGridsWithKDEDerivativesKernel, args, numBlocks * blockSize, blockSize);
+
+        // Download HCT derivatives (27 per point, RASPA3 layout)
+        outDerivatives.resize(27 * totalGridPoints);
+        d_hctDerivs.download(outDerivatives);
+
+        // Extract HCT values from derivative array (first plane is the value)
+        outHctProbe.resize(totalGridPoints);
+        for (int i = 0; i < totalGridPoints; i++) {
+            outHctProbe[i] = outDerivatives[i];
+        }
+
+        // Download binned correction grids with derivatives
+        // Layout: [bin * 27 * totalGridPoints + deriv * totalGridPoints + point]
+        outCorrectionN.resize(numBinsIn * 27 * totalGridPoints);
+        outCorrectionA.resize(numBinsIn * 27 * totalGridPoints);
+        outCorrectionB.resize(numBinsIn * 27 * totalGridPoints);
+        d_corrN.download(outCorrectionN);
+        d_corrA.download(outCorrectionA);
+        d_corrB.download(outCorrectionB);
+
+        return;  // Binned+KDE derivatives path complete
+    }
+
+    // Non-derivative path: use binned corrections with KDE smoothing
+    CudaArray d_hctProbe, d_corrN, d_corrA, d_corrB;
     d_hctProbe.initialize<float>(cu, totalGridPoints, "genHctProbe");
     d_corrN.initialize<float>(cu, numBinsIn * totalGridPoints, "genCorrN");
     d_corrA.initialize<float>(cu, numBinsIn * totalGridPoints, "genCorrA");
     d_corrB.initialize<float>(cu, numBinsIn * totalGridPoints, "genCorrB");
 
-    int blockSize = 256;
-    int numBlocks = (totalGridPoints + blockSize - 1) / blockSize;
-
-    if (computeDerivatives) {
-        // Generate with 27 derivatives per point
-        d_derivatives.initialize<float>(cu, 27 * totalGridPoints, "genDerivatives");
-
-        void* args[] = {
-            &d_derivatives.getDevicePointer(),
-            &d_positions.getDevicePointer(),
-            &d_radii.getDevicePointer(),
-            &d_scales.getDevicePointer(),
-            &numReceptorAtoms,
-            &probeRadiusF,
-            &originXf, &originYf, &originZf,
-            &d_counts.getDevicePointer(),
-            &spacingF,
-            &totalGridPoints
-        };
-        cu.executeKernel(generateLigandHCTGridWithDerivativesKernel, args, numBlocks * blockSize, blockSize);
-
-        // Download derivatives (includes value at index 0)
-        outDerivatives.resize(27 * totalGridPoints);
-        d_derivatives.download(outDerivatives);
-
-        // Extract HCT values from derivative array (index 0 for each point)
-        outHctProbe.resize(totalGridPoints);
-        for (int i = 0; i < totalGridPoints; i++) {
-            outHctProbe[i] = outDerivatives[i];  // First derivative plane is the value
-        }
-
-        // Also compute correction grids (always needed, use separate kernel)
-        void* corrArgs[] = {
-            &d_hctProbe.getDevicePointer(),
-            &d_corrN.getDevicePointer(),
-            &d_corrA.getDevicePointer(),
-            &d_corrB.getDevicePointer(),
-            &d_positions.getDevicePointer(),
-            &d_radii.getDevicePointer(),
-            &d_scales.getDevicePointer(),
-            &numReceptorAtoms,
-            &probeRadiusF,
-            &d_thresholds.getDevicePointer(),
-            &numBinsIn,
-            &originXf, &originYf, &originZf,
-            &d_counts.getDevicePointer(),
-            &spacingF,
-            &totalGridPoints
-        };
-        cu.executeKernel(generateLigandHCTGridWithCorrectionsKernel, corrArgs, numBlocks * blockSize, blockSize);
-    } else {
-        // Generate values and corrections only
+    {
+        // Generate values and corrections with KDE smoothing within bins
         void* args[] = {
             &d_hctProbe.getDevicePointer(),
             &d_corrN.getDevicePointer(),
@@ -682,12 +785,13 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
             &probeRadiusF,
             &d_thresholds.getDevicePointer(),
             &numBinsIn,
+            &kdeBandwidth,  // KDE bandwidth for smooth transitions
             &originXf, &originYf, &originZf,
             &d_counts.getDevicePointer(),
             &spacingF,
             &totalGridPoints
         };
-        cu.executeKernel(generateLigandHCTGridWithCorrectionsKernel, args, numBlocks * blockSize, blockSize);
+        cu.executeKernel(generateBinnedGridsWithKDEKernel, args, numBlocks * blockSize, blockSize);
 
         outHctProbe.resize(totalGridPoints);
         d_hctProbe.download(outHctProbe);

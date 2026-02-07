@@ -33,9 +33,12 @@ struct GBSAInterpolationResult {
  * Supports trilinear (method=0), B-spline (method=1), tricubic (method=2),
  * and triquintic (method=3).
  *
- * For tricubic/triquintic, the HCT grid uses higher-order interpolation
- * with stored derivatives, while correction grids (N, A, B) use trilinear
- * due to inherent discontinuities at regime boundaries.
+ * Correction grids (N, A, B) can be either:
+ * - Binned: [numBins * numPoints], use binOffset for radius-dependent lookup, trilinear only
+ * - KDE: [27 * numPoints], smooth KDE-weighted values with derivatives, same method as HCT
+ *
+ * When useKDECorrections=true, ALL grids use the same interpolation method.
+ * This is critical because N, A, B contribute 94% of discontinuity.
  *
  * @param position       Query position
  * @param R_i_off        Offset radius of querying atom
@@ -46,10 +49,11 @@ struct GBSAInterpolationResult {
  * @param gridHctProbe   HCT values at probe radius (also stores f derivative for tricubic/triquintic)
  * @param gridHctDerivatives  HCT derivatives for tricubic (8) or triquintic (27), RASPA3 layout
  *                            Shape: (n_derivs, total_points), nullptr for trilinear/bspline
- * @param gridCorrectionN, A, B  Correction grids [numBins * numPoints]
- * @param binOffset      Offset into correction grids for selected bin
+ * @param gridCorrectionN, A, B  Correction grids: [numBins * numPoints] or [27 * numPoints] for KDE
+ * @param binOffset      Offset into correction grids for selected bin (ignored if useKDECorrections=true)
  * @param method         Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
  * @param computeGradient Whether to compute gradient
+ * @param useKDECorrections If true, correction grids are KDE format with 27 derivatives each
  */
 __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
     float3 position,
@@ -65,7 +69,9 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
     const float* __restrict__ gridCorrectionB,
     int binOffset,
     int method,
-    bool computeGradient)
+    bool computeGradient,
+    bool useKDECorrections = false,
+    bool hasBinnedKDEDerivatives = false)
 {
     GBSAInterpolationResult result;
     result.hct = 0.0f;
@@ -105,10 +111,21 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
     if (method == 1) {
         // B-spline interpolation using shared library
         // Set up grid pointers for multi-grid interpolation
+        // Compute correction offset based on format
+        int corrOffset;
+        if (hasBinnedKDEDerivatives) {
+            int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
+            int binIdx = binOffset / numPoints;
+            corrOffset = binIdx * 27 * numPoints;  // Values are at deriv=0
+        } else if (useKDECorrections) {
+            corrOffset = 0;
+        } else {
+            corrOffset = binOffset;
+        }
         const float* grids[4] = {gridHctProbe,
-                                  gridCorrectionN + binOffset,
-                                  gridCorrectionA + binOffset,
-                                  gridCorrectionB + binOffset};
+                                  gridCorrectionN + corrOffset,
+                                  gridCorrectionA + corrOffset,
+                                  gridCorrectionB + corrOffset};
 
         MultiGridResult mgResult = bsplineInterpolateMultipleWithGradients(
             grids, 4, gridCounts, gridSpacingArr,
@@ -156,7 +173,7 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
         }
     } else if (method == 2 || method == 3) {
         // Tricubic (2) or triquintic (3) interpolation for HCT
-        // Correction grids use trilinear (discontinuities at regime boundaries)
+        // Correction grids use same method when KDE mode, trilinear when binned mode
 
         if (gridHctDerivatives == nullptr) {
             // No derivatives provided, fall back to trilinear
@@ -176,27 +193,81 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
             }
 
             float hct = hctResult.value;
+            float N, A, B;
+            float3 nGrad = make_float3(0.0f, 0.0f, 0.0f);
+            float3 aGrad = make_float3(0.0f, 0.0f, 0.0f);
+            float3 bGrad = make_float3(0.0f, 0.0f, 0.0f);
 
-            // Use trilinear for correction grids N, A, B
-            float N000 = gridCorrectionN[binOffset + c000];
-            float N001 = gridCorrectionN[binOffset + c001];
-            float N010 = gridCorrectionN[binOffset + c010];
-            float N011 = gridCorrectionN[binOffset + c011];
-            float N100 = gridCorrectionN[binOffset + c100];
-            float N101 = gridCorrectionN[binOffset + c101];
-            float N110 = gridCorrectionN[binOffset + c110];
-            float N111 = gridCorrectionN[binOffset + c111];
+            if (useKDECorrections) {
+                // KDE mode: use same interpolation method for correction grids
+                // KDE grids have 27 derivatives in RASPA3 layout
+                // Binned+KDE derivatives layout: [bin * 27 * numPoints + deriv * numPoints + point]
+                // Compute bin offset for binned+KDE derivatives format
+                int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
+                int binIdx = (binOffset > 0) ? (binOffset / numPoints) : 0;
+                int binDerivOffset = binIdx * 27 * numPoints;
 
-            float Nmm = oz * N000 + fz * N001;
-            float Nmp = oz * N010 + fz * N011;
-            float Npm = oz * N100 + fz * N101;
-            float Npp = oz * N110 + fz * N111;
-            float Nm = oy * Nmm + fy * Nmp;
-            float Np = oy * Npm + fy * Npp;
-            float N = ox * Nm + fx * Np;
+                // Get pointers to this bin's data
+                const float* nGridBin = gridCorrectionN + binDerivOffset;
+                const float* aGridBin = gridCorrectionA + binDerivOffset;
+                const float* bGridBin = gridCorrectionB + binDerivOffset;
 
-            if (N > 0.5f) {
-                // Load and interpolate A, B with trilinear
+                InterpolationResult nResult, aResult, bResult;
+                if (method == 2) {
+                    nResult = tricubicInterpolate(
+                        nGridBin, nGridBin, gridCounts, gridSpacingArr,
+                        originX, originY, originZ, position, computeGradient, true);
+                    aResult = tricubicInterpolate(
+                        aGridBin, aGridBin, gridCounts, gridSpacingArr,
+                        originX, originY, originZ, position, computeGradient, true);
+                    bResult = tricubicInterpolate(
+                        bGridBin, bGridBin, gridCounts, gridSpacingArr,
+                        originX, originY, originZ, position, computeGradient, true);
+                } else {
+                    nResult = triquinticInterpolate(
+                        nGridBin, nGridBin, gridCounts, gridSpacingArr,
+                        originX, originY, originZ, position, computeGradient, true);
+                    aResult = triquinticInterpolate(
+                        aGridBin, aGridBin, gridCounts, gridSpacingArr,
+                        originX, originY, originZ, position, computeGradient, true);
+                    bResult = triquinticInterpolate(
+                        bGridBin, bGridBin, gridCounts, gridSpacingArr,
+                        originX, originY, originZ, position, computeGradient, true);
+                }
+                N = nResult.value;
+                A = aResult.value;
+                B = bResult.value;
+                nGrad = nResult.gradient;
+                aGrad = aResult.gradient;
+                bGrad = bResult.gradient;
+            } else {
+                // Binned mode: use trilinear for correction grids N, A, B
+                float N000 = gridCorrectionN[binOffset + c000];
+                float N001 = gridCorrectionN[binOffset + c001];
+                float N010 = gridCorrectionN[binOffset + c010];
+                float N011 = gridCorrectionN[binOffset + c011];
+                float N100 = gridCorrectionN[binOffset + c100];
+                float N101 = gridCorrectionN[binOffset + c101];
+                float N110 = gridCorrectionN[binOffset + c110];
+                float N111 = gridCorrectionN[binOffset + c111];
+
+                float Nmm = oz * N000 + fz * N001;
+                float Nmp = oz * N010 + fz * N011;
+                float Npm = oz * N100 + fz * N101;
+                float Npp = oz * N110 + fz * N111;
+                float Nm = oy * Nmm + fy * Nmp;
+                float Np = oy * Npm + fy * Npp;
+                N = ox * Nm + fx * Np;
+
+                // Compute trilinear gradients for N
+                if (computeGradient) {
+                    nGrad.x = (Np - Nm) * invSpacing;
+                    nGrad.y = (ox * (Nmp - Nmm) + fx * (Npp - Npm)) * invSpacing;
+                    nGrad.z = (ox * (oy * (N001 - N000) + fy * (N011 - N010)) +
+                               fx * (oy * (N101 - N100) + fy * (N111 - N110))) * invSpacing;
+                }
+
+                // Load A, B values
                 float A000 = gridCorrectionA[binOffset + c000];
                 float A001 = gridCorrectionA[binOffset + c001];
                 float A010 = gridCorrectionA[binOffset + c010];
@@ -212,7 +283,7 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                 float App = oz * A110 + fz * A111;
                 float Am = oy * Amm + fy * Amp;
                 float Ap = oy * Apm + fy * App;
-                float A = ox * Am + fx * Ap;
+                A = ox * Am + fx * Ap;
 
                 float B000 = gridCorrectionB[binOffset + c000];
                 float B001 = gridCorrectionB[binOffset + c001];
@@ -229,8 +300,22 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                 float Bpp = oz * B110 + fz * B111;
                 float Bm = oy * Bmm + fy * Bmp;
                 float Bp = oy * Bpm + fy * Bpp;
-                float B = ox * Bm + fx * Bp;
+                B = ox * Bm + fx * Bp;
 
+                if (computeGradient) {
+                    aGrad.x = (Ap - Am) * invSpacing;
+                    aGrad.y = (ox * (Amp - Amm) + fx * (App - Apm)) * invSpacing;
+                    aGrad.z = (ox * (oy * (A001 - A000) + fy * (A011 - A010)) +
+                               fx * (oy * (A101 - A100) + fy * (A111 - A110))) * invSpacing;
+
+                    bGrad.x = (Bp - Bm) * invSpacing;
+                    bGrad.y = (ox * (Bmp - Bmm) + fx * (Bpp - Bpm)) * invSpacing;
+                    bGrad.z = (ox * (oy * (B001 - B000) + fy * (B011 - B010)) +
+                               fx * (oy * (B101 - B100) + fy * (B111 - B110))) * invSpacing;
+                }
+            }
+
+            if (N > 0.5f) {
                 // Apply correction
                 float invRi = 1.0f / R_i_off;
                 float invRp = 1.0f / R_probe_off;
@@ -241,34 +326,18 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                 result.hct = hct + delta * (N - 0.25f * A * sigma) + B * logTerm;
 
                 if (computeGradient) {
-                    // HCT gradient from tricubic/triquintic
-                    // Correction gradients from trilinear
+                    // Chain rule coefficients for correction formula
                     float dCorr_dN = delta;
                     float dCorr_dA = -0.25f * delta * sigma;
                     float dCorr_dB = logTerm;
 
-                    float dN_dfx = Np - Nm;
-                    float dN_dfy = ox * (Nmp - Nmm) + fx * (Npp - Npm);
-                    float dN_dfz = ox * (oy * (N001 - N000) + fy * (N011 - N010)) +
-                                   fx * (oy * (N101 - N100) + fy * (N111 - N110));
-
-                    float dA_dfx = Ap - Am;
-                    float dA_dfy = ox * (Amp - Amm) + fx * (App - Apm);
-                    float dA_dfz = ox * (oy * (A001 - A000) + fy * (A011 - A010)) +
-                                   fx * (oy * (A101 - A100) + fy * (A111 - A110));
-
-                    float dB_dfx = Bp - Bm;
-                    float dB_dfy = ox * (Bmp - Bmm) + fx * (Bpp - Bpm);
-                    float dB_dfz = ox * (oy * (B001 - B000) + fy * (B011 - B010)) +
-                                   fx * (oy * (B101 - B100) + fy * (B111 - B110));
-
-                    // HCT gradient already in real-space units from interpolate function
+                    // Combine HCT gradient with correction gradients
                     result.gradient.x = hctResult.gradient.x +
-                        (dCorr_dN * dN_dfx + dCorr_dA * dA_dfx + dCorr_dB * dB_dfx) * invSpacing;
+                        dCorr_dN * nGrad.x + dCorr_dA * aGrad.x + dCorr_dB * bGrad.x;
                     result.gradient.y = hctResult.gradient.y +
-                        (dCorr_dN * dN_dfy + dCorr_dA * dA_dfy + dCorr_dB * dB_dfy) * invSpacing;
+                        dCorr_dN * nGrad.y + dCorr_dA * aGrad.y + dCorr_dB * bGrad.y;
                     result.gradient.z = hctResult.gradient.z +
-                        (dCorr_dN * dN_dfz + dCorr_dA * dA_dfz + dCorr_dB * dB_dfz) * invSpacing;
+                        dCorr_dN * nGrad.z + dCorr_dA * aGrad.z + dCorr_dB * bGrad.z;
                 }
             } else {
                 result.hct = hct;
@@ -283,6 +352,24 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
 
     if (method == 0) {
         // Trilinear interpolation (default, optimized version)
+        // Compute correction offset based on format:
+        // - Pure KDE [27*numPoints]: offset=0
+        // - Binned [numBins*numPoints]: offset=binOffset
+        // - Binned+KDE [numBins*27*numPoints]: offset=binIdx*27*numPoints (values at deriv=0)
+        int corrOffset;
+        if (hasBinnedKDEDerivatives) {
+            // Binned+KDE: binOffset was computed as binIdx*numPoints, need binIdx*27*numPoints
+            int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
+            int binIdx = binOffset / numPoints;
+            corrOffset = binIdx * 27 * numPoints;  // Values are at deriv=0
+        } else if (useKDECorrections) {
+            // Pure KDE: no binning
+            corrOffset = 0;
+        } else {
+            // Standard binned: use binOffset directly
+            corrOffset = binOffset;
+        }
+
         // Load HCT probe values
         float h000 = gridHctProbe[c000];
         float h001 = gridHctProbe[c001];
@@ -303,14 +390,14 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
         float hct = ox * vm + fx * vp;
 
         // Load and interpolate N
-        float N000 = gridCorrectionN[binOffset + c000];
-        float N001 = gridCorrectionN[binOffset + c001];
-        float N010 = gridCorrectionN[binOffset + c010];
-        float N011 = gridCorrectionN[binOffset + c011];
-        float N100 = gridCorrectionN[binOffset + c100];
-        float N101 = gridCorrectionN[binOffset + c101];
-        float N110 = gridCorrectionN[binOffset + c110];
-        float N111 = gridCorrectionN[binOffset + c111];
+        float N000 = gridCorrectionN[corrOffset + c000];
+        float N001 = gridCorrectionN[corrOffset + c001];
+        float N010 = gridCorrectionN[corrOffset + c010];
+        float N011 = gridCorrectionN[corrOffset + c011];
+        float N100 = gridCorrectionN[corrOffset + c100];
+        float N101 = gridCorrectionN[corrOffset + c101];
+        float N110 = gridCorrectionN[corrOffset + c110];
+        float N111 = gridCorrectionN[corrOffset + c111];
 
         float Nmm = oz * N000 + fz * N001;
         float Nmp = oz * N010 + fz * N011;
@@ -322,14 +409,14 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
 
         if (N > 0.5f) {
             // Load and interpolate A, B
-            float A000 = gridCorrectionA[binOffset + c000];
-            float A001 = gridCorrectionA[binOffset + c001];
-            float A010 = gridCorrectionA[binOffset + c010];
-            float A011 = gridCorrectionA[binOffset + c011];
-            float A100 = gridCorrectionA[binOffset + c100];
-            float A101 = gridCorrectionA[binOffset + c101];
-            float A110 = gridCorrectionA[binOffset + c110];
-            float A111 = gridCorrectionA[binOffset + c111];
+            float A000 = gridCorrectionA[corrOffset + c000];
+            float A001 = gridCorrectionA[corrOffset + c001];
+            float A010 = gridCorrectionA[corrOffset + c010];
+            float A011 = gridCorrectionA[corrOffset + c011];
+            float A100 = gridCorrectionA[corrOffset + c100];
+            float A101 = gridCorrectionA[corrOffset + c101];
+            float A110 = gridCorrectionA[corrOffset + c110];
+            float A111 = gridCorrectionA[corrOffset + c111];
 
             float Amm = oz * A000 + fz * A001;
             float Amp = oz * A010 + fz * A011;
@@ -339,14 +426,14 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
             float Ap = oy * Apm + fy * App;
             float A = ox * Am + fx * Ap;
 
-            float B000 = gridCorrectionB[binOffset + c000];
-            float B001 = gridCorrectionB[binOffset + c001];
-            float B010 = gridCorrectionB[binOffset + c010];
-            float B011 = gridCorrectionB[binOffset + c011];
-            float B100 = gridCorrectionB[binOffset + c100];
-            float B101 = gridCorrectionB[binOffset + c101];
-            float B110 = gridCorrectionB[binOffset + c110];
-            float B111 = gridCorrectionB[binOffset + c111];
+            float B000 = gridCorrectionB[corrOffset + c000];
+            float B001 = gridCorrectionB[corrOffset + c001];
+            float B010 = gridCorrectionB[corrOffset + c010];
+            float B011 = gridCorrectionB[corrOffset + c011];
+            float B100 = gridCorrectionB[corrOffset + c100];
+            float B101 = gridCorrectionB[corrOffset + c101];
+            float B110 = gridCorrectionB[corrOffset + c110];
+            float B111 = gridCorrectionB[corrOffset + c111];
 
             float Bmm = oz * B000 + fz * B001;
             float Bmp = oz * B010 + fz * B011;
@@ -415,8 +502,11 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
 
 /**
  * Compute HCT contribution from receptor via grid interpolation.
- * Applies binned correction for exact results at any ligand radius.
+ * Applies correction for exact results at any ligand radius.
  * Supports multiple interpolation methods via the method parameter.
+ *
+ * When useKDECorrections=true, correction grids are KDE format [27*numPoints]
+ * and use the same interpolation method as HCT. Otherwise uses binned format.
  */
 extern "C" __global__ void computeReceptorHCT(
     const float4* __restrict__ posq,           // Positions (xyz) and charges (w)
@@ -425,10 +515,10 @@ extern "C" __global__ void computeReceptorHCT(
     const int* __restrict__ gridCounts,        // [nx, ny, nz]
     const float* __restrict__ gridHctProbe,    // HCT values at probe radius
     const float* __restrict__ gridHctDerivatives, // HCT derivatives for tricubic/triquintic (or nullptr)
-    const float* __restrict__ gridCorrectionN, // Correction N [nBins * nPoints]
+    const float* __restrict__ gridCorrectionN, // Correction N [nBins * nPoints] or [27 * nPoints] for KDE
     const float* __restrict__ gridCorrectionA, // Correction A
     const float* __restrict__ gridCorrectionB, // Correction B
-    const float* __restrict__ rThresholds,     // Bin thresholds
+    const float* __restrict__ rThresholds,     // Bin thresholds (ignored for KDE mode)
     const int* __restrict__ groupStart,        // Group start indices
     int numGroups,
     float originX, float originY, float originZ,
@@ -438,6 +528,8 @@ extern "C" __global__ void computeReceptorHCT(
     int totalParticles,
     int templateNumAtoms,
     int interpolationMethod,                   // 0=trilinear, 1=bspline, 2=tricubic, 3=triquintic
+    bool useKDECorrections,                    // True if correction grids have 27 derivatives
+    bool hasBinnedKDEDerivatives,              // True if corrections are binned+KDE [numBins*27*nPoints]
     float* __restrict__ hctReceptor            // Output: HCT from receptor
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -490,7 +582,8 @@ extern "C" __global__ void computeReceptorHCT(
         originX, originY, originZ,
         gridHctProbe, gridHctDerivatives,
         gridCorrectionN, gridCorrectionA, gridCorrectionB,
-        binOffset, interpolationMethod, false  // computeGradient=false
+        binOffset, interpolationMethod, false,  // computeGradient=false
+        useKDECorrections, hasBinnedKDEDerivatives
     );
 
     hctReceptor[idx] = result.isInside ? result.hct : 0.0f;
@@ -869,6 +962,9 @@ extern "C" __global__ void accumulateSADerivatives(
 /**
  * Compute forces from receptor HCT grid interpolation gradient.
  * Supports multiple interpolation methods via the interpolationMethod parameter.
+ *
+ * When useKDECorrections=true, correction grids are KDE format [27*numPoints]
+ * and use the same interpolation method as HCT for smooth force continuity.
  */
 extern "C" __global__ void computeReceptorHCTGradientForce(
     const float4* __restrict__ posq,
@@ -893,7 +989,9 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
     int numBins,
     int totalParticles,
     int templateNumAtoms,
-    int interpolationMethod,                    // 0=trilinear, 1=bspline
+    int interpolationMethod,                    // 0=trilinear, 1=bspline, 2=tricubic, 3=triquintic
+    bool useKDECorrections,                     // True if correction grids have 27 derivatives
+    bool hasBinnedKDEDerivatives,               // True if corrections are binned+KDE [numBins*27*nPoints]
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms
 ) {
@@ -961,7 +1059,8 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
         originX, originY, originZ,
         gridHctProbe, gridHctDerivatives,
         gridCorrectionN, gridCorrectionA, gridCorrectionB,
-        binOffset, interpolationMethod, true  // computeGradient=true
+        binOffset, interpolationMethod, true,  // computeGradient=true
+        useKDECorrections, hasBinnedKDEDerivatives
     );
 
     // Force = -dE/dHCT * gradient (gradient is zero if outside grid)

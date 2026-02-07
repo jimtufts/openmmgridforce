@@ -96,6 +96,12 @@ public:
     virtual std::vector<double> getGroupAtomEnergies(int groupIndex) const = 0;
 
     /**
+     * Get the receptor Born radii (PAIRWISE mode only).
+     * These include the ligand's contribution to receptor HCT.
+     */
+    virtual std::vector<double> getReceptorBornRadii(int groupIndex) const = 0;
+
+    /**
      * Compute the Hessian (second derivatives) for the GBSA force.
      */
     virtual std::vector<double> computeHessian(OpenMM::ContextImpl& context) = 0;
