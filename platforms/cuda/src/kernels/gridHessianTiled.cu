@@ -84,7 +84,8 @@ extern "C" __global__ void computeGridHessianTiled(
     const unsigned long long* __restrict__ tileDerivPtrs,
     const int numTiles,
     const int tileSize,
-    const int tileOverlap)
+    const int tileOverlap,
+    const float arcsinhScale)
 {
     const int tileWithOverlap = tileSize + 2 * tileOverlap;
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -266,6 +267,27 @@ extern "C" __global__ void computeGridHessianTiled(
                     }
                 }
 
+                // Arcsinh chain rule: V = scale*sinh(g), d²V/dxi dxj = scale*[sinh(g)*dg_i*dg_j + cosh(g)*d²g_ij]
+                if (arcsinhScale > 0.0f) {
+                    float g = interpolated;
+                    float sinhG = sinhf(g);
+                    float coshG = coshf(g);
+
+                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+
+                    dx = arcsinhScale * coshG * dx;
+                    dy = arcsinhScale * coshG * dy;
+                    dz = arcsinhScale * coshG * dz;
+
+                    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+                }
+
                 // Convert from unit cell to physical coordinates
                 float inv_dx = 1.0f / gridSpacing[0];
                 float inv_dy = 1.0f / gridSpacing[1];
@@ -369,6 +391,27 @@ extern "C" __global__ void computeGridHessianTiled(
                     }
                 }
 
+                // Arcsinh chain rule: V = scale*sinh(g), d²V/dxi dxj = scale*[sinh(g)*dg_i*dg_j + cosh(g)*d²g_ij]
+                if (arcsinhScale > 0.0f) {
+                    float g = interpolated;
+                    float sinhG = sinhf(g);
+                    float coshG = coshf(g);
+
+                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+
+                    dx = arcsinhScale * coshG * dx;
+                    dy = arcsinhScale * coshG * dy;
+                    dz = arcsinhScale * coshG * dz;
+
+                    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+                }
+
                 // Convert to physical coordinates
                 float inv_dx = 1.0f / gridSpacing[0];
                 float inv_dy = 1.0f / gridSpacing[1];
@@ -386,6 +429,122 @@ extern "C" __global__ void computeGridHessianTiled(
                 d2xy *= inv_dxdy;
                 d2xz *= inv_dxdz;
                 d2yz *= inv_dydz;
+
+            } else if (interpolationMethod == 4) {
+                // QUINTIC B-SPLINE - Analytical second derivatives from 6-point stencil
+
+                float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+                               qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
+                float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+                               qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
+                float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+                               qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
+
+                float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+                                qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
+                float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+                                qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
+                float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+                                qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
+
+                float d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
+                                 qbspline_deriv2_3(fx), qbspline_deriv2_4(fx), qbspline_deriv2_5(fx)};
+                float d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
+                                 qbspline_deriv2_3(fy), qbspline_deriv2_4(fy), qbspline_deriv2_5(fy)};
+                float d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
+                                 qbspline_deriv2_3(fz), qbspline_deriv2_4(fz), qbspline_deriv2_5(fz)};
+
+                for (int i = 0; i < 6; i++) {
+                    int lx = localX - 2 + i;
+                    lx = min(max(lx, 0), tileWithOverlap - 1);
+
+                    for (int j = 0; j < 6; j++) {
+                        int ly = localY - 2 + j;
+                        ly = min(max(ly, 0), tileWithOverlap - 1);
+
+                        for (int k = 0; k < 6; k++) {
+                            int lz = localZ - 2 + k;
+                            lz = min(max(lz, 0), tileWithOverlap - 1);
+
+                            float val = tileValues[tileIndexHessian(lx, ly, lz, tileWithOverlap)];
+
+                            if (invPowerMode == 1) {
+                                float invN = 1.0f / invPower;
+                                if (fabsf(val) >= 1e-10f) {
+                                    val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                                } else {
+                                    val = 0.0f;
+                                }
+                            }
+
+                            interpolated += bx[i] * by[j] * bz[k] * val;
+                            dx += dbx[i] * by[j] * bz[k] * val;
+                            dy += bx[i] * dby[j] * bz[k] * val;
+                            dz += bx[i] * by[j] * dbz[k] * val;
+                            d2xx += d2bx[i] * by[j] * bz[k] * val;
+                            d2yy += bx[i] * d2by[j] * bz[k] * val;
+                            d2zz += bx[i] * by[j] * d2bz[k] * val;
+                            d2xy += dbx[i] * dby[j] * bz[k] * val;
+                            d2xz += dbx[i] * by[j] * dbz[k] * val;
+                            d2yz += bx[i] * dby[j] * dbz[k] * val;
+                        }
+                    }
+                }
+
+                // Back-convert from transformed space
+                if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
+                    float absU = fabsf(interpolated);
+                    if (absU > 1e-10f) {
+                        float n = invPower;
+                        float absU_nm1 = powf(absU, n - 1.0f);
+                        float absU_nm2 = powf(absU, n - 2.0f);
+                        float f2_1 = n * (n - 1.0f) * absU_nm2;
+                        float f2_2 = n * absU_nm1;
+
+                        float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
+                        float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
+                        float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
+                        float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
+                        float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
+                        float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
+
+                        d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                        d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+                    }
+                }
+
+                // Arcsinh chain rule
+                if (arcsinhScale > 0.0f) {
+                    float g = interpolated;
+                    float sinhG = sinhf(g);
+                    float coshG = coshf(g);
+
+                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+
+                    dx = arcsinhScale * coshG * dx;
+                    dy = arcsinhScale * coshG * dy;
+                    dz = arcsinhScale * coshG * dz;
+
+                    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+                }
+
+                // Convert to physical coordinates
+                float inv_dx = 1.0f / gridSpacing[0];
+                float inv_dy = 1.0f / gridSpacing[1];
+                float inv_dz = 1.0f / gridSpacing[2];
+
+                d2xx *= inv_dx * inv_dx;
+                d2yy *= inv_dy * inv_dy;
+                d2zz *= inv_dz * inv_dz;
+                d2xy *= inv_dx * inv_dy;
+                d2xz *= inv_dx * inv_dz;
+                d2yz *= inv_dy * inv_dz;
             }
             // For unsupported methods (trilinear, tricubic), Hessian remains zero
 

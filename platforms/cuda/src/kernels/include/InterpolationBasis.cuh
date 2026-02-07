@@ -101,4 +101,37 @@ __device__ inline float qbspline_deriv5(float t) {
     return 5.0f*t*t*t*t / 120.0f;
 }
 
+// Second derivatives of quintic B-spline basis functions
+// d²w/dt² = (second derivative of the power expressions) / 120
+//   w0''(t) = 20(1-t)^3 / 120
+//   w1''(t) = [20(2-t)^3 - 120(1-t)^3] / 120
+//   w2''(t) = [20(3-t)^3 - 120(2-t)^3 + 300(1-t)^3] / 120
+//   w3''(t) = [20(2+t)^3 - 120(1+t)^3 + 300*t^3] / 120
+//   w4''(t) = [20(1+t)^3 - 120*t^3] / 120
+//   w5''(t) = 20*t^3 / 120
+
+__device__ inline float qbspline_deriv2_0(float t) {
+    float s = 1.0f - t;
+    return 20.0f*s*s*s / 120.0f;
+}
+__device__ inline float qbspline_deriv2_1(float t) {
+    float a = 2.0f - t; float s = 1.0f - t;
+    return (20.0f*a*a*a - 120.0f*s*s*s) / 120.0f;
+}
+__device__ inline float qbspline_deriv2_2(float t) {
+    float a = 3.0f - t; float b = 2.0f - t; float s = 1.0f - t;
+    return (20.0f*a*a*a - 120.0f*b*b*b + 300.0f*s*s*s) / 120.0f;
+}
+__device__ inline float qbspline_deriv2_3(float t) {
+    float a = 2.0f + t; float b = 1.0f + t;
+    return (20.0f*a*a*a - 120.0f*b*b*b + 300.0f*t*t*t) / 120.0f;
+}
+__device__ inline float qbspline_deriv2_4(float t) {
+    float a = 1.0f + t;
+    return (20.0f*a*a*a - 120.0f*t*t*t) / 120.0f;
+}
+__device__ inline float qbspline_deriv2_5(float t) {
+    return 20.0f*t*t*t / 120.0f;
+}
+
 #endif  // OPENMM_GRIDFORCE_INTERPOLATION_BASIS_H_

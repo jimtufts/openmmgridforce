@@ -763,8 +763,8 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     addGroupEnergiesKernel = cu.getKernel(module, "addGroupEnergiesToTotal");
 
     // Initialize Hessian kernel (for normal modes analysis)
-    // Only available for bspline (method 1) and triquintic (method 3) interpolation
-    if (interpolationMethod == 1 || interpolationMethod == 3) {
+    // Available for bspline (method 1), triquintic (method 3), and quintic bspline (method 4)
+    if (interpolationMethod == 1 || interpolationMethod == 3 || interpolationMethod == 4) {
         hessianKernel = cu.getKernel(module, "computeGridHessian");
         // Allocate Hessian buffer: 6 components per atom
         int hessianNumAtoms = (totalGroupParticles > 0) ? totalGroupParticles : numAtoms;
@@ -787,7 +787,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         tiledKernel = cu.getKernel(module, "computeGridForceTiled");
 
         // Compile tiled Hessian kernel if Hessian is supported
-        if (interpolationMethod == 1 || interpolationMethod == 3) {
+        if (interpolationMethod == 1 || interpolationMethod == 3 || interpolationMethod == 4) {
             tiledHessianKernel = cu.getKernel(module, "computeGridHessianTiled");
         }
 
@@ -1207,8 +1207,8 @@ vector<int> CudaCalcGridForceKernel::getParticleOutOfBoundsFlags() {
 
 void CudaCalcGridForceKernel::computeHessian() {
     // Check if Hessian computation is supported for this interpolation method
-    if (interpolationMethod != 1 && interpolationMethod != 3) {
-        throw OpenMMException("Hessian computation only supported for bspline (method 1) and triquintic (method 3) interpolation");
+    if (interpolationMethod != 1 && interpolationMethod != 3 && interpolationMethod != 4) {
+        throw OpenMMException("Hessian computation only supported for bspline (method 1), triquintic (method 3), and quintic bspline (method 4) interpolation");
     }
 
     if (!hessianBuffer.isInitialized()) {
@@ -1317,7 +1317,8 @@ void CudaCalcGridForceKernel::computeHessian() {
             &tileDerivPtrsPtr,
             &numTiles,
             &tileSizeParam,
-            &tileOverlapParam
+            &tileOverlapParam,
+            &arcsinhScale
         };
 
         // Use larger block size to avoid OpenMM's thread block limit
@@ -1328,7 +1329,7 @@ void CudaCalcGridForceKernel::computeHessian() {
         CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
                                 (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
 
-        // Launch Hessian kernel (with invPower chain rule support)
+        // Launch Hessian kernel (with invPower and arcsinh chain rule support)
         void* args[] = {
             &posqPtr,
             &hessianPtr,
@@ -1344,7 +1345,8 @@ void CudaCalcGridForceKernel::computeHessian() {
             &originZ,
             &derivsPtr,
             &kernelNumAtoms,
-            &particleIndicesPtr
+            &particleIndicesPtr,
+            &arcsinhScale
         };
 
         // Use larger block size to avoid OpenMM's thread block limit
