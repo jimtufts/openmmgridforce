@@ -31,6 +31,19 @@ enum class InvPowerMode {
     STORED = 2
 };
 
+/**
+ * Interpolation method identifiers.
+ * These can be passed to setInterpolationMethod() / getInterpolationMethod().
+ * Defined as plain integer constants so existing code using bare ints still works.
+ */
+namespace InterpolationMethod {
+    constexpr int TRILINEAR           = 0;  ///< Trilinear interpolation (requires only grid values)
+    constexpr int TRICUBIC_BSPLINE    = 1;  ///< Tricubic B-spline (requires prefiltered coefficients for interpolating mode)
+    constexpr int TRICUBIC_HERMITE    = 2;  ///< Tricubic Hermite (requires stored analytical derivatives)
+    constexpr int TRIQUINTIC_HERMITE  = 3;  ///< Triquintic Hermite (requires stored analytical derivatives)
+    constexpr int TRIQUINTIC_BSPLINE  = 4;  ///< Triquintic B-spline (requires prefiltered coefficients for interpolating mode)
+}
+
 }  // namespace GridForcePlugin
 
 #endif /*OPENMM_GRIDFORCE_TYPES_H_*/

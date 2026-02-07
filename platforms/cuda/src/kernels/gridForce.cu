@@ -36,7 +36,8 @@ extern "C" __global__ void computeGridForce(
     float* __restrict__ groupEnergyBuffer,  // Per-group energy buffer (null = no groups)
     float* __restrict__ atomEnergyBuffer,   // Per-atom energy buffer (null = don't store)
     int* __restrict__ outOfBoundsBuffer,    // Per-atom out-of-bounds flags (null = don't store)
-    const int numGroups) {  // Number of particle groups
+    const int numGroups,  // Number of particle groups
+    const float arcsinhScale) {  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -86,10 +87,22 @@ extern "C" __global__ void computeGridForce(
                 interpolationMethod, true, true);
 
             if (result.isInside) {
-                threadEnergy = scalingFactor * result.value;
-                atomForce.x = -scalingFactor * result.gradient.x;
-                atomForce.y = -scalingFactor * result.gradient.y;
-                atomForce.z = -scalingFactor * result.gradient.z;
+                if (arcsinhScale > 0.0f) {
+                    // Arcsinh inverse: V = scale * sinh(g), dV/dr = scale * cosh(g) * dg/dr
+                    float g = result.value;
+                    float sinhG = sinhf(g);
+                    float coshG = coshf(g);
+                    threadEnergy = scalingFactor * arcsinhScale * sinhG;
+                    float chainFactor = arcsinhScale * coshG;
+                    atomForce.x = -scalingFactor * chainFactor * result.gradient.x;
+                    atomForce.y = -scalingFactor * chainFactor * result.gradient.y;
+                    atomForce.z = -scalingFactor * chainFactor * result.gradient.z;
+                } else {
+                    threadEnergy = scalingFactor * result.value;
+                    atomForce.x = -scalingFactor * result.gradient.x;
+                    atomForce.y = -scalingFactor * result.gradient.y;
+                    atomForce.z = -scalingFactor * result.gradient.z;
+                }
             }
             // Fall through to force buffer accumulation below
         }
@@ -172,6 +185,56 @@ extern "C" __global__ void computeGridForce(
 
             // Don't divide by spacing here - let the common code at the end handle it
             // This ensures chain rule is applied to unit cell gradients for RUNTIME inv_power mode
+            dx = dvdx;
+            dy = dvdy;
+            dz = dvdz;
+
+        } else if (interpolationMethod == 4) {
+            // QUINTIC B-SPLINE INTERPOLATION (6x6x6 = 216 points)
+            float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+                           qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
+            float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+                           qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
+            float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+                           qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
+
+            float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+                            qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
+            float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+                            qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
+            float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+                            qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
+
+            float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+
+            for (int i = 0; i < 6; i++) {
+                int gx = min(max(ix - 2 + i, 0), gridCounts[0] - 1);
+                for (int j = 0; j < 6; j++) {
+                    int gy = min(max(iy - 2 + j, 0), gridCounts[1] - 1);
+                    for (int k = 0; k < 6; k++) {
+                        int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
+                        int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
+                        float val = gridValues[gridIdx];
+
+                        // Apply RUNTIME inv_power transformation before interpolation
+                        if (invPowerMode == 1) {
+                            float invN = 1.0f / invPower;
+                            if (fabsf(val) >= 1e-10f) {
+                                val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                            } else {
+                                val = 0.0f;
+                            }
+                        }
+
+                        float weight = bx[i] * by[j] * bz[k];
+                        interpolated += weight * val;
+                        dvdx += dbx[i] * by[j] * bz[k] * val;
+                        dvdy += bx[i] * dby[j] * bz[k] * val;
+                        dvdz += bx[i] * by[j] * dbz[k] * val;
+                    }
+                }
+            }
+
             dx = dvdx;
             dy = dvdy;
             dz = dvdz;

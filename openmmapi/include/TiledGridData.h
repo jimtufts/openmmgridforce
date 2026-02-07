@@ -164,6 +164,26 @@ public:
      */
     bool isOpen() const { return m_file.is_open(); }
 
+    // ========== B-spline prefilter ==========
+
+    /**
+     * Apply B-spline prefilter to grid values in-place on the tiled file.
+     *
+     * Solves the separable banded system along each axis so that the
+     * B-spline passes through the original function values at grid nodes.
+     *
+     * Memory-efficient: processes one slab at a time, never holds the full grid
+     * in memory. Memory usage: O(tileSize * max(ny*nz, nx*tileSize)).
+     *
+     * The file must be closed before calling this method. It will be reopened
+     * in read-write mode, modified, and closed.
+     *
+     * Only modifies grid values, not derivatives.
+     *
+     * @param order  B-spline degree: 3 (cubic, tridiagonal) or 5 (quintic, pentadiagonal)
+     */
+    void applyBSplinePrefilter(int order = 3);
+
     // ========== Static utilities ==========
 
     /**

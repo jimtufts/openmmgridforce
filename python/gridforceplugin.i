@@ -97,6 +97,14 @@ enum class InvPowerMode {
     STORED = 2
 };
 
+// Interpolation method constants
+// Usage: grid.setInterpolationMethod(gfp.INTERP_TRILINEAR)
+%constant int INTERP_TRILINEAR          = 0;
+%constant int INTERP_TRICUBIC_BSPLINE   = 1;
+%constant int INTERP_TRICUBIC_HERMITE   = 2;
+%constant int INTERP_TRIQUINTIC_HERMITE = 3;
+%constant int INTERP_TRIQUINTIC_BSPLINE = 4;
+
 struct HessianAnalysis {
     std::vector<double> eigenvalues;
     std::vector<double> eigenvectors;
@@ -306,6 +314,8 @@ public:
 
     int getInterpolationMethod() const;
     void setInterpolationMethod(int method);
+    void setBSplinePrefilterOrder(int order);
+    int getBSplinePrefilterOrder() const;
 
     // Energy reporting
     double getGroupEnergy(int groupIndex) const;
@@ -357,6 +367,13 @@ public:
 
     void setComputeGridDerivatives(bool compute);
     bool getComputeGridDerivatives() const;
+
+    void setKDEThreshold(double threshold);
+    double getKDEThreshold() const;
+    void setKDEBandwidth(double bandwidth);
+    double getKDEBandwidth() const;
+    void setKDEEpsilonB(double epsilon);
+    double getKDEEpsilonB() const;
 
     bool usesPeriodicBoundaryConditions() const;
 };
@@ -464,6 +481,12 @@ public:
     std::vector<double> getGroupBornRadii(int groupIndex) const;
     std::vector<double> getGroupAtomEnergies(int groupIndex) const;
 
+    // Surface area energy reporting
+    double getGroupLigandSurfaceArea(int groupIndex) const;
+    std::vector<double> getGroupAtomSurfaceAreas(int groupIndex) const;
+    std::vector<double> getReceptorBornRadii(int groupIndex) const;
+    double getGroupReceptorSurfaceAreaChange(int groupIndex) const;
+
     // Hessian
     std::vector<double> computeHessian(OpenMM::Context& context);
 
@@ -528,6 +551,10 @@ public:
     double getOutOfBoundsRestraint() const;
     void setInterpolationMethod(int method);
     int getInterpolationMethod() const;
+    void setBSplinePrefilterOrder(int order);
+    int getBSplinePrefilterOrder() const;
+    void setArcsinhScale(double scale);
+    double getArcsinhScale() const;
 
     void setAutoGenerateGrid(bool enable);
     bool getAutoGenerateGrid() const;

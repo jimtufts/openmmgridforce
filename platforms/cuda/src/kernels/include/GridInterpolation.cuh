@@ -492,15 +492,108 @@ __device__ inline InterpolationResult triquinticInterpolate(
 }
 
 /**
+ * Quintic B-spline interpolation (method 4).
+ * Uses 6x6x6 = 216 grid points with quintic (degree 5) B-spline basis functions.
+ * Requires prefiltered grid values (quintic B-spline prefilter, pentadiagonal solver).
+ * No analytical derivatives needed - uses only grid values.
+ * Provides C3 continuity when combined with quintic prefilter.
+ */
+__device__ inline InterpolationResult quinticBsplineInterpolate(
+    const float* __restrict__ gridValues,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridSpacing,
+    float originX, float originY, float originZ,
+    float3 position,
+    bool computeGradient = true,
+    bool divideBySpacing = true)
+{
+    InterpolationResult result;
+    result.value = 0.0f;
+    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+
+    int ix, iy, iz;
+    float fx, fy, fz;
+    result.isInside = computeGridCell(position, gridCounts, gridSpacing,
+                                       originX, originY, originZ,
+                                       ix, iy, iz, fx, fy, fz);
+
+    if (!result.isInside) return result;
+
+    int nyz = gridCounts[1] * gridCounts[2];
+
+    // Precompute quintic B-spline basis functions (6 per axis)
+    float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+                   qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
+    float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+                   qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
+    float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+                   qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
+
+    float dbx[6], dby[6], dbz[6];
+    if (computeGradient) {
+        dbx[0] = qbspline_deriv0(fx); dbx[1] = qbspline_deriv1(fx);
+        dbx[2] = qbspline_deriv2(fx); dbx[3] = qbspline_deriv3(fx);
+        dbx[4] = qbspline_deriv4(fx); dbx[5] = qbspline_deriv5(fx);
+        dby[0] = qbspline_deriv0(fy); dby[1] = qbspline_deriv1(fy);
+        dby[2] = qbspline_deriv2(fy); dby[3] = qbspline_deriv3(fy);
+        dby[4] = qbspline_deriv4(fy); dby[5] = qbspline_deriv5(fy);
+        dbz[0] = qbspline_deriv0(fz); dbz[1] = qbspline_deriv1(fz);
+        dbz[2] = qbspline_deriv2(fz); dbz[3] = qbspline_deriv3(fz);
+        dbz[4] = qbspline_deriv4(fz); dbz[5] = qbspline_deriv5(fz);
+    }
+
+    float interpolated = 0.0f;
+    float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+
+    // 6x6x6 stencil: offsets -2..+3 from cell corner
+    for (int i = 0; i < 6; i++) {
+        int gx = min(max(ix - 2 + i, 0), gridCounts[0] - 1);
+        for (int j = 0; j < 6; j++) {
+            int gy = min(max(iy - 2 + j, 0), gridCounts[1] - 1);
+            for (int k = 0; k < 6; k++) {
+                int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
+                int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
+                float val = gridValues[gridIdx];
+
+                float weight = bx[i] * by[j] * bz[k];
+                interpolated += weight * val;
+
+                if (computeGradient) {
+                    dvdx += dbx[i] * by[j] * bz[k] * val;
+                    dvdy += bx[i] * dby[j] * bz[k] * val;
+                    dvdz += bx[i] * by[j] * dbz[k] * val;
+                }
+            }
+        }
+    }
+
+    result.value = interpolated;
+
+    if (computeGradient) {
+        if (divideBySpacing) {
+            result.gradient.x = dvdx / gridSpacing[0];
+            result.gradient.y = dvdy / gridSpacing[1];
+            result.gradient.z = dvdz / gridSpacing[2];
+        } else {
+            result.gradient.x = dvdx;
+            result.gradient.y = dvdy;
+            result.gradient.z = dvdz;
+        }
+    }
+
+    return result;
+}
+
+/**
  * Generic grid interpolation dispatcher.
  *
  * @param gridValues      Grid data array [nx * ny * nz]
- * @param gridDerivatives Derivative array (required for methods 2,3; can be nullptr for 0,1)
+ * @param gridDerivatives Derivative array (required for methods 2,3; can be nullptr for 0,1,4)
  * @param gridCounts      Grid dimensions {nx, ny, nz}
  * @param gridSpacing     Grid spacing {dx, dy, dz} in nm
  * @param originX/Y/Z     Grid origin coordinates in nm
  * @param position        Query position in absolute coordinates (nm)
- * @param method          0=trilinear, 1=bspline, 2=tricubic, 3=triquintic
+ * @param method          0=trilinear, 1=bspline, 2=tricubic, 3=triquintic Hermite, 4=quintic bspline
  * @param computeGradient Whether to compute the gradient
  * @param divideBySpacing If true, gradient is in physical units (per nm).
  *                        If false, gradient is in unit cell coords (for chain rule application).
@@ -527,6 +620,9 @@ __device__ inline InterpolationResult interpolateGrid(
         case 3:
             return triquinticInterpolate(gridValues, gridDerivatives, gridCounts, gridSpacing,
                                          originX, originY, originZ, position, computeGradient, divideBySpacing);
+        case 4:
+            return quinticBsplineInterpolate(gridValues, gridCounts, gridSpacing,
+                                             originX, originY, originZ, position, computeGradient, divideBySpacing);
         default:
             return trilinearInterpolate(gridValues, gridCounts, gridSpacing,
                                         originX, originY, originZ, position, computeGradient, divideBySpacing);

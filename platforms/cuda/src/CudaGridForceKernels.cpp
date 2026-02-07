@@ -12,6 +12,8 @@
 #include "openmm/HarmonicBondForce.h"
 #include "openmm/HarmonicAngleForce.h"
 #include "openmm/PeriodicTorsionForce.h"
+#include "IsolatedNonbondedForce.h"
+#include "BSplinePrefilter.h"
 #include <cuda_runtime.h>
 #include <map>
 #include <iostream>
@@ -118,10 +120,11 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 //               << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
 //               << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
 
-    // Store grid cap, invPower, and invPowerMode BEFORE generateGrid() is called (it needs these values)
+    // Store grid cap, invPower, invPowerMode, and arcsinhScale BEFORE generateGrid() is called
     gridCap = (float)grid_cap;
     invPower = (float)inv_power;
     invPowerMode = static_cast<int>(force.getInvPowerMode());
+    arcsinhScale = (float)force.getArcsinhScale();
     interpolationMethod = interp_method;
 
     // Store ligand atoms and derivative computation flag
@@ -152,24 +155,33 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             throw OpenMMException("GridForce: Invalid scaling property '" + scalingProperty + "'. Must be 'charge', 'ljr', or 'lja'");
         }
 
-        // Find NonbondedForce in the system
+        // Find NonbondedForce or IsolatedNonbondedForce in the system
         const NonbondedForce* nonbondedForce = nullptr;
+        const IsolatedNonbondedForce* isolatedNbForce = nullptr;
         for (int i = 0; i < system.getNumForces(); i++) {
             if (dynamic_cast<const NonbondedForce*>(&system.getForce(i)) != nullptr) {
                 nonbondedForce = dynamic_cast<const NonbondedForce*>(&system.getForce(i));
                 break;
             }
+            if (dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i)) != nullptr) {
+                isolatedNbForce = dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i));
+                // Keep looking for NonbondedForce (prefer it if both exist)
+            }
         }
 
-        if (nonbondedForce == nullptr) {
-            throw OpenMMException("GridForce: Auto-calculate scaling factors requires a NonbondedForce in the system");
+        if (nonbondedForce == nullptr && isolatedNbForce == nullptr) {
+            throw OpenMMException("GridForce: Auto-calculate scaling factors requires a NonbondedForce or IsolatedNonbondedForce in the system");
         }
 
         // Extract scaling factors based on property
         scaling_factors.resize(numAtoms);
         for (int i = 0; i < numAtoms; i++) {
             double charge, sigma, epsilon;
-            nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
+            if (nonbondedForce != nullptr) {
+                nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
+            } else {
+                isolatedNbForce->getAtomParameters(i, charge, sigma, epsilon);
+            }
 
 #if DEBUG_GRIDFORCE
             if (i < 3) {
@@ -342,6 +354,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
             std::cout << "GridForce: Tiled grid saved to " << tiledOutputFile << std::endl;
 
+            // Apply B-spline prefilter to the tiled file (streaming, tile-by-tile)
+            int bsplineOrder = force.getBSplinePrefilterOrder();
+            if (bsplineOrder > 0) {
+                TiledGridData tiledForPrefilter;
+                tiledForPrefilter.openForReading(tiledOutputFile);
+                tiledForPrefilter.applyBSplinePrefilter(bsplineOrder);
+            }
+
             // Automatically set up tiled input for evaluation if tiled mode is requested
             // This allows generate-then-evaluate in one run
             if (force.getTiledMode()) {
@@ -373,6 +393,23 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             std::vector<double> derivatives;
             generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
                          ox, oy, oz, vals, derivatives);
+
+            // Apply arcsinh transform to compress dynamic range before prefiltering.
+            // This prevents Gibbs-like ringing in the prefilter for steep potentials (e.g., LJR).
+            // The inverse sinh transform is applied in the CUDA evaluation kernel.
+            if (arcsinhScale > 0.0f) {
+                for (size_t i = 0; i < vals.size(); i++) {
+                    vals[i] = std::asinh(vals[i] / (double)arcsinhScale);
+                }
+            }
+
+            // Apply B-spline prefilter so B-spline interpolation is interpolating
+            // (passes through original function values at grid nodes).
+            // Applied at generation time so prefiltered coefficients are stored in the file.
+            int bsplineOrder = force.getBSplinePrefilterOrder();
+            if (bsplineOrder > 0) {
+                bsplinePrefilter3DByOrder(vals, counts[0], counts[1], counts[2], bsplineOrder);
+            }
 
             // Create GridData object with auto-generated values so saveToFile() uses new format
             // Use move semantics to avoid copying large derivative arrays (can be 45+ GB)
@@ -447,6 +484,20 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         }
     }
 
+    // For non-auto-generated grids, apply arcsinh transform + prefilter before upload.
+    // (For auto-generated grids, this was already done in the generate block above.)
+    if (!force.getAutoGenerateGrid() && !vals.empty()) {
+        if (arcsinhScale > 0.0f) {
+            for (size_t i = 0; i < vals.size(); i++) {
+                vals[i] = std::asinh(vals[i] / (double)arcsinhScale);
+            }
+        }
+        int bsplineOrder = force.getBSplinePrefilterOrder();
+        if (bsplineOrder > 0) {
+            bsplinePrefilter3DByOrder(vals, counts[0], counts[1], counts[2], bsplineOrder);
+        }
+    }
+
     // Initialize arrays
     g_counts.initialize<int>(cu, 3, "gridCounts");
     g_spacing.initialize<float>(cu, 3, "gridSpacing");
@@ -486,6 +537,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     } else {
         throw OpenMMException("GridForce: No grid values, GridData, or tiled input file provided");
     }
+
+    // Include interpolation method in hash so B-spline (prefiltered) and trilinear
+    // (raw) forces sharing the same GridData get separate GPU cache entries
+    gridHash ^= std::hash<int>{}(interpolationMethod) + 0x9e3779b9;
 
     // Only upload full grid to GPU if NOT using tiled mode
     // (Tiled mode streams tiles on demand via TileManager)
@@ -931,7 +986,8 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &groupEnergyBufferPtr,
         &atomEnergyBufferPtr,
         &outOfBoundsBufferPtr,
-        &numParticleGroups
+        &numParticleGroups,
+        &arcsinhScale
     };
 
 #if DEBUG_GRIDFORCE
@@ -1021,6 +1077,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &atomEnergyBufferPtr,
             &outOfBoundsBufferPtr,
             &numParticleGroups,
+            &arcsinhScale,
             &tileOffsetsPtr,
             &tileValuePtrsPtr,
             &tileDerivPtrsPtr,
@@ -1104,6 +1161,7 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
     // Update transformation parameters and interpolation method
     invPower = (float)inv_power;
     invPowerMode = inv_power_mode;
+    arcsinhScale = (float)force.getArcsinhScale();
     interpolationMethod = interp_method;
 }
 

@@ -410,6 +410,7 @@ extern "C" __global__ void computeGridForceTiled(
     float* __restrict__ atomEnergyBuffer,
     int* __restrict__ outOfBoundsBuffer,           // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups,
+    const float arcsinhScale,  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
     // Tile-specific parameters
     const int* __restrict__ tileOffsets,           // Grid offsets for each tile (x,y,z,x,y,z,...)
     const unsigned long long* __restrict__ tileValuePtrs,   // Device pointers to tile values
@@ -601,6 +602,17 @@ extern "C" __global__ void computeGridForceTiled(
                         dz = dz * powerFactor / gridSpacing[2];
                     }
                 }
+            }
+
+            // Apply arcsinh inverse transform if enabled
+            // V = scale * sinh(g), dV/dr = scale * cosh(g) * dg/dr
+            if (arcsinhScale > 0.0f && invPowerMode == 0) {
+                float g = interpolated;
+                float coshG = coshf(g);
+                interpolated = arcsinhScale * sinhf(g);
+                dx *= arcsinhScale * coshG;
+                dy *= arcsinhScale * coshG;
+                dz *= arcsinhScale * coshG;
             }
 
             // Apply scaling factor and compute energy/force

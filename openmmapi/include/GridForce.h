@@ -318,6 +318,59 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     int getInterpolationMethod() const;
 
     /**
+     * Set the arcsinh transformation scale for grid value compression.
+     *
+     * When set to a positive value, the arcsinh transform is applied to grid values
+     * before B-spline prefiltering: g(x) = arcsinh(V(x) / scale). During evaluation,
+     * the inverse sinh transform recovers the original values with chain rule for forces:
+     *   V = scale * sinh(g_interp)
+     *   dV/dr = scale * cosh(g_interp) * dg/dr
+     *
+     * This compresses extreme dynamic range (e.g., LJR grids near atoms) so that
+     * B-spline prefiltering doesn't produce Gibbs-like ringing artifacts. Combined with
+     * a high grid cap (or no cap), this achieves ~0.0001% interpolation accuracy.
+     *
+     * Only applicable to interpolation methods 0 (trilinear), 1 (tricubic B-spline),
+     * and 4 (triquintic B-spline). Methods 2 and 3 (Hermite) are not supported.
+     *
+     * @param scale  arcsinh scale parameter (0.0 = disabled, > 0.0 = enabled)
+     */
+    void setArcsinhScale(double scale);
+
+    /**
+     * Get the current arcsinh transformation scale.
+     * @return  the arcsinh scale (0.0 if disabled)
+     */
+    double getArcsinhScale() const;
+
+    /**
+     * Set the B-spline prefilter order for grid generation.
+     *
+     * When set to a non-zero value, the B-spline prefilter is applied to grid
+     * values at generation time, converting them from raw function values to
+     * B-spline control points. This makes B-spline interpolation pass through
+     * the original function values at grid nodes (interpolating rather than
+     * approximating).
+     *
+     * Supported orders:
+     * - 0: No prefilter (default) - grid values are used as-is
+     * - 3: Cubic B-spline prefilter (tridiagonal solver) - use with interpolation method 1
+     * - 5: Quintic B-spline prefilter (pentadiagonal solver) - use with quintic B-spline evaluation
+     *
+     * This setting only affects grid generation. The prefiltered control points
+     * are stored in the grid file, so this is a one-time cost.
+     *
+     * @param order  B-spline degree (0, 3, or 5)
+     */
+    void setBSplinePrefilterOrder(int order);
+
+    /**
+     * Get the current B-spline prefilter order.
+     * @return  B-spline degree (0, 3, or 5)
+     */
+    int getBSplinePrefilterOrder() const;
+
+    /**
      * Enable tiled grid mode for memory-efficient large grids.
      * When enabled, the grid is divided into tiles that are streamed to
      * GPU memory on demand, allowing arbitrarily large grids with bounded
@@ -744,6 +797,8 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double m_gridCap;  // Capping threshold for grid values (kJ/mol)
     double m_outOfBoundsRestraint;  // Force constant for out-of-bounds harmonic restraint (kJ/mol/nm^2)
     int m_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
+    int m_bsplinePrefilterOrder;  // 0=none, 3=cubic, 5=quintic
+    double m_arcsinhScale;  // 0.0=disabled, >0.0=arcsinh(V/scale) transform
     bool m_autoCalculateScalingFactors;
     std::string m_scalingProperty;
 

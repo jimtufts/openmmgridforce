@@ -50,6 +50,7 @@ using namespace std;
 namespace GridForcePlugin {
 
 GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
+                         m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
                          m_autoCalculateScalingFactors(false), m_scalingProperty(""),
                          m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
                          m_computeDerivatives(false),
@@ -64,6 +65,7 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
 GridForce::GridForce(std::shared_ptr<GridData> gridData)
     : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0),
       m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
+      m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
       m_autoCalculateScalingFactors(false), m_scalingProperty(""),
       m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
       m_computeDerivatives(false),
@@ -302,14 +304,36 @@ double GridForce::getOutOfBoundsRestraint() const {
 }
 
 void GridForce::setInterpolationMethod(int method) {
-    if (method < 0 || method > 3) {
-        throw OpenMMException("GridForce: Invalid interpolation method. Must be 0 (trilinear), 1 (cubic B-spline), 2 (tricubic), or 3 (quintic Hermite)");
+    if (method < 0 || method > 4) {
+        throw OpenMMException("GridForce: Invalid interpolation method. Must be 0 (trilinear), 1 (cubic B-spline), 2 (tricubic Hermite), 3 (triquintic Hermite), or 4 (triquintic B-spline)");
     }
     m_interpolationMethod = method;
 }
 
 int GridForce::getInterpolationMethod() const {
     return m_interpolationMethod;
+}
+
+void GridForce::setBSplinePrefilterOrder(int order) {
+    if (order != 0 && order != 3 && order != 5) {
+        throw OpenMMException("GridForce: B-spline prefilter order must be 0 (none), 3 (cubic), or 5 (quintic)");
+    }
+    m_bsplinePrefilterOrder = order;
+}
+
+int GridForce::getBSplinePrefilterOrder() const {
+    return m_bsplinePrefilterOrder;
+}
+
+void GridForce::setArcsinhScale(double scale) {
+    if (scale < 0.0) {
+        throw OpenMMException("GridForce: arcsinh scale must be >= 0.0 (0.0 = disabled)");
+    }
+    m_arcsinhScale = scale;
+}
+
+double GridForce::getArcsinhScale() const {
+    return m_arcsinhScale;
 }
 
 void GridForce::setTiledMode(bool enable, int tileSize, int memoryBudgetMB) {

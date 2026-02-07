@@ -64,6 +64,9 @@ with tempfile.TemporaryDirectory() as tmpdir:
         # Use NONE mode (no inv_power transformation)
         grid.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
 
+        # Apply cubic B-spline prefilter at generation time
+        grid.setBSplinePrefilterOrder(3)
+
         system.addForce(grid)
         integrator = VerletIntegrator(0.001)
         platform = Platform.getPlatformByName('CUDA')

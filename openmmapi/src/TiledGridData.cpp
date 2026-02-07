@@ -3,6 +3,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "TiledGridData.h"
+#include "BSplinePrefilter.h"
 #include "openmm/OpenMMException.h"
 #include <cstring>
 #include <iostream>
@@ -412,6 +413,176 @@ void TiledGridData::close() {
         }
     }
     m_tileIndex.clear();
+}
+
+// ========== B-spline prefilter ==========
+
+void TiledGridData::applyBSplinePrefilter(int order) {
+    // Requires metadata to be loaded (via openForReading or construction + openForReading).
+    // Closes the read-only file handle and reopens in read-write mode.
+    if (m_filename.empty() || m_tileIndex.empty()) {
+        throw OpenMMException("TiledGridData: Must call openForReading() before applyBSplinePrefilter()");
+    }
+    if (m_file.is_open()) {
+        m_file.close();
+    }
+
+    int nx = m_counts[0], ny = m_counts[1], nz = m_counts[2];
+
+    // Reopen file for read-write (preserving content)
+    m_file.open(m_filename, ios::binary | ios::in | ios::out);
+    if (!m_file.is_open()) {
+        throw OpenMMException("TiledGridData: Unable to reopen file for prefiltering: " + m_filename);
+    }
+
+    // Helper: overwrite just the values portion of a tile at its known file offset
+    // (skips the 6-byte tile dims header, leaves derivatives untouched)
+    auto overwriteTileValues = [&](int tileX, int tileY, int tileZ,
+                                    const vector<float>& values) {
+        int tileIdx = getTileLinearIndex(tileX, tileY, tileZ);
+        int64_t offset = m_tileIndex[tileIdx].fileOffset + 6; // skip dims header
+        m_file.seekp(offset);
+        m_file.write(reinterpret_cast<const char*>(values.data()),
+                     values.size() * sizeof(float));
+    };
+
+    // --- Phase 1+2: z-filter + y-filter per x-slab ---
+    // For each tileX, read all tiles with that tileX into a buffer of
+    // sizeX × ny × nz, apply z-filter and y-filter, write back.
+    for (int txIdx = 0; txIdx < m_numTilesX; txIdx++) {
+        int startX = txIdx * m_tileSize;
+        int sizeX = min(m_tileSize, nx - startX);
+
+        // Allocate buffer: sizeX × ny × nz (row-major like full grid)
+        vector<float> buf(sizeX * ny * nz, 0.0f);
+
+        // Gather from tiles
+        for (int tyIdx = 0; tyIdx < m_numTilesY; tyIdx++) {
+            for (int tzIdx = 0; tzIdx < m_numTilesZ; tzIdx++) {
+                int startY = tyIdx * m_tileSize;
+                int startZ = tzIdx * m_tileSize;
+                int tileSizeY, tileSizeZ, tileSizeX_check;
+                getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX_check, tileSizeY, tileSizeZ);
+
+                vector<float> tileVals, tileDerivsUnused;
+                readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
+
+                for (int lx = 0; lx < sizeX; lx++) {
+                    for (int ly = 0; ly < tileSizeY; ly++) {
+                        for (int lz = 0; lz < tileSizeZ; lz++) {
+                            int gy = startY + ly;
+                            int gz = startZ + lz;
+                            buf[lx * ny * nz + gy * nz + gz] =
+                                tileVals[lx * tileSizeY * tileSizeZ + ly * tileSizeZ + lz];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply z-filter: for each (lx, gy), filter along gz
+        for (int lx = 0; lx < sizeX; lx++) {
+            for (int gy = 0; gy < ny; gy++) {
+                bsplinePrefilter1DByOrder(&buf[lx * ny * nz + gy * nz], nz, order, 1);
+            }
+        }
+
+        // Apply y-filter: for each (lx, gz), filter along gy
+        for (int lx = 0; lx < sizeX; lx++) {
+            for (int gz = 0; gz < nz; gz++) {
+                bsplinePrefilter1DByOrder(&buf[lx * ny * nz + gz], ny, order, nz);
+            }
+        }
+
+        // Scatter back to tiles and write
+        for (int tyIdx = 0; tyIdx < m_numTilesY; tyIdx++) {
+            for (int tzIdx = 0; tzIdx < m_numTilesZ; tzIdx++) {
+                int startY = tyIdx * m_tileSize;
+                int startZ = tzIdx * m_tileSize;
+                int tileSizeX_check, tileSizeY, tileSizeZ;
+                getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX_check, tileSizeY, tileSizeZ);
+                int numPoints = sizeX * tileSizeY * tileSizeZ;
+
+                vector<float> tileVals(numPoints);
+                for (int lx = 0; lx < sizeX; lx++) {
+                    for (int ly = 0; ly < tileSizeY; ly++) {
+                        for (int lz = 0; lz < tileSizeZ; lz++) {
+                            int gy = startY + ly;
+                            int gz = startZ + lz;
+                            tileVals[lx * tileSizeY * tileSizeZ + ly * tileSizeZ + lz] =
+                                buf[lx * ny * nz + gy * nz + gz];
+                        }
+                    }
+                }
+                overwriteTileValues(txIdx, tyIdx, tzIdx, tileVals);
+            }
+        }
+    }
+
+    // --- Phase 3: x-filter per (tileY, tileZ) column ---
+    // For each (tileY, tileZ), read all tiles along x into a buffer of
+    // nx × sizeY × sizeZ, apply x-filter, write back.
+    for (int tyIdx = 0; tyIdx < m_numTilesY; tyIdx++) {
+        for (int tzIdx = 0; tzIdx < m_numTilesZ; tzIdx++) {
+            int startY = tyIdx * m_tileSize;
+            int startZ = tzIdx * m_tileSize;
+            int colSizeY = min(m_tileSize, ny - startY);
+            int colSizeZ = min(m_tileSize, nz - startZ);
+            int colYZ = colSizeY * colSizeZ;
+
+            // Buffer: nx × colSizeY × colSizeZ
+            vector<float> buf(nx * colYZ, 0.0f);
+
+            // Gather from tiles along x
+            for (int txIdx = 0; txIdx < m_numTilesX; txIdx++) {
+                int startX = txIdx * m_tileSize;
+                int tileSizeX, tileSizeY_check, tileSizeZ_check;
+                getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX, tileSizeY_check, tileSizeZ_check);
+
+                vector<float> tileVals, tileDerivsUnused;
+                readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
+
+                for (int lx = 0; lx < tileSizeX; lx++) {
+                    int gx = startX + lx;
+                    for (int ly = 0; ly < colSizeY; ly++) {
+                        for (int lz = 0; lz < colSizeZ; lz++) {
+                            buf[gx * colYZ + ly * colSizeZ + lz] =
+                                tileVals[lx * colSizeY * colSizeZ + ly * colSizeZ + lz];
+                        }
+                    }
+                }
+            }
+
+            // Apply x-filter: for each (ly, lz), filter along gx
+            for (int ly = 0; ly < colSizeY; ly++) {
+                for (int lz = 0; lz < colSizeZ; lz++) {
+                    bsplinePrefilter1DByOrder(&buf[ly * colSizeZ + lz], nx, order, colYZ);
+                }
+            }
+
+            // Scatter back to tiles and write
+            for (int txIdx = 0; txIdx < m_numTilesX; txIdx++) {
+                int startX = txIdx * m_tileSize;
+                int tileSizeX, tileSizeY_check, tileSizeZ_check;
+                getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX, tileSizeY_check, tileSizeZ_check);
+                int numPoints = tileSizeX * colSizeY * colSizeZ;
+
+                vector<float> tileVals(numPoints);
+                for (int lx = 0; lx < tileSizeX; lx++) {
+                    int gx = startX + lx;
+                    for (int ly = 0; ly < colSizeY; ly++) {
+                        for (int lz = 0; lz < colSizeZ; lz++) {
+                            tileVals[lx * colSizeY * colSizeZ + ly * colSizeZ + lz] =
+                                buf[gx * colYZ + ly * colSizeZ + lz];
+                        }
+                    }
+                }
+                overwriteTileValues(txIdx, tyIdx, tzIdx, tileVals);
+            }
+        }
+    }
+
+    m_file.close();
 }
 
 // ========== Static Utilities ==========
