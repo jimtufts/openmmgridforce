@@ -269,6 +269,18 @@ vector<double> GBSAGridForce::getGroupBornRadii(int groupIndex) const {
     return groupBornRadii[groupIndex];
 }
 
+void GBSAGridForce::computeHessian(Context& context) const {
+    dynamic_cast<GBSAGridForceImpl&>(getImplInContext(context)).computeHessian(getContextImpl(context));
+}
+
+std::vector<double> GBSAGridForce::getHessianBlocks(Context& context) const {
+    return dynamic_cast<GBSAGridForceImpl&>(getImplInContext(context)).getHessianBlocks();
+}
+
+std::vector<double> GBSAGridForce::getFullHessian(Context& context) const {
+    return dynamic_cast<GBSAGridForceImpl&>(getImplInContext(context)).getFullHessian();
+}
+
 ForceImpl* GBSAGridForce::createImpl() const {
     return new GBSAGridForceImpl(*this);
 }

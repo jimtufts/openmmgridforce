@@ -604,3 +604,98 @@ int BondedHessian::getNumAngles() const {
 int BondedHessian::getNumTorsions() const {
     return impl ? impl->numTorsions : 0;
 }
+
+// Compute dihedral angle using Blondel-Karplus formulation
+static double computeDihedralAngle(const Vec3& p1, const Vec3& p2, const Vec3& p3, const Vec3& p4) {
+    double b1[3] = {p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]};
+    double b2[3] = {p3[0]-p2[0], p3[1]-p2[1], p3[2]-p2[2]};
+    double b3[3] = {p4[0]-p3[0], p4[1]-p3[1], p4[2]-p3[2]};
+
+    // m = b1 x b2, n = b2 x b3
+    double m[3] = {b1[1]*b2[2]-b1[2]*b2[1], b1[2]*b2[0]-b1[0]*b2[2], b1[0]*b2[1]-b1[1]*b2[0]};
+    double n[3] = {b2[1]*b3[2]-b2[2]*b3[1], b2[2]*b3[0]-b2[0]*b3[2], b2[0]*b3[1]-b2[1]*b3[0]};
+
+    double m_norm = sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+    double n_norm = sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+    double b2_norm = sqrt(b2[0]*b2[0] + b2[1]*b2[1] + b2[2]*b2[2]);
+
+    if (m_norm < 1e-10 || n_norm < 1e-10 || b2_norm < 1e-10)
+        return 0.0;
+
+    double m_hat[3] = {m[0]/m_norm, m[1]/m_norm, m[2]/m_norm};
+    double n_hat[3] = {n[0]/n_norm, n[1]/n_norm, n[2]/n_norm};
+    double b2_hat[3] = {b2[0]/b2_norm, b2[1]/b2_norm, b2[2]/b2_norm};
+
+    double cos_phi = m_hat[0]*n_hat[0] + m_hat[1]*n_hat[1] + m_hat[2]*n_hat[2];
+    double mcb2[3] = {m_hat[1]*b2_hat[2]-m_hat[2]*b2_hat[1],
+                      m_hat[2]*b2_hat[0]-m_hat[0]*b2_hat[2],
+                      m_hat[0]*b2_hat[1]-m_hat[1]*b2_hat[0]};
+    double sin_phi = mcb2[0]*n_hat[0] + mcb2[1]*n_hat[1] + mcb2[2]*n_hat[2];
+    return atan2(sin_phi, cos_phi);
+}
+
+std::vector<double> BondedHessian::computeInternalForceConstants(Context& context) {
+    if (!initialized)
+        throw OpenMMException("BondedHessian: must call initialize() before computeInternalForceConstants()");
+
+    State state = context.getState(State::Positions);
+    vector<Vec3> positions = state.getPositions();
+
+    int total = impl->numBonds + impl->numAngles + impl->numTorsions;
+    vector<double> constants(total);
+    int idx = 0;
+
+    // Bonds: d²E/dr² = k (always k for harmonic bond)
+    for (int b = 0; b < impl->numBonds; b++) {
+        constants[idx++] = impl->bondKs[b];
+    }
+
+    // Angles: d²E/dθ² = k (always k for harmonic angle)
+    for (int a = 0; a < impl->numAngles; a++) {
+        constants[idx++] = impl->angleKs[a];
+    }
+
+    // Torsions: d²E/dφ² = -k * n² * cos(n*φ - φ0)
+    for (int t = 0; t < impl->numTorsions; t++) {
+        int i = impl->torsionAtoms[4*t];
+        int j = impl->torsionAtoms[4*t + 1];
+        int k = impl->torsionAtoms[4*t + 2];
+        int l = impl->torsionAtoms[4*t + 3];
+        int n = impl->torsionPeriodicities[t];
+        double phi0 = impl->torsionPhases[t];
+        double kk = impl->torsionKs[t];
+
+        double phi = computeDihedralAngle(positions[i], positions[j], positions[k], positions[l]);
+        constants[idx++] = -kk * n * n * cos(n * phi - phi0);
+    }
+
+    return constants;
+}
+
+std::vector<int> BondedHessian::getInternalCoordinateAtomIndices() const {
+    if (!initialized)
+        throw OpenMMException("BondedHessian: must call initialize() before getInternalCoordinateAtomIndices()");
+
+    vector<int> indices;
+    indices.reserve(2 * impl->numBonds + 3 * impl->numAngles + 4 * impl->numTorsions);
+
+    for (int b = 0; b < impl->numBonds; b++) {
+        indices.push_back(impl->bondAtoms[2*b]);
+        indices.push_back(impl->bondAtoms[2*b + 1]);
+    }
+
+    for (int a = 0; a < impl->numAngles; a++) {
+        indices.push_back(impl->angleAtoms[3*a]);
+        indices.push_back(impl->angleAtoms[3*a + 1]);
+        indices.push_back(impl->angleAtoms[3*a + 2]);
+    }
+
+    for (int t = 0; t < impl->numTorsions; t++) {
+        indices.push_back(impl->torsionAtoms[4*t]);
+        indices.push_back(impl->torsionAtoms[4*t + 1]);
+        indices.push_back(impl->torsionAtoms[4*t + 2]);
+        indices.push_back(impl->torsionAtoms[4*t + 3]);
+    }
+
+    return indices;
+}

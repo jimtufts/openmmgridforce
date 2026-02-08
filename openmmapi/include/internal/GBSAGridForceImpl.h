@@ -45,6 +45,11 @@ public:
 
     void updateParametersInContext(OpenMM::ContextImpl& context);
 
+    // Hessian support
+    void computeHessian(OpenMM::ContextImpl& context);
+    std::vector<double> getHessianBlocks();
+    std::vector<double> getFullHessian();
+
 private:
     const GBSAGridForce& owner;
     OpenMM::Kernel kernel;

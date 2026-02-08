@@ -68,3 +68,15 @@ vector<string> GBSAGridForceImpl::getKernelNames() {
 void GBSAGridForceImpl::updateParametersInContext(ContextImpl& context) {
     kernel.getAs<CalcGBSAGridForceKernel>().updateParametersInContext(context, owner);
 }
+
+void GBSAGridForceImpl::computeHessian(ContextImpl& context) {
+    kernel.getAs<CalcGBSAGridForceKernel>().computeHessian(context);
+}
+
+std::vector<double> GBSAGridForceImpl::getHessianBlocks() {
+    return kernel.getAs<CalcGBSAGridForceKernel>().getHessianBlocks();
+}
+
+std::vector<double> GBSAGridForceImpl::getFullHessian() {
+    return kernel.getAs<CalcGBSAGridForceKernel>().getFullHessian();
+}

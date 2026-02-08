@@ -322,6 +322,58 @@ public:
     double getGroupLigandDesolvationEnergy(int groupIndex) const;
     std::vector<double> getGroupBornRadii(int groupIndex) const;
 
+    // Hessian
+    void computeHessian(OpenMM::Context& context) const;
+    std::vector<double> getHessianBlocks(OpenMM::Context& context) const;
+    std::vector<double> getFullHessian(OpenMM::Context& context) const;
+
+    %pythoncode %{
+    def getHessianMatrix(self, context):
+        """
+        Compute and return the full 3N x 3N Hessian matrix as a numpy array.
+
+        Uses numerical finite differences of GBSA forces. Captures cross-atom
+        coupling through Born radii (moving atom i changes Born radius of atom j).
+
+        Args:
+            context: OpenMM Context (must have called getState with forces first)
+
+        Returns:
+            numpy.ndarray: Shape (3N, 3N) Hessian matrix. Units: kJ/(mol*nm^2).
+        """
+        import numpy as np
+        self.computeHessian(context)
+        flat = np.array(self.getFullHessian(context))
+        n = int(np.sqrt(len(flat)))
+        return flat.reshape(n, n)
+
+    def getHessianDiagonalBlocks(self, context):
+        """
+        Compute and return per-atom 3x3 Hessian diagonal blocks.
+
+        Args:
+            context: OpenMM Context (must have called getState with forces first)
+
+        Returns:
+            numpy.ndarray: Shape (N, 3, 3) array of per-atom Hessian blocks.
+        """
+        import numpy as np
+        self.computeHessian(context)
+        flat = np.array(self.getHessianBlocks(context))
+        if len(flat) == 0:
+            return np.zeros((0, 3, 3))
+        n_atoms = len(flat) // 6
+        blocks = flat.reshape(n_atoms, 6)
+        H = np.zeros((n_atoms, 3, 3))
+        H[:, 0, 0] = blocks[:, 0]  # dxx
+        H[:, 1, 1] = blocks[:, 1]  # dyy
+        H[:, 2, 2] = blocks[:, 2]  # dzz
+        H[:, 0, 1] = H[:, 1, 0] = blocks[:, 3]  # dxy
+        H[:, 0, 2] = H[:, 2, 0] = blocks[:, 4]  # dxz
+        H[:, 1, 2] = H[:, 2, 1] = blocks[:, 5]  # dyz
+        return H
+    %}
+
     // Auto grid generation
     void setAutoGenerateGrid(bool enable);
     bool getAutoGenerateGrid() const;
@@ -874,6 +926,8 @@ public:
 
     void initialize(const OpenMM::System& system, OpenMM::Context& context);
     std::vector<double> computeHessian(OpenMM::Context& context);
+    std::vector<double> computeInternalForceConstants(OpenMM::Context& context);
+    std::vector<int> getInternalCoordinateAtomIndices() const;
     int getNumBonds() const;
     int getNumAngles() const;
     int getNumTorsions() const;
@@ -904,6 +958,260 @@ public:
         flat = np.array(self.computeHessian(context))
         n = int(np.sqrt(len(flat)))
         return flat.reshape(n, n)
+
+    def getInternalForceConstants(self, context):
+        """
+        Get scalar force constants (d^2E/dq^2) for each internal DOF.
+
+        Returns:
+            dict with keys:
+                'bonds': numpy array of shape (numBonds,) - always k (kJ/mol/nm^2)
+                'angles': numpy array of shape (numAngles,) - always k (kJ/mol/rad^2)
+                'torsions': numpy array of shape (numTorsions,) - geometry-dependent (kJ/mol/rad^2)
+                'all': concatenated array [bonds, angles, torsions]
+        """
+        import numpy as np
+        fc = np.array(self.computeInternalForceConstants(context))
+        nb = self.getNumBonds()
+        na = self.getNumAngles()
+        return {
+            'bonds': fc[:nb],
+            'angles': fc[nb:nb+na],
+            'torsions': fc[nb+na:],
+            'all': fc,
+        }
+
+    def getAtomIndicesPerDOF(self):
+        """
+        Get atom indices for each internal DOF.
+
+        Returns:
+            dict with keys:
+                'bonds': list of (i, j) tuples
+                'angles': list of (i, j, k) tuples
+                'torsions': list of (i, j, k, l) tuples
+        """
+        indices = list(self.getInternalCoordinateAtomIndices())
+        nb = self.getNumBonds()
+        na = self.getNumAngles()
+        nt = self.getNumTorsions()
+        offset = 0
+        bonds = []
+        for b in range(nb):
+            bonds.append((indices[offset], indices[offset+1]))
+            offset += 2
+        angles = []
+        for a in range(na):
+            angles.append((indices[offset], indices[offset+1], indices[offset+2]))
+            offset += 3
+        torsions = []
+        for t in range(nt):
+            torsions.append((indices[offset], indices[offset+1], indices[offset+2], indices[offset+3]))
+            offset += 4
+        return {'bonds': bonds, 'angles': angles, 'torsions': torsions}
+
+    def computeInternalEntropy(self, context, system, grid_forces=None, temperature=300.0):
+        """
+        Compute entropy in internal coordinates using scalar force constants
+        and the Wilson GF-matrix for effective masses.
+
+        Optionally projects grid Hessian blocks into internal coordinate space
+        via the Wilson B-matrix, adding external stiffness contributions.
+
+        Args:
+            context: OpenMM Context with current positions
+            system: OpenMM System (for masses)
+            grid_forces: dict of {name: GridForce} or None. If provided,
+                         grid Hessian blocks are projected into internal coords.
+            temperature: Temperature in K (default 300)
+
+        Returns:
+            dict with:
+                'total_classical_entropy_kB': total classical entropy in kB
+                'total_quantum_entropy_kB': total quantum entropy in kB
+                'bond_entropies_kB': per-bond classical entropy
+                'angle_entropies_kB': per-angle classical entropy
+                'torsion_entropies_kB': per-torsion classical entropy
+                'force_constants': dict from getInternalForceConstants
+                'effective_masses': effective mass per DOF in daltons
+                'frequencies_cm1': vibrational frequency per DOF in cm^-1
+                'n_negative': count of DOF with negative force constants
+        """
+        import numpy as np
+        from openmm import unit as omm_unit
+
+        fc_dict = self.getInternalForceConstants(context)
+        atom_idx = self.getAtomIndicesPerDOF()
+
+        # Get masses in daltons
+        n_atoms = system.getNumParticles()
+        masses = np.array([system.getParticleMass(i).value_in_unit(omm_unit.dalton)
+                           for i in range(n_atoms)])
+
+        # Get positions in nm
+        state = context.getState(getPositions=True)
+        pos = np.array([[v.x, v.y, v.z] for v in state.getPositions()])
+
+        nb = self.getNumBonds()
+        na = self.getNumAngles()
+        nt = self.getNumTorsions()
+        n_dof = nb + na + nt
+
+        # Compute Wilson B-matrix rows and effective masses (G-matrix diagonal)
+        # B[i,:] = dq_i/dx (gradient of internal coordinate i w.r.t. all Cartesian coords)
+        # g_ii = sum_atoms (dq/dr_atom)^2 / m_atom = B[i,:] @ M_inv @ B[i,:]
+        B = np.zeros((n_dof, 3 * n_atoms))
+        dof_idx = 0
+
+        # Bond B-matrix rows: dr/dr_i = -rhat, dr/dr_j = rhat
+        for b, (i, j) in enumerate(atom_idx['bonds']):
+            rij = pos[j] - pos[i]
+            r = np.linalg.norm(rij)
+            if r < 1e-10:
+                dof_idx += 1
+                continue
+            rhat = rij / r
+            B[dof_idx, 3*i:3*i+3] = -rhat
+            B[dof_idx, 3*j:3*j+3] = rhat
+            dof_idx += 1
+
+        # Angle B-matrix rows
+        for a, (i, j, k) in enumerate(atom_idx['angles']):
+            r21 = pos[i] - pos[j]
+            r23 = pos[k] - pos[j]
+            L1 = np.linalg.norm(r21)
+            L3 = np.linalg.norm(r23)
+            if L1 < 1e-10 or L3 < 1e-10:
+                dof_idx += 1
+                continue
+            e1 = r21 / L1
+            e3 = r23 / L3
+            cos_theta = np.clip(np.dot(e1, e3), -0.9999999, 0.9999999)
+            sin_theta = np.sqrt(1 - cos_theta**2)
+            if sin_theta < 1e-10:
+                dof_idx += 1
+                continue
+            # dtheta/dr1 = -(1/(L1*sin_theta)) * (e3 - cos_theta*e1)
+            # dtheta/dr3 = -(1/(L3*sin_theta)) * (e1 - cos_theta*e3)
+            # dtheta/dr2 = -(dtheta/dr1 + dtheta/dr3)
+            g1 = -(e3 - cos_theta * e1) / (L1 * sin_theta)
+            g3 = -(e1 - cos_theta * e3) / (L3 * sin_theta)
+            g2 = -(g1 + g3)
+            B[dof_idx, 3*i:3*i+3] = g1
+            B[dof_idx, 3*j:3*j+3] = g2
+            B[dof_idx, 3*k:3*k+3] = g3
+            dof_idx += 1
+
+        # Torsion B-matrix rows (Blondel-Karplus)
+        for t, (i, j, k, l) in enumerate(atom_idx['torsions']):
+            b1 = pos[j] - pos[i]
+            b2 = pos[k] - pos[j]
+            b3 = pos[l] - pos[k]
+            m = np.cross(b1, b2)
+            nv = np.cross(b2, b3)
+            m_sq = np.dot(m, m)
+            n_sq = np.dot(nv, nv)
+            b2_sq = np.dot(b2, b2)
+            if m_sq < 1e-20 or n_sq < 1e-20 or b2_sq < 1e-20:
+                dof_idx += 1
+                continue
+            b2_norm = np.sqrt(b2_sq)
+            G1 = m * (b2_norm / m_sq)
+            G4 = nv * (-b2_norm / n_sq)
+            alpha = np.dot(b1, b2) / b2_sq
+            beta = np.dot(b3, b2) / b2_sq
+            c1 = -(1.0 + alpha)
+            c4 = beta
+            d1 = alpha
+            d4 = -(1.0 + beta)
+            G2 = c1 * G1 + c4 * G4
+            G3 = d1 * G1 + d4 * G4
+            B[dof_idx, 3*i:3*i+3] = G1
+            B[dof_idx, 3*j:3*j+3] = G2
+            B[dof_idx, 3*k:3*k+3] = G3
+            B[dof_idx, 3*l:3*l+3] = G4
+            dof_idx += 1
+
+        # G-matrix diagonal: g_ii = B[i,:] @ M_inv @ B[i,:]
+        mass_3n = np.repeat(masses, 3)
+        inv_mass = 1.0 / mass_3n
+        effective_masses = np.zeros(n_dof)
+        for i in range(n_dof):
+            g_ii = np.dot(B[i, :] ** 2, inv_mass)
+            effective_masses[i] = 1.0 / g_ii if g_ii > 1e-30 else 1e30
+
+        # Start with bonded force constants
+        f_total = fc_dict['all'].copy()
+
+        # Project grid Hessian into internal coordinates if provided
+        if grid_forces is not None:
+            n_at = n_atoms
+            for name, gf in grid_forces.items():
+                gf.computeHessian(context)
+                blocks = np.array(gf.getHessianBlocks(context))
+                # Build block-diagonal 3Nx3N grid Hessian, then project:
+                # F_grid_internal = B @ H_grid @ B^T
+                # Since H_grid is block-diagonal, this simplifies to:
+                # F_grid_internal[i,j] = sum_a B[i,3a:3a+3] @ H_a @ B[j,3a:3a+3]
+                for a in range(n_at):
+                    dxx, dyy, dzz, dxy, dxz, dyz = blocks[6*a:6*a+6]
+                    H_a = np.array([[dxx, dxy, dxz],
+                                    [dxy, dyy, dyz],
+                                    [dxz, dyz, dzz]])
+                    for ii in range(n_dof):
+                        bi = B[ii, 3*a:3*a+3]
+                        if np.dot(bi, bi) < 1e-30:
+                            continue
+                        # Diagonal contribution only (off-diagonal creates coupling between DOF)
+                        f_total[ii] += bi @ H_a @ bi
+
+        # Compute frequencies and entropy
+        # omega^2 = f / mu (in internal coords, mass-weighted)
+        # For entropy: x = hbar * omega / (kB * T)
+        hbar_over_kB = 7.6382  # K*ps
+        kB_kJ = 8.314462618e-3  # kJ/(mol*K)
+
+        n_negative = 0
+        entropies = np.full(n_dof, np.nan)
+        frequencies = np.zeros(n_dof)
+
+        for i in range(n_dof):
+            if f_total[i] <= 0:
+                n_negative += 1
+                continue
+            omega_sq = f_total[i] / effective_masses[i]  # rad^2/ps^2
+            if omega_sq <= 0:
+                n_negative += 1
+                continue
+            omega = np.sqrt(omega_sq)
+            # Frequency in cm^-1: nu_tilde = omega / (2*pi*c)
+            # omega in rad/ps, c = 2.998e10 cm/s = 2.998e-2 cm/ps
+            frequencies[i] = omega / (2 * np.pi * 2.998e-2)  # cm^-1
+
+            x = hbar_over_kB * omega / temperature
+            if x < 1e-10:
+                entropies[i] = 1 - np.log(x) if x > 0 else 0
+            elif x > 30:
+                entropies[i] = x * np.exp(-x)
+            else:
+                exp_x = np.exp(x)
+                entropies[i] = x / (exp_x - 1) - np.log(1 - np.exp(-x))
+
+        valid = np.isfinite(entropies)
+
+        return {
+            'total_classical_entropy_kB': float(np.nansum(1 - np.log(hbar_over_kB * np.sqrt(np.maximum(f_total, 1e-30) / effective_masses) / temperature))),
+            'total_quantum_entropy_kB': float(np.nansum(entropies)),
+            'bond_entropies_kB': entropies[:nb],
+            'angle_entropies_kB': entropies[nb:nb+na],
+            'torsion_entropies_kB': entropies[nb+na:],
+            'force_constants': fc_dict,
+            'effective_masses': effective_masses,
+            'frequencies_cm1': frequencies,
+            'n_negative': n_negative,
+            'n_dof': n_dof,
+            'n_valid_modes': int(np.sum(valid)),
+        }
     %}
 };
 

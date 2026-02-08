@@ -696,6 +696,14 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     const std::vector<Vec3>& getReceptorPositions() const;
 
     /**
+     * Check if grid values already have arcsinh+prefilter applied.
+     * This is true for grids loaded from file (which were saved after transforms).
+     *
+     * @return  true if values are pre-transformed
+     */
+    bool getValuesPreTransformed() const { return m_valuesPreTransformed; }
+
+    /**
      * Load grid from a binary file.
      *
      * @param filename  path to grid file
@@ -821,6 +829,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<ParticleGroup> m_particleGroups;  // Named groups of particles with individual scaling
 
     // Tiled mode parameters
+    bool m_valuesPreTransformed;  // Whether grid values already have arcsinh+prefilter applied (e.g., loaded from file)
     bool m_tiledMode;            // Whether to use tiled grid storage
     int m_tileSize;              // Tile size in grid points (default: 64)
     int m_memoryBudgetMB;        // GPU memory budget in MB (default: 2048)

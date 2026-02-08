@@ -28,6 +28,9 @@ public:
     double getGroupEnergy(int groupIndex) const override;
     double getGroupLigandDesolvationEnergy(int groupIndex) const override;
     std::vector<double> getGroupBornRadii(int groupIndex) const override;
+    void computeHessian(OpenMM::ContextImpl& context) override;
+    std::vector<double> getHessianBlocks() const override;
+    std::vector<double> getFullHessian() const override;
 
     /**
      * Generate the desolvation grid on GPU.
@@ -158,6 +161,27 @@ private:
     mutable std::vector<float> groupEnergiesHost;
     mutable std::vector<float> groupLigandEnergiesHost;
     mutable std::vector<std::vector<float>> groupBornRadiiHost;
+
+    // Hessian support
+    std::vector<double> lastHessianBlocks;   // Per-atom [6 * N]
+    std::vector<double> lastFullHessian;     // Full [3N * 3N]
+    int hessianNumAtoms;                     // N used in last computation
+
+    // Analytical Hessian GPU buffers
+    OpenMM::CudaArray hessianDRdPsi;         // dR_born/dΨ per atom [N]
+    OpenMM::CudaArray hessianD2RdPsi2;       // d²R_born/dΨ² per atom [N]
+    OpenMM::CudaArray hessianJacobian;       // HCT Jacobian J[N * 3N]
+    OpenMM::CudaArray hessianCouplingMatrix;  // Born coupling M[N * N]
+    OpenMM::CudaArray hessianGridHCTHessian;  // Receptor grid HCT Hessian [N * 6]
+    OpenMM::CudaArray hessianMatrix;          // Full Hessian H[3N * 3N]
+    bool hessianBuffersInitialized;
+
+    // Analytical Hessian CUDA kernels
+    CUfunction prepareHessianIntermediatesKernel;
+    CUfunction computeHCTJacobianKernel;
+    CUfunction computeReceptorGridHessianKernel;
+    CUfunction computeBornCouplingMatrixKernel;
+    CUfunction assembleGBSAHessianKernel;
 };
 
 } // namespace GridForcePlugin

@@ -190,6 +190,77 @@ __device__ void bsplineInterpolateTiled(
 }
 
 /**
+ * Quintic B-spline interpolation using tile-local data.
+ * Uses a 6x6x6 stencil with quintic B-spline basis functions.
+ * Does not require precomputed derivatives.
+ */
+__device__ void quinticBsplineInterpolateTiled(
+    const float* __restrict__ tileValues,
+    int localX, int localY, int localZ,
+    float fx, float fy, float fz,
+    float* energy,
+    float* dEdx, float* dEdy, float* dEdz,
+    float spacingX, float spacingY, float spacingZ,
+    int tileWithOverlap,
+    float invPower,
+    int invPowerMode
+) {
+    float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+                    qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
+    float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+                    qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
+    float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+                    qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
+
+    float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+                     qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
+    float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+                     qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
+    float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+                     qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
+
+    float interpolated = 0.0f;
+    float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+
+    for (int i = 0; i < 6; i++) {
+        int lx = localX - 2 + i;
+        lx = min(max(lx, 0), tileWithOverlap - 1);
+
+        for (int j = 0; j < 6; j++) {
+            int ly = localY - 2 + j;
+            ly = min(max(ly, 0), tileWithOverlap - 1);
+
+            for (int k = 0; k < 6; k++) {
+                int lz = localZ - 2 + k;
+                lz = min(max(lz, 0), tileWithOverlap - 1);
+
+                float val = tileValues[tileIndex(lx, ly, lz, tileWithOverlap)];
+
+                if (invPowerMode == 1 && invPower != 0.0f) {
+                    float invN = 1.0f / invPower;
+                    if (fabsf(val) >= 1e-10f) {
+                        val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                    } else {
+                        val = 0.0f;
+                    }
+                }
+
+                float weight = bx[i] * by[j] * bz[k];
+                interpolated += weight * val;
+                dvdx += dbx[i] * by[j] * bz[k] * val;
+                dvdy += bx[i] * dby[j] * bz[k] * val;
+                dvdz += bx[i] * by[j] * dbz[k] * val;
+            }
+        }
+    }
+
+    *energy = interpolated;
+    *dEdx = dvdx / spacingX;
+    *dEdy = dvdy / spacingY;
+    *dEdz = dvdz / spacingZ;
+}
+
+/**
  * Tricubic (Lekien-Marsden) interpolation using tile-local data.
  * Requires precomputed derivatives stored in tileDerivatives.
  */
@@ -560,6 +631,29 @@ extern "C" __global__ void computeGridForceTiled(
                 // Triquintic interpolation (handles inv_power pre-transform internally)
                 triquinticInterpolateTiled(
                     tileValues, tileDerivatives, localX, localY, localZ,
+                    fx, fy, fz,
+                    &interpolated, &dx, &dy, &dz,
+                    gridSpacing[0], gridSpacing[1], gridSpacing[2],
+                    tileWithOverlap,
+                    invPower, invPowerMode
+                );
+
+                // Back-transform from transformed space if RUNTIME or STORED mode
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    float absVal = fabsf(interpolated);
+                    if (absVal > 1e-10f) {
+                        float powerFactor = invPower * powf(absVal, invPower - 1.0f);
+                        interpolated = sign * powf(absVal, invPower);
+                        dx *= powerFactor;
+                        dy *= powerFactor;
+                        dz *= powerFactor;
+                    }
+                }
+            } else if (interpolationMethod == 4) {
+                // Quintic B-spline interpolation (6x6x6 stencil, no derivatives needed)
+                quinticBsplineInterpolateTiled(
+                    tileValues, localX, localY, localZ,
                     fx, fy, fz,
                     &interpolated, &dx, &dy, &dz,
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],

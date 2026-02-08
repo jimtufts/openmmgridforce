@@ -49,6 +49,7 @@ from openmm.unit import nanometer, kilojoules_per_mole, elementary_charge
 from benchmark_utils import (
     # Constants
     ONE_4PI_EPS0, METHOD_NAMES, GRID_TYPES, GRID_INV_POWER,
+    GRID_ARCSINH_SCALE, GRID_PREFILTER_ORDER,
     ASTEX_BASE, DEFAULT_SYSTEMS_FILE,
     DEFAULT_GRID_SPACING, DEFAULT_GRID_CAP, TRIQUINTIC_GRID_CAP, METHOD_GRID_CAPS,
     TILED_THRESHOLD_GB, DEFAULT_TILE_SIZE, DEFAULT_TILE_MEMORY_MB,
@@ -416,28 +417,35 @@ def compute_full_nma_entropy(context, grid_forces_dict, system=None,
             H_nb = np.array(isolated_nb_force.computeHessian(context)).reshape(n_dof, n_dof)
             H_full += H_nb
 
-        # Add GridForce Hessian contributions (diagonal blocks only)
+        # Add GridForce Hessian contributions
         for grid_type, grid_force in grid_forces_dict.items():
-            grid_force.computeHessian(context)
-            blocks = np.array(grid_force.getHessianBlocks(context))
-            for i in range(n_atoms):
-                dxx = blocks[6*i + 0]
-                dyy = blocks[6*i + 1]
-                dzz = blocks[6*i + 2]
-                dxy = blocks[6*i + 3]
-                dxz = blocks[6*i + 4]
-                dyz = blocks[6*i + 5]
+            if grid_type == 'gbsa':
+                # GBSAGridForce: full 3N×3N Hessian (cross-atom coupling via Born radii)
+                grid_force.computeHessian(context)
+                H_gbsa = np.array(grid_force.getFullHessian(context)).reshape(n_dof, n_dof)
+                H_full += H_gbsa
+            else:
+                # Regular GridForce: diagonal blocks only
+                grid_force.computeHessian(context)
+                blocks = np.array(grid_force.getHessianBlocks(context))
+                for i in range(n_atoms):
+                    dxx = blocks[6*i + 0]
+                    dyy = blocks[6*i + 1]
+                    dzz = blocks[6*i + 2]
+                    dxy = blocks[6*i + 3]
+                    dxz = blocks[6*i + 4]
+                    dyz = blocks[6*i + 5]
 
-                base = 3 * i
-                H_full[base+0, base+0] += dxx
-                H_full[base+1, base+1] += dyy
-                H_full[base+2, base+2] += dzz
-                H_full[base+0, base+1] += dxy
-                H_full[base+1, base+0] += dxy
-                H_full[base+0, base+2] += dxz
-                H_full[base+2, base+0] += dxz
-                H_full[base+1, base+2] += dyz
-                H_full[base+2, base+1] += dyz
+                    base = 3 * i
+                    H_full[base+0, base+0] += dxx
+                    H_full[base+1, base+1] += dyy
+                    H_full[base+2, base+2] += dzz
+                    H_full[base+0, base+1] += dxy
+                    H_full[base+1, base+0] += dxy
+                    H_full[base+0, base+2] += dxz
+                    H_full[base+2, base+0] += dxz
+                    H_full[base+1, base+2] += dyz
+                    H_full[base+2, base+1] += dyz
 
         # Symmetrize
         H_full = (H_full + H_full.T) / 2
@@ -771,7 +779,10 @@ def process_system(system_name, paths, poses, lig_params, platform,
                    rec_params=None, rec_positions_nm=None,
                    platform_properties=None, use_cpu_gas_hessian=False,
                    separate_gas_min=False, restraint_strength=0.0,
-                   xtal_coords_nm=None):
+                   xtal_coords_nm=None, entropy_mode='cartesian',
+                   tiled_threshold_gb=TILED_THRESHOLD_GB,
+                   save_pdb_dir=None,
+                   gbsa_info=None, gbsa_spacing=0.5):
     """Process all poses for a system with all methods.
 
     Generates grids per-method (different methods may use different caps),
@@ -808,9 +819,17 @@ def process_system(system_name, paths, poses, lig_params, platform,
                 sys.stdout.flush()
 
                 gen_start = time.time()
+                # For method 4 (quintic B-spline), use arcsinh + prefilter during generation
+                gen_arcsinh = GRID_ARCSINH_SCALE.get(grid_type, 0.0) if method == 4 else 0.0
+                gen_prefilter = GRID_PREFILTER_ORDER.get(grid_type, 0) if method == 4 else 0
+                # B-spline methods (1, 4) don't need derivatives; skip to save memory
+                need_derivs = (method not in (1, 4))
                 grid_result = generate_grid(
                     paths, grid_spacing, method_cap, grid_type,
-                    platform, grid_file, platform_properties
+                    platform, grid_file, platform_properties,
+                    arcsinh_scale=gen_arcsinh, prefilter_order=gen_prefilter,
+                    compute_derivatives=need_derivs,
+                    tiled_threshold_gb=tiled_threshold_gb
                 )
                 gen_time = (time.time() - gen_start) * 1000
                 total_gen_time += gen_time
@@ -822,10 +841,49 @@ def process_system(system_name, paths, poses, lig_params, platform,
 
             gen_time_per_pose = total_gen_time / len(poses) if poses else 0
 
+            # Build GBSA params if requested
+            gbsa_params = None
+            if gbsa_info is not None and grid_files:
+                # Use grid bounds from the first generated grid
+                first_grid = next(iter(grid_files.values()))
+                grid_origin = first_grid['origin_nm']
+                grid_spacing_nm_val = first_grid['spacing_nm']
+
+                # GBSA uses its own (coarser) spacing
+                gbsa_spacing_nm = gbsa_spacing * 0.1  # Angstroms to nm
+
+                # Compute GBSA grid counts from the same bounding box
+                first_counts = first_grid['counts']
+                extent = [first_counts[d] * grid_spacing_nm_val for d in range(3)]
+                gbsa_counts = tuple(int(extent[d] / gbsa_spacing_nm) + 1 for d in range(3))
+
+                # Receptor positions as flat list [x0, y0, z0, x1, ...]
+                rec_pos_flat = []
+                for x, y, z in rec_positions_nm:
+                    rec_pos_flat.extend([x, y, z])
+
+                # Ligand charges from lig_params
+                lig_charges = [p[0] for p in lig_params]
+
+                gbsa_params = {
+                    'lig_radii': gbsa_info['lig_radii'],
+                    'lig_scales': gbsa_info['lig_scales'],
+                    'lig_charges': lig_charges,
+                    'rec_positions': rec_pos_flat,
+                    'rec_radii': gbsa_info['rec_radii'],
+                    'rec_scales': gbsa_info['rec_scales'],
+                    'grid_origin': grid_origin,
+                    'grid_counts': gbsa_counts,
+                    'grid_spacing': gbsa_spacing_nm,
+                    'exclusions': gbsa_info['exclusions'],
+                }
+                print(f"      GBSA grid: {gbsa_counts}, spacing={gbsa_spacing_nm:.3f} nm")
+
             # Create system with all grids
             try:
                 system, grid_forces_dict, isolated_nb_force = create_evaluation_system(
-                    ligand_prmtop, lig_params, grid_files, method
+                    ligand_prmtop, lig_params, grid_files, method,
+                    gbsa_params=gbsa_params
                 )
             except Exception as e:
                 print(f"      ERROR creating system: {e}")
@@ -853,7 +911,8 @@ def process_system(system_name, paths, poses, lig_params, platform,
                 # Always create a fresh system for each pose when using tiled grids
                 # to avoid CUDA state issues with context reuse (workaround for tiled mode bug)
                 current_system, current_grid_forces, current_iso_nb = create_evaluation_system(
-                    ligand_prmtop, lig_params, grid_files, method
+                    ligand_prmtop, lig_params, grid_files, method,
+                    gbsa_params=gbsa_params
                 )
                 if restraint_strength > 0:
                     restraint_force = add_positional_restraints(current_system, positions, restraint_strength)
@@ -886,6 +945,32 @@ def process_system(system_name, paths, poses, lig_params, platform,
                     movement_A = compute_rmsd(pose_coords_nm, final_pos)
                     rmsd_to_xtal_A = compute_rmsd(xtal_coords_nm, final_pos) if xtal_coords_nm is not None else np.nan
                     rmsd_init_to_xtal_A = compute_rmsd(xtal_coords_nm, pose_coords_nm) if xtal_coords_nm is not None else np.nan
+
+                    # Print RMSD summary
+                    rmsd_parts = [f"move={movement_A:.2f}A"]
+                    if not np.isnan(rmsd_init_to_xtal_A):
+                        rmsd_parts.append(f"init->xtal={rmsd_init_to_xtal_A:.2f}A")
+                    if not np.isnan(rmsd_to_xtal_A):
+                        rmsd_parts.append(f"final->xtal={rmsd_to_xtal_A:.2f}A")
+                    print(f"\n        RMSD: {', '.join(rmsd_parts)}", end=" ")
+
+                    # Save PDB files if requested
+                    if save_pdb_dir is not None:
+                        from openmm.app import PDBFile
+                        os.makedirs(save_pdb_dir, exist_ok=True)
+                        topology = ligand_prmtop.topology
+                        prefix = f"{system_name}_{method_name}_pose{pose_idx}"
+                        # Initial structure
+                        init_pdb = os.path.join(save_pdb_dir, f"{prefix}_initial.pdb")
+                        init_positions = [Vec3(*p) for p in pose_coords_nm] * unit.nanometer
+                        with open(init_pdb, 'w') as f:
+                            PDBFile.writeFile(topology, init_positions, f)
+                        # Final (minimized) structure
+                        final_pdb = os.path.join(save_pdb_dir, f"{prefix}_minimized.pdb")
+                        final_positions = state.getPositions()
+                        with open(final_pdb, 'w') as f:
+                            PDBFile.writeFile(topology, final_positions, f)
+                        print(f"\n        PDB saved: {init_pdb}, {final_pdb}", end=" ")
 
                 except Exception as e:
                     print(f"minimization failed: {e}")
@@ -920,21 +1005,32 @@ def process_system(system_name, paths, poses, lig_params, platform,
                     continue
 
                 # Compute NMA entropy
-                if separate_gas_min:
+                if entropy_mode == 'internal':
+                    print("NMA(internal coords, bound+gas)...", end=" ")
+                elif separate_gas_min:
                     print("NMA(bound+separate gas)...", end=" ")
                 else:
                     print("NMA(bound+gas)...", end=" ")
                 sys.stdout.flush()
                 try:
                     nma_start = time.time()
-                    nma_analysis = compute_full_nma_entropy(
-                        context, current_grid_forces, system=current_system,
-                        isolated_nb_force=current_iso_nb, temperature=300.0
-                    )
 
-                    if separate_gas_min:
+                    if entropy_mode == 'internal':
+                        # Internal coordinate entropy via Wilson GF-matrix
+                        bonded_hessian = BondedHessian()
+                        bonded_hessian.initialize(current_system, context)
+
+                        # Bound state: bonded force constants + grid Hessian projected into internal coords
+                        bound_internal = bonded_hessian.computeInternalEntropy(
+                            context, current_system, grid_forces=current_grid_forces, temperature=300.0
+                        )
+                        # Gas state: bonded force constants only (no grid)
+                        gas_internal = bonded_hessian.computeInternalEntropy(
+                            context, current_system, grid_forces=None, temperature=300.0
+                        )
+
+                        # Compute grid energy for delta H
                         from openmm import unit
-
                         E_grid = 0.0
                         E_grid_by_type = {}
                         for grid_type, grid_force in current_grid_forces.items():
@@ -944,71 +1040,152 @@ def process_system(system_name, paths, poses, lig_params, platform,
                             E_grid += E_this_grid
                             E_grid_by_type[grid_type] = E_this_grid / 4.184
 
-                        state = context.getState(getPositions=True)
-                        bound_positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+                        state = context.getState(getEnergy=True)
+                        E_bound = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
 
-                        gas_nma_analysis = compute_gas_phase_nma(
-                            ligand_prmtop, lig_params, bound_positions, platform,
-                            temperature=300.0, min_tolerance=min_tolerance, min_steps=min_steps,
-                            use_newton=use_newton, skip_minimization=False,
-                            platform_properties=platform_properties
-                        )
+                        kB_kcal = 1.987204e-3
+                        T = 300.0
 
-                        if gas_nma_analysis is not None:
-                            kB_kcal = 1.987204e-3
-                            T = 300.0
+                        bound_S_q = bound_internal['total_quantum_entropy_kB']
+                        gas_S_q = gas_internal['total_quantum_entropy_kB']
+                        bound_S_c = bound_internal['total_classical_entropy_kB']
+                        gas_S_c = gas_internal['total_classical_entropy_kB']
 
-                            bound_S_quantum = nma_analysis.get('nma_quantum_entropy', np.nan)
-                            bound_S_classical = nma_analysis.get('nma_entropy', np.nan)
-                            bound_S_schlitter = nma_analysis.get('nma_schlitter', np.nan)
-                            gas_S_quantum = gas_nma_analysis.get('nma_quantum_entropy', np.nan)
-                            gas_S_classical = gas_nma_analysis.get('nma_entropy', np.nan)
-                            gas_S_schlitter = gas_nma_analysis.get('nma_schlitter', np.nan)
+                        delta_S_quantum = bound_S_q - gas_S_q
+                        delta_S_classical = bound_S_c - gas_S_c
+                        delta_H_kcal = E_grid / 4.184
 
-                            delta_S_quantum = bound_S_quantum - gas_S_quantum
-                            delta_S_classical = bound_S_classical - gas_S_classical
-                            delta_S_schlitter = bound_S_schlitter - gas_S_schlitter
-
-                            nma_analysis['direct_delta_S_quantum'] = delta_S_quantum
-                            nma_analysis['direct_delta_S_classical'] = delta_S_classical
-                            nma_analysis['direct_delta_S_schlitter'] = delta_S_schlitter
-                            nma_analysis['direct_delta_minusTS_quantum'] = -delta_S_quantum * kB_kcal * T
-                            nma_analysis['direct_delta_minusTS_classical'] = -delta_S_classical * kB_kcal * T
-                            nma_analysis['direct_delta_minusTS_schlitter'] = -delta_S_schlitter * kB_kcal * T
-
-                            delta_H_kcal = E_grid / 4.184
-                            nma_analysis['direct_delta_H_kcal'] = delta_H_kcal
-                            nma_analysis['direct_delta_G_quantum_kcal'] = delta_H_kcal + nma_analysis['direct_delta_minusTS_quantum']
-                            nma_analysis['direct_delta_G_classical_kcal'] = delta_H_kcal + nma_analysis['direct_delta_minusTS_classical']
-                            nma_analysis['direct_delta_G_schlitter_kcal'] = delta_H_kcal + nma_analysis['direct_delta_minusTS_schlitter']
-                            nma_analysis['E_grid_by_type'] = E_grid_by_type
-                    else:
-                        combined_nma = compute_nma_with_and_without_grids(
-                            context, current_grid_forces, system=current_system,
-                            isolated_nb_force=current_iso_nb, temperature=300.0,
-                            use_cpu_gas_hessian=use_cpu_gas_hessian,
-                            ligand_prmtop=ligand_prmtop
-                        )
-
-                        gas_nma_analysis = {
-                            'nma_entropy': combined_nma['gas']['classical_entropy_kB'],
-                            'nma_quantum_entropy': combined_nma['gas']['quantum_entropy_kB'],
-                            'nma_schlitter': combined_nma['gas']['schlitter_entropy_kB'],
-                            'mean_x': combined_nma['gas']['mean_x'],
-                            'temperature': 300.0,
-                            'E_gas': combined_nma['gas'].get('E_kJ_mol', np.nan),
+                        # Package into nma_analysis dict matching the expected format
+                        nma_analysis = {
+                            'nma_entropy': bound_S_c,
+                            'nma_entropy_per_mode': bound_S_c / max(bound_internal['n_valid_modes'], 1),
+                            'nma_quantum_entropy': bound_S_q,
+                            'nma_quantum_entropy_per_mode': bound_S_q / max(bound_internal['n_valid_modes'], 1),
+                            'nma_schlitter': np.nan,
+                            'nma_schlitter_per_mode': np.nan,
+                            'n_vibrational_modes': bound_internal['n_valid_modes'],
+                            'n_negative_modes': bound_internal['n_negative'],
+                            'n_zero_modes': 0,
+                            'mean_x': np.nan,
+                            'covariance_trace': np.nan,
+                            'mean_fluctuation': np.nan,
+                            'hessian_condition_number': np.nan,
+                            'det_log': np.nan,
+                            'n_atoms': n_atoms,
+                            'n_dof': bound_internal['n_dof'],
+                            'temperature': T,
+                            'entropy_mode': 'internal',
+                            # Delta values
+                            'direct_delta_S_quantum': delta_S_quantum,
+                            'direct_delta_S_classical': delta_S_classical,
+                            'direct_delta_S_schlitter': np.nan,
+                            'direct_delta_minusTS_quantum': -delta_S_quantum * kB_kcal * T,
+                            'direct_delta_minusTS_classical': -delta_S_classical * kB_kcal * T,
+                            'direct_delta_minusTS_schlitter': np.nan,
+                            'direct_delta_H_kcal': delta_H_kcal,
+                            'direct_delta_G_quantum_kcal': delta_H_kcal + (-delta_S_quantum * kB_kcal * T),
+                            'direct_delta_G_classical_kcal': delta_H_kcal + (-delta_S_classical * kB_kcal * T),
+                            'direct_delta_G_schlitter_kcal': np.nan,
+                            'E_grid_by_type': E_grid_by_type,
+                            # Internal-specific fields
+                            'internal_bound_force_constants': bound_internal['force_constants']['all'].tolist(),
+                            'internal_gas_force_constants': gas_internal['force_constants']['all'].tolist(),
+                            'internal_effective_masses': bound_internal['effective_masses'].tolist(),
+                            'internal_frequencies_cm1': bound_internal['frequencies_cm1'].tolist(),
                         }
-                        nma_analysis['direct_delta_S_quantum'] = combined_nma['delta_quantum_entropy_kB']
-                        nma_analysis['direct_delta_S_classical'] = combined_nma['delta_classical_entropy_kB']
-                        nma_analysis['direct_delta_S_schlitter'] = combined_nma['delta_schlitter_entropy_kB']
-                        nma_analysis['direct_delta_minusTS_quantum'] = combined_nma['delta_quantum_minusTS_kcal_mol']
-                        nma_analysis['direct_delta_minusTS_classical'] = combined_nma['delta_classical_minusTS_kcal_mol']
-                        nma_analysis['direct_delta_minusTS_schlitter'] = combined_nma['delta_schlitter_minusTS_kcal_mol']
-                        nma_analysis['direct_delta_H_kcal'] = combined_nma.get('delta_H_kcal_mol', np.nan)
-                        nma_analysis['direct_delta_G_quantum_kcal'] = combined_nma.get('delta_G_quantum_kcal_mol', np.nan)
-                        nma_analysis['direct_delta_G_classical_kcal'] = combined_nma.get('delta_G_classical_kcal_mol', np.nan)
-                        nma_analysis['direct_delta_G_schlitter_kcal'] = combined_nma.get('delta_G_schlitter_kcal_mol', np.nan)
-                        nma_analysis['E_grid_by_type'] = combined_nma.get('E_grid_by_type', {})
+                        gas_nma_analysis = {
+                            'nma_entropy': gas_S_c,
+                            'nma_quantum_entropy': gas_S_q,
+                            'nma_schlitter': np.nan,
+                            'mean_x': np.nan,
+                            'temperature': T,
+                            'E_gas': E_bound - E_grid,
+                        }
+
+                    else:
+                        # Cartesian NMA (existing code path)
+                        nma_analysis = compute_full_nma_entropy(
+                            context, current_grid_forces, system=current_system,
+                            isolated_nb_force=current_iso_nb, temperature=300.0
+                        )
+
+                        if separate_gas_min:
+                            from openmm import unit
+
+                            E_grid = 0.0
+                            E_grid_by_type = {}
+                            for grid_type, grid_force in current_grid_forces.items():
+                                force_idx = grid_force.getForceGroup()
+                                grid_state = context.getState(getEnergy=True, groups={force_idx})
+                                E_this_grid = grid_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+                                E_grid += E_this_grid
+                                E_grid_by_type[grid_type] = E_this_grid / 4.184
+
+                            state = context.getState(getPositions=True)
+                            bound_positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+
+                            gas_nma_analysis = compute_gas_phase_nma(
+                                ligand_prmtop, lig_params, bound_positions, platform,
+                                temperature=300.0, min_tolerance=min_tolerance, min_steps=min_steps,
+                                use_newton=use_newton, skip_minimization=False,
+                                platform_properties=platform_properties
+                            )
+
+                            if gas_nma_analysis is not None:
+                                kB_kcal = 1.987204e-3
+                                T = 300.0
+
+                                bound_S_quantum = nma_analysis.get('nma_quantum_entropy', np.nan)
+                                bound_S_classical = nma_analysis.get('nma_entropy', np.nan)
+                                bound_S_schlitter = nma_analysis.get('nma_schlitter', np.nan)
+                                gas_S_quantum = gas_nma_analysis.get('nma_quantum_entropy', np.nan)
+                                gas_S_classical = gas_nma_analysis.get('nma_entropy', np.nan)
+                                gas_S_schlitter = gas_nma_analysis.get('nma_schlitter', np.nan)
+
+                                delta_S_quantum = bound_S_quantum - gas_S_quantum
+                                delta_S_classical = bound_S_classical - gas_S_classical
+                                delta_S_schlitter = bound_S_schlitter - gas_S_schlitter
+
+                                nma_analysis['direct_delta_S_quantum'] = delta_S_quantum
+                                nma_analysis['direct_delta_S_classical'] = delta_S_classical
+                                nma_analysis['direct_delta_S_schlitter'] = delta_S_schlitter
+                                nma_analysis['direct_delta_minusTS_quantum'] = -delta_S_quantum * kB_kcal * T
+                                nma_analysis['direct_delta_minusTS_classical'] = -delta_S_classical * kB_kcal * T
+                                nma_analysis['direct_delta_minusTS_schlitter'] = -delta_S_schlitter * kB_kcal * T
+
+                                delta_H_kcal = E_grid / 4.184
+                                nma_analysis['direct_delta_H_kcal'] = delta_H_kcal
+                                nma_analysis['direct_delta_G_quantum_kcal'] = delta_H_kcal + nma_analysis['direct_delta_minusTS_quantum']
+                                nma_analysis['direct_delta_G_classical_kcal'] = delta_H_kcal + nma_analysis['direct_delta_minusTS_classical']
+                                nma_analysis['direct_delta_G_schlitter_kcal'] = delta_H_kcal + nma_analysis['direct_delta_minusTS_schlitter']
+                                nma_analysis['E_grid_by_type'] = E_grid_by_type
+                        else:
+                            combined_nma = compute_nma_with_and_without_grids(
+                                context, current_grid_forces, system=current_system,
+                                isolated_nb_force=current_iso_nb, temperature=300.0,
+                                use_cpu_gas_hessian=use_cpu_gas_hessian,
+                                ligand_prmtop=ligand_prmtop
+                            )
+
+                            gas_nma_analysis = {
+                                'nma_entropy': combined_nma['gas']['classical_entropy_kB'],
+                                'nma_quantum_entropy': combined_nma['gas']['quantum_entropy_kB'],
+                                'nma_schlitter': combined_nma['gas']['schlitter_entropy_kB'],
+                                'mean_x': combined_nma['gas']['mean_x'],
+                                'temperature': 300.0,
+                                'E_gas': combined_nma['gas'].get('E_kJ_mol', np.nan),
+                            }
+                            nma_analysis['direct_delta_S_quantum'] = combined_nma['delta_quantum_entropy_kB']
+                            nma_analysis['direct_delta_S_classical'] = combined_nma['delta_classical_entropy_kB']
+                            nma_analysis['direct_delta_S_schlitter'] = combined_nma['delta_schlitter_entropy_kB']
+                            nma_analysis['direct_delta_minusTS_quantum'] = combined_nma['delta_quantum_minusTS_kcal_mol']
+                            nma_analysis['direct_delta_minusTS_classical'] = combined_nma['delta_classical_minusTS_kcal_mol']
+                            nma_analysis['direct_delta_minusTS_schlitter'] = combined_nma['delta_schlitter_minusTS_kcal_mol']
+                            nma_analysis['direct_delta_H_kcal'] = combined_nma.get('delta_H_kcal_mol', np.nan)
+                            nma_analysis['direct_delta_G_quantum_kcal'] = combined_nma.get('delta_G_quantum_kcal_mol', np.nan)
+                            nma_analysis['direct_delta_G_classical_kcal'] = combined_nma.get('delta_G_classical_kcal_mol', np.nan)
+                            nma_analysis['direct_delta_G_schlitter_kcal'] = combined_nma.get('delta_G_schlitter_kcal_mol', np.nan)
+                            nma_analysis['E_grid_by_type'] = combined_nma.get('E_grid_by_type', {})
 
                     # Compute reference pairwise energies
                     if rec_params is not None and rec_positions_nm is not None:
@@ -1110,6 +1287,19 @@ def main():
     parser.add_argument('--restraint-strength', type=float, default=DEFAULT_RESTRAINT_STRENGTH,
                         help=f'Positional restraint strength in kcal/mol/A^2 (default: {DEFAULT_RESTRAINT_STRENGTH}). '
                              'If > 0, poses are minimized with restraints but Hessian is computed without.')
+    parser.add_argument('--entropy-mode', type=str, default='cartesian',
+                        choices=['cartesian', 'internal'],
+                        help='Entropy computation mode: cartesian (full 3Nx3N Hessian NMA) or '
+                             'internal (Wilson GF-matrix with scalar force constants). Default: cartesian')
+    parser.add_argument('--save-pdb', type=str, default=None,
+                        help='Directory to save PDB files of initial and minimized structures')
+    parser.add_argument('--tiled-threshold', type=float, default=TILED_THRESHOLD_GB,
+                        help='Grid size threshold in GB for tiled storage '
+                             '(default: {:.1f}). Set low (e.g. 0.001) to force tiled mode.'.format(TILED_THRESHOLD_GB))
+    parser.add_argument('--gbsa', action='store_true',
+                        help='Include GBSAGridForce (grid-based GBSA solvation) in Hessian computation')
+    parser.add_argument('--gbsa-spacing', type=float, default=0.5,
+                        help='GBSA grid spacing in Angstroms (default: 0.5). Coarser than GridForce since HCT is smooth.')
 
     args = parser.parse_args()
 
@@ -1126,9 +1316,9 @@ def main():
 
     # Parse methods
     if args.methods.lower() == 'all':
-        methods = [1, 3]  # bspline, triquintic
+        methods = [1, 3, 4]  # bspline, triquintic, quintic_bspline
     else:
-        method_map = {'bspline': 1, 'triquintic': 3}
+        method_map = {'bspline': 1, 'triquintic': 3, 'quintic_bspline': 4, 'quintic': 4}
         methods = []
         for m in args.methods.split(','):
             m = m.strip().lower()
@@ -1160,6 +1350,10 @@ def main():
         print(f"Restraints: {args.restraint_strength} kcal/mol/A^2")
     print(f"Output: {args.output}")
     print(f"Platform: {args.platform}")
+    print(f"Entropy mode: {args.entropy_mode}")
+    if args.gbsa:
+        print(f"GBSA: enabled (grid spacing: {args.gbsa_spacing} A)")
+    print(f"Tiled threshold: {args.tiled_threshold:.3f} GB")
     if args.cpu_gas_hessian:
         print("Gas phase Hessian: CPU (deterministic)")
     print("=" * 80)
@@ -1214,6 +1408,82 @@ def main():
         rec_positions_nm = [(p[0].value_in_unit(nanometer), p[1].value_in_unit(nanometer),
                              p[2].value_in_unit(nanometer)) for p in receptor_inpcrd.positions]
 
+        # Extract GBSA parameters if requested
+        gbsa_info = None
+        if args.gbsa:
+            try:
+                from openmm.app import OBC2
+                from openmm import GBSAOBCForce
+
+                # Extract ligand GBSA radii and scale factors
+                lig_gbsa_sys = ligand_prmtop.createSystem(implicitSolvent=OBC2)
+                lig_gbsa_force = None
+                for fi in range(lig_gbsa_sys.getNumForces()):
+                    f = lig_gbsa_sys.getForce(fi)
+                    if isinstance(f, GBSAOBCForce):
+                        lig_gbsa_force = f
+                        break
+
+                if lig_gbsa_force is None:
+                    print("  Warning: Could not find GBSAOBCForce for ligand, skipping GBSA")
+                else:
+                    lig_gbsa_radii = []
+                    lig_gbsa_scales = []
+                    for i in range(lig_gbsa_force.getNumParticles()):
+                        q, r, s = lig_gbsa_force.getParticleParameters(i)
+                        lig_gbsa_radii.append(r.value_in_unit(nanometer))
+                        lig_gbsa_scales.append(s)
+
+                    # Extract receptor GBSA radii and scale factors
+                    rec_gbsa_sys = receptor_prmtop.createSystem(implicitSolvent=OBC2)
+                    rec_gbsa_force = None
+                    for fi in range(rec_gbsa_sys.getNumForces()):
+                        f = rec_gbsa_sys.getForce(fi)
+                        if isinstance(f, GBSAOBCForce):
+                            rec_gbsa_force = f
+                            break
+
+                    rec_gbsa_radii = []
+                    rec_gbsa_scales = []
+                    for i in range(rec_gbsa_force.getNumParticles()):
+                        q, r, s = rec_gbsa_force.getParticleParameters(i)
+                        rec_gbsa_radii.append(r.value_in_unit(nanometer))
+                        rec_gbsa_scales.append(s)
+
+                    # Extract exclusions from ligand NonbondedForce (1-2, 1-3 pairs)
+                    lig_nb_for_excl = None
+                    for fi in range(lig_gbsa_sys.getNumForces()):
+                        f = lig_gbsa_sys.getForce(fi)
+                        if isinstance(f, NonbondedForce):
+                            lig_nb_for_excl = f
+                            break
+
+                    exclusions = []
+                    if lig_nb_for_excl is not None:
+                        for i in range(lig_nb_for_excl.getNumExceptions()):
+                            p1, p2, chargeProd, sigma, epsilon = lig_nb_for_excl.getExceptionParameters(i)
+                            cp = chargeProd.value_in_unit(elementary_charge**2)
+                            ep = epsilon.value_in_unit(kilojoules_per_mole)
+                            if abs(cp) < 1e-10 and abs(ep) < 1e-10:
+                                exclusions.append((p1, p2))
+
+                    gbsa_info = {
+                        'lig_radii': lig_gbsa_radii,
+                        'lig_scales': lig_gbsa_scales,
+                        'rec_radii': rec_gbsa_radii,
+                        'rec_scales': rec_gbsa_scales,
+                        'exclusions': exclusions,
+                    }
+                    print(f"  GBSA: {len(lig_gbsa_radii)} ligand atoms, "
+                          f"{len(rec_gbsa_radii)} receptor atoms, "
+                          f"{len(exclusions)} exclusions")
+
+                    del lig_gbsa_sys, rec_gbsa_sys
+            except Exception as e:
+                print(f"  Warning: Could not extract GBSA parameters: {e}")
+                import traceback
+                traceback.print_exc()
+
         # Load crystal pose for RMSD reference
         xtal_coords_nm = None
         try:
@@ -1257,7 +1527,12 @@ def main():
                 use_cpu_gas_hessian=args.cpu_gas_hessian,
                 separate_gas_min=args.separate_gas_min,
                 restraint_strength=args.restraint_strength,
-                xtal_coords_nm=xtal_coords_nm
+                xtal_coords_nm=xtal_coords_nm,
+                entropy_mode=args.entropy_mode,
+                tiled_threshold_gb=args.tiled_threshold,
+                save_pdb_dir=args.save_pdb,
+                gbsa_info=gbsa_info,
+                gbsa_spacing=args.gbsa_spacing
             )
             completed += 1
         except Exception as e:

@@ -5,6 +5,7 @@
 #include "TiledGridData.h"
 #include "BSplinePrefilter.h"
 #include "openmm/OpenMMException.h"
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <algorithm>
@@ -413,6 +414,58 @@ void TiledGridData::close() {
         }
     }
     m_tileIndex.clear();
+}
+
+// ========== Arcsinh transform ==========
+
+void TiledGridData::applyArcsinhTransform(double scale) {
+    if (scale <= 0.0) {
+        throw OpenMMException("TiledGridData::applyArcsinhTransform: scale must be > 0");
+    }
+    if (m_filename.empty() || m_tileIndex.empty()) {
+        throw OpenMMException("TiledGridData: Must call openForReading() before applyArcsinhTransform()");
+    }
+    if (m_file.is_open()) {
+        m_file.close();
+    }
+
+    // Reopen file for read-write
+    m_file.open(m_filename, ios::binary | ios::in | ios::out);
+    if (!m_file.is_open()) {
+        throw OpenMMException("TiledGridData: Unable to reopen file for arcsinh transform: " + m_filename);
+    }
+
+    float scaleF = (float)scale;
+    int totalTiles = m_numTilesX * m_numTilesY * m_numTilesZ;
+
+    for (int txIdx = 0; txIdx < m_numTilesX; txIdx++) {
+        for (int tyIdx = 0; tyIdx < m_numTilesY; tyIdx++) {
+            for (int tzIdx = 0; tzIdx < m_numTilesZ; tzIdx++) {
+                int tileSizeX, tileSizeY, tileSizeZ;
+                getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX, tileSizeY, tileSizeZ);
+
+                vector<float> tileVals, tileDerivsUnused;
+                readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
+
+                // Apply arcsinh(value/scale) to each grid value
+                for (size_t i = 0; i < tileVals.size(); i++) {
+                    tileVals[i] = std::asinh(tileVals[i] / scaleF);
+                }
+
+                // Write back values only (skip 6-byte tile dims header)
+                int tileIdx = getTileLinearIndex(txIdx, tyIdx, tzIdx);
+                int64_t offset = m_tileIndex[tileIdx].fileOffset + 6;
+                m_file.seekp(offset);
+                m_file.write(reinterpret_cast<const char*>(tileVals.data()),
+                             tileVals.size() * sizeof(float));
+            }
+        }
+    }
+
+    m_file.close();
+
+    // Reopen in read-only mode
+    m_file.open(m_filename, ios::binary | ios::in);
 }
 
 // ========== B-spline prefilter ==========

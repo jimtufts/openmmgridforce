@@ -184,6 +184,21 @@ public:
      */
     void applyBSplinePrefilter(int order = 3);
 
+    /**
+     * Apply arcsinh(value/scale) transform to all grid values in-place.
+     * This compresses the dynamic range of grid values before B-spline prefiltering,
+     * preventing Gibbs-like ringing for steep potentials (e.g., LJ repulsive).
+     *
+     * Must be called BEFORE applyBSplinePrefilter() if both are used.
+     * The inverse (sinh) transform is applied in the CUDA evaluation kernel.
+     *
+     * Only modifies grid values, not derivatives (derivatives are recomputed
+     * during evaluation via the chain rule).
+     *
+     * @param scale  arcsinh scale parameter (must be > 0)
+     */
+    void applyArcsinhTransform(double scale);
+
     // ========== Static utilities ==========
 
     /**

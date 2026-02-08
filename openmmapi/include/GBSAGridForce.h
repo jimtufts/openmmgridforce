@@ -402,6 +402,28 @@ public:
      */
     std::vector<double> getGroupBornRadii(int groupIndex) const;
 
+    // ========== Hessian ==========
+
+    /**
+     * Compute the Hessian (second derivatives) via numerical finite differences.
+     * Must be called after getState(getForces=True) so GBSA internal state is valid.
+     */
+    void computeHessian(OpenMM::Context& context) const;
+
+    /**
+     * Get per-atom 3x3 diagonal Hessian blocks.
+     * Returns [6 * N] array: dxx, dyy, dzz, dxy, dxz, dyz per atom.
+     * Only valid after computeHessian().
+     */
+    std::vector<double> getHessianBlocks(OpenMM::Context& context) const;
+
+    /**
+     * Get the full 3N x 3N Hessian matrix (row-major).
+     * Captures cross-atom coupling through Born radii.
+     * Only valid after computeHessian().
+     */
+    std::vector<double> getFullHessian(OpenMM::Context& context) const;
+
     // ========== OpenMM Force Interface ==========
 
     bool usesPeriodicBoundaryConditions() const override { return false; }

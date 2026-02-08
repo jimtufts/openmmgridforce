@@ -57,6 +57,7 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
                          m_systemPtr(nullptr),
                          m_vals(std::make_shared<std::vector<double>>()),
                          m_derivatives(std::make_shared<std::vector<double>>()),
+                         m_valuesPreTransformed(false),
                          m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048),
                          m_tiledOutputFile(""), m_tiledOutputTileSize(32) {
     //
@@ -73,6 +74,7 @@ GridForce::GridForce(std::shared_ptr<GridData> gridData)
       m_gridData(gridData),
       m_vals(std::make_shared<std::vector<double>>()),
       m_derivatives(std::make_shared<std::vector<double>>()),
+      m_valuesPreTransformed(false),
       m_tiledMode(false), m_tileSize(64), m_memoryBudgetMB(2048),
                          m_tiledOutputFile(""), m_tiledOutputTileSize(32) {
     if (gridData) {
@@ -713,6 +715,11 @@ void GridForce::loadFromFile(const std::string& filename) {
         m_vals = m_cachedGridData->getCurrentValues();
         m_derivatives = m_cachedGridData->getCurrentDerivatives();
     }
+
+    // Mark that values loaded from file are already in their final form.
+    // Auto-generated grids apply arcsinh+prefilter before saving, so the file
+    // already contains transformed values. Skip re-transformation at load time.
+    m_valuesPreTransformed = true;
 }
 
 void GridForce::saveToFile(const std::string& filename) const {

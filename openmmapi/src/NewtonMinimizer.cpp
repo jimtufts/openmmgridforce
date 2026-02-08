@@ -6,11 +6,13 @@
  *   - BondedHessian (bonds, angles, torsions)                                *
  *   - GridForce (ligand-receptor grid interactions)                          *
  *   - IsolatedNonbondedForce (intra-ligand nonbonded)                        *
+ *   - GBSAGridForce (grid-based GB solvation, full matrix via numerical FD) *
  * -------------------------------------------------------------------------- */
 
 #include "NewtonMinimizer.h"
 #include "BondedHessian.h"
 #include "GridForce.h"
+#include "GBSAGridForce.h"
 #include "IsolatedNonbondedForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
@@ -212,6 +214,7 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
 
     vector<GridForce*> gridForces;
     vector<IsolatedNonbondedForce*> isoNBForces;
+    vector<GBSAGridForce*> gbsaForces;
 
     for (int i = 0; i < system.getNumForces(); i++) {
         // Note: We need const_cast because getForce returns const reference
@@ -226,6 +229,11 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
         IsolatedNonbondedForce* inb = dynamic_cast<IsolatedNonbondedForce*>(&force);
         if (inb != nullptr) {
             isoNBForces.push_back(inb);
+        }
+
+        GBSAGridForce* gbsa = dynamic_cast<GBSAGridForce*>(&force);
+        if (gbsa != nullptr) {
+            gbsaForces.push_back(gbsa);
         }
     }
 
@@ -291,6 +299,17 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
             if (nbH.size() == H.size()) {
                 for (size_t i = 0; i < H.size(); i++) {
                     H[i] += nbH[i];
+                }
+            }
+        }
+
+        // Add GBSAGridForce Hessians (full matrix via numerical FD)
+        for (GBSAGridForce* gbsa : gbsaForces) {
+            gbsa->computeHessian(context);
+            vector<double> gbsaH = gbsa->getFullHessian(context);
+            if (gbsaH.size() == H.size()) {
+                for (size_t i = 0; i < H.size(); i++) {
+                    H[i] += gbsaH[i];
                 }
             }
         }

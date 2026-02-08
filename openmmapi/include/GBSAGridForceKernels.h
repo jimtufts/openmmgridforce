@@ -71,6 +71,24 @@ public:
      * Get the Born radii for atoms in a particle group.
      */
     virtual std::vector<double> getGroupBornRadii(int groupIndex) const = 0;
+
+    /**
+     * Compute the Hessian (second derivatives) via numerical finite differences.
+     * Must be called after execute() so that internal state is valid.
+     */
+    virtual void computeHessian(OpenMM::ContextImpl& context) = 0;
+
+    /**
+     * Get per-atom 3x3 Hessian diagonal blocks [6 * N]: dxx, dyy, dzz, dxy, dxz, dyz.
+     * Only valid after computeHessian().
+     */
+    virtual std::vector<double> getHessianBlocks() const = 0;
+
+    /**
+     * Get the full 3N x 3N Hessian matrix (row-major).
+     * Only valid after computeHessian().
+     */
+    virtual std::vector<double> getFullHessian() const = 0;
 };
 
 } // namespace GridForcePlugin

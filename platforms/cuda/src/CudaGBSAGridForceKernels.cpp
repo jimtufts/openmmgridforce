@@ -39,7 +39,13 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
       generateLigandHCTGridWithDerivativesKernel(nullptr),
       generateBinnedGridsWithKDEKernel(nullptr),
       generateBinnedGridsWithKDEDerivativesKernel(nullptr),
-      generationModule(nullptr) {
+      generationModule(nullptr),
+      hessianNumAtoms(0),
+      hessianBuffersInitialized(false),
+      prepareHessianIntermediatesKernel(nullptr),
+      computeHCTJacobianKernel(nullptr),
+      computeBornCouplingMatrixKernel(nullptr),
+      assembleGBSAHessianKernel(nullptr) {
 }
 
 CudaCalcGBSAGridForceKernel::~CudaCalcGBSAGridForceKernel() {
@@ -404,6 +410,13 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
     computeHCTChainRuleForcesKernel = cu.getKernel(module, "computeHCTChainRuleForces");
     computeReceptorHCTGradientForceKernel = cu.getKernel(module, "computeReceptorHCTGradientForce");
 
+    // Analytical Hessian kernels
+    prepareHessianIntermediatesKernel = cu.getKernel(module, "prepareHessianIntermediates");
+    computeHCTJacobianKernel = cu.getKernel(module, "computeHCTJacobian");
+    computeReceptorGridHessianKernel = cu.getKernel(module, "computeReceptorGridHessian");
+    computeBornCouplingMatrixKernel = cu.getKernel(module, "computeBornCouplingMatrix");
+    assembleGBSAHessianKernel = cu.getKernel(module, "assembleGBSAHessian");
+
     hasInitializedKernel = true;
 }
 
@@ -619,6 +632,159 @@ vector<double> CudaCalcGBSAGridForceKernel::getGroupBornRadii(int groupIndex) co
     vector<double> result(groupBornRadiiHost[groupIndex].begin(),
                           groupBornRadiiHost[groupIndex].end());
     return result;
+}
+
+void CudaCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
+    cu.setAsCurrent();
+
+    int totalParticles = particleIndices.getSize();
+    if (totalParticles == 0) return;
+
+    int dim3N = 3 * totalParticles;
+
+    // Allocate host-side Hessian storage
+    lastFullHessian.assign(dim3N * dim3N, 0.0);
+    lastHessianBlocks.assign(6 * totalParticles, 0.0);
+    hessianNumAtoms = totalParticles;
+
+    // Allocate GPU buffers for analytical Hessian (once)
+    if (!hessianBuffersInitialized) {
+        hessianDRdPsi.initialize<float>(cu, totalParticles, "hessianDRdPsi");
+        hessianD2RdPsi2.initialize<float>(cu, totalParticles, "hessianD2RdPsi2");
+        hessianJacobian.initialize<float>(cu, totalParticles * dim3N, "hessianJacobian");
+        hessianCouplingMatrix.initialize<float>(cu, totalParticles * totalParticles, "hessianCouplingM");
+        hessianGridHCTHessian.initialize<float>(cu, totalParticles * 6, "hessianGridHCTHessian");
+        hessianMatrix.initialize<float>(cu, dim3N * dim3N, "hessianMatrix");
+        hessianBuffersInitialized = true;
+    }
+
+    // Ensure GBSA pipeline has been run (bornRadii, dE_dR populated)
+    // The caller should have called getState(getForces=True) first, which runs execute().
+    // Run the dE/dR accumulation explicitly to ensure it's fresh.
+    int blockSize = 256;
+    int numBlocks = (totalParticles + blockSize - 1) / blockSize;
+
+    CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    CUdeviceptr particleIndicesPtr = particleIndices.getDevicePointer();
+    CUdeviceptr radiiPtr = radii.getDevicePointer();
+    CUdeviceptr scaleFactorsPtr = scaleFactors.getDevicePointer();
+    CUdeviceptr chargesPtr = charges.getDevicePointer();
+    CUdeviceptr bornRadiiPtr = bornRadii.getDevicePointer();
+    CUdeviceptr hctReceptorPtr = hctReceptor.getDevicePointer();
+    CUdeviceptr hctLigandPtr = hctLigand.getDevicePointer();
+    CUdeviceptr dE_dRPtr = dE_dR.getDevicePointer();
+    CUdeviceptr exclusionAtomsPtr = exclusionAtoms.getDevicePointer();
+    CUdeviceptr exclusionStartPtr = exclusionStartIndex.getDevicePointer();
+    CUdeviceptr groupStartPtr = groupStartIndex.getDevicePointer();
+    CUdeviceptr gridCountsPtr = gridCounts.getDevicePointer();
+    CUdeviceptr gridHctProbePtr = gridHctProbe.getDevicePointer();
+    CUdeviceptr gridHctDerivativesPtr = hasHctDerivatives ? gridHctDerivatives.getDevicePointer() : 0;
+    CUdeviceptr gridCorrectionNPtr = gridCorrectionN.getDevicePointer();
+    CUdeviceptr gridCorrectionAPtr = gridCorrectionA.getDevicePointer();
+    CUdeviceptr gridCorrectionBPtr = gridCorrectionB.getDevicePointer();
+    CUdeviceptr rThresholdsPtr = rThresholds.getDevicePointer();
+    CUdeviceptr dRdPsiPtr = hessianDRdPsi.getDevicePointer();
+    CUdeviceptr d2RdPsi2Ptr = hessianD2RdPsi2.getDevicePointer();
+    CUdeviceptr jacobianPtr = hessianJacobian.getDevicePointer();
+    CUdeviceptr couplingPtr = hessianCouplingMatrix.getDevicePointer();
+    CUdeviceptr hessianPtr = hessianMatrix.getDevicePointer();
+
+    // Kernel 1: Prepare OBC intermediates (dR/dΨ, d²R/dΨ², dE/dHCT)
+    CUdeviceptr dE_dHCTPtr = dE_dHCT.getDevicePointer();
+    void* prepArgs[] = {
+        &radiiPtr, &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr,
+        &dE_dRPtr, &totalParticles, &numAtoms, &dRdPsiPtr, &d2RdPsi2Ptr,
+        &dE_dHCTPtr
+    };
+    cu.executeKernel(prepareHessianIntermediatesKernel, prepArgs, numBlocks * blockSize, blockSize);
+
+    // Kernel 2: Compute HCT Jacobian J[N x 3N]
+    void* jacArgs[] = {
+        &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+        &exclusionAtomsPtr, &exclusionStartPtr, &groupStartPtr,
+        &numParticleGroups, &numAtoms,
+        &gridCountsPtr, &gridHctProbePtr, &gridHctDerivativesPtr,
+        &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
+        &rThresholdsPtr,
+        &originX, &originY, &originZ, &gridSpacing, &probeRadius,
+        &numBins, &interpolationMethod,
+        &useKDECorrections, &hasBinnedKDEDerivatives,
+        &totalParticles, &jacobianPtr
+    };
+    cu.executeKernel(computeHCTJacobianKernel, jacArgs, numBlocks * blockSize, blockSize);
+
+    // Kernel 2b: Compute receptor grid HCT Hessian d²Ψ_grid/(dx^α dx^β)
+    CUdeviceptr gridHCTHessianPtr = hessianGridHCTHessian.getDevicePointer();
+    void* gridHessArgs[] = {
+        &posqPtr, &particleIndicesPtr, &radiiPtr,
+        &groupStartPtr, &numParticleGroups, &numAtoms,
+        &gridCountsPtr, &gridHctProbePtr, &gridHctDerivativesPtr,
+        &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
+        &rThresholdsPtr,
+        &originX, &originY, &originZ, &gridSpacing, &probeRadius,
+        &numBins, &interpolationMethod,
+        &useKDECorrections, &hasBinnedKDEDerivatives,
+        &totalParticles, &gridHCTHessianPtr
+    };
+    cu.executeKernel(computeReceptorGridHessianKernel, gridHessArgs, numBlocks * blockSize, blockSize);
+
+    // Kernel 3: Compute Born coupling matrix M[N x N]
+    void* couplingArgs[] = {
+        &posqPtr, &particleIndicesPtr, &chargesPtr, &radiiPtr,
+        &bornRadiiPtr, &dRdPsiPtr, &d2RdPsi2Ptr, &dE_dRPtr,
+        &exclusionAtomsPtr, &exclusionStartPtr, &groupStartPtr,
+        &numParticleGroups, &numAtoms, &prefactor,
+        &includeSurfaceArea, &surfaceTension, &probeRadius,
+        &totalParticles, &couplingPtr
+    };
+    cu.executeKernel(computeBornCouplingMatrixKernel, couplingArgs, numBlocks * blockSize, blockSize);
+
+    // Kernel 4: Assemble full Hessian H = H_direct + H_cross + J^T·M·J + H_hct2
+    int totalElements = dim3N * dim3N;
+    int numBlocksH = (totalElements + blockSize - 1) / blockSize;
+    void* assembleArgs[] = {
+        &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
+        &exclusionAtomsPtr, &exclusionStartPtr, &groupStartPtr,
+        &numParticleGroups, &numAtoms, &prefactor,
+        &jacobianPtr, &couplingPtr, &dE_dHCTPtr, &scaleFactorsPtr, &radiiPtr,
+        &dRdPsiPtr, &gridHCTHessianPtr,
+        &totalParticles, &hessianPtr
+    };
+    cu.executeKernel(assembleGBSAHessianKernel, assembleArgs, numBlocksH * blockSize, blockSize);
+
+    // Download Hessian from GPU
+    vector<float> hessianFloat(dim3N * dim3N);
+    hessianMatrix.download(hessianFloat);
+
+    // Convert to double
+    for (int i = 0; i < dim3N * dim3N; i++) {
+        lastFullHessian[i] = static_cast<double>(hessianFloat[i]);
+    }
+
+    // Extract diagonal blocks: [dxx, dyy, dzz, dxy, dxz, dyz] per atom
+    for (int i = 0; i < totalParticles; i++) {
+        int base = 3 * i;
+        lastHessianBlocks[6 * i + 0] = lastFullHessian[(base + 0) * dim3N + (base + 0)];
+        lastHessianBlocks[6 * i + 1] = lastFullHessian[(base + 1) * dim3N + (base + 1)];
+        lastHessianBlocks[6 * i + 2] = lastFullHessian[(base + 2) * dim3N + (base + 2)];
+        lastHessianBlocks[6 * i + 3] = lastFullHessian[(base + 0) * dim3N + (base + 1)];
+        lastHessianBlocks[6 * i + 4] = lastFullHessian[(base + 0) * dim3N + (base + 2)];
+        lastHessianBlocks[6 * i + 5] = lastFullHessian[(base + 1) * dim3N + (base + 2)];
+    }
+}
+
+vector<double> CudaCalcGBSAGridForceKernel::getHessianBlocks() const {
+    if (hessianNumAtoms == 0) {
+        throw OpenMMException("GBSAGridForce: computeHessian() must be called first");
+    }
+    return lastHessianBlocks;
+}
+
+vector<double> CudaCalcGBSAGridForceKernel::getFullHessian() const {
+    if (hessianNumAtoms == 0) {
+        throw OpenMMException("GBSAGridForce: computeHessian() must be called first");
+    }
+    return lastFullHessian;
 }
 
 void CudaCalcGBSAGridForceKernel::generateGrid(

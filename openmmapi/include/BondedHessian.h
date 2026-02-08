@@ -71,6 +71,30 @@ public:
      */
     int getNumTorsions() const;
 
+    /**
+     * Compute scalar force constants (d²E/dq²) for each internal coordinate
+     * at the current geometry. Returns a flat vector in order:
+     *   [bonds (numBonds), angles (numAngles), torsions (numTorsions)]
+     *
+     * For harmonic bonds: d²E/dr² = k
+     * For harmonic angles: d²E/dθ² = k
+     * For periodic torsions: d²E/dφ² = -k*n²*cos(n*φ - φ0)
+     *
+     * Multiple torsion terms on the same atom quartet are kept separate.
+     * Units: kJ/(mol·nm²) for bonds, kJ/(mol·rad²) for angles/torsions.
+     */
+    std::vector<double> computeInternalForceConstants(OpenMM::Context& context);
+
+    /**
+     * Get atom indices for each internal coordinate, for computing effective
+     * masses via the Wilson B-matrix. Returns a flat vector:
+     *   [bond_0_i, bond_0_j, ..., angle_0_i, angle_0_j, angle_0_k, ...,
+     *    torsion_0_i, torsion_0_j, torsion_0_k, torsion_0_l, ...]
+     *
+     * Total size: 2*numBonds + 3*numAngles + 4*numTorsions.
+     */
+    std::vector<int> getInternalCoordinateAtomIndices() const;
+
 private:
     class Impl;
     Impl* impl;

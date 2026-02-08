@@ -40,7 +40,7 @@ from parse_dock6_poses import parse_mol2_file, parse_rec_box_pdb, get_grid_bound
 # =============================================================================
 
 ONE_4PI_EPS0 = 138.935456  # kJ/mol * nm / e^2
-METHOD_NAMES = {1: 'bspline', 3: 'triquintic'}
+METHOD_NAMES = {1: 'bspline', 3: 'triquintic', 4: 'quintic_bspline'}
 GRID_TYPES = ['charge', 'ljr', 'lja']
 
 # Inv-power settings per grid type (None = no transformation)
@@ -51,6 +51,22 @@ GRID_INV_POWER = {
     'lja': -2.0,   # Soften r^-6 -> r^-3 behavior
 }
 
+# Arcsinh scale per grid type (0.0 = disabled)
+# For quintic B-spline: arcsinh compression helps LJ grids with large dynamic range
+GRID_ARCSINH_SCALE = {
+    'charge': 0.0,   # No arcsinh for charge (moderate dynamic range)
+    'ljr': 100.0,    # Compress LJ repulsive dynamic range
+    'lja': 100.0,    # Compress LJ attractive dynamic range
+}
+
+# B-spline prefilter order per grid type (0 = none, 5 = quintic)
+# Prefiltering converts grid samples to B-spline coefficients for exact interpolation
+GRID_PREFILTER_ORDER = {
+    'charge': 0,     # No prefiltering for charge (raw quintic bspline)
+    'ljr': 5,        # Quintic prefilter for LJ repulsive
+    'lja': 5,        # Quintic prefilter for LJ attractive
+}
+
 # Default paths
 ASTEX_BASE = '/scratch/AstexDiv_comprehensive'
 DEFAULT_SYSTEMS_FILE = os.path.join(ASTEX_BASE, 'systems.txt')
@@ -58,11 +74,14 @@ DEFAULT_SYSTEMS_FILE = os.path.join(ASTEX_BASE, 'systems.txt')
 # Grid settings
 DEFAULT_GRID_SPACING = 0.2  # Angstroms
 DEFAULT_GRID_CAP = 41840.0  # kJ/mol - for bspline
-TRIQUINTIC_GRID_CAP = 750000.0  # kJ/mol - for triquintic
+TRIQUINTIC_GRID_CAP = 1e30  # kJ/mol - for triquintic (uncapped to avoid NaN with inv_power)
+
+QUINTIC_BSPLINE_GRID_CAP = 1e30  # kJ/mol - for quintic bspline (uncapped)
 
 METHOD_GRID_CAPS = {
     1: DEFAULT_GRID_CAP,
     3: TRIQUINTIC_GRID_CAP,
+    4: QUINTIC_BSPLINE_GRID_CAP,
 }
 
 # Tiled grid settings
@@ -197,8 +216,15 @@ def add_positional_restraints(system, positions, force_constant_kcal=10.0):
 
 def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
                   platform_properties=None, buffer_nm=2.0,
-                  tiled_threshold_gb=TILED_THRESHOLD_GB, tile_size=DEFAULT_TILE_SIZE):
+                  tiled_threshold_gb=TILED_THRESHOLD_GB, tile_size=DEFAULT_TILE_SIZE,
+                  arcsinh_scale=0.0, prefilter_order=0, compute_derivatives=True):
     """Generate a grid and save to file, using tiled mode for large grids.
+
+    Args:
+        arcsinh_scale: If > 0, apply arcsinh(V/scale) compression before prefiltering.
+        prefilter_order: B-spline prefilter order (0=none, 5=quintic).
+        compute_derivatives: Whether to compute and store derivatives. B-spline methods
+            (1, 4) don't need derivatives, so setting False saves memory/time.
 
     Returns:
         Dict with grid parameters: counts, origin_nm, spacing_nm, is_tiled, output_file
@@ -216,7 +242,7 @@ def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
     grid_bounds = get_grid_bounds_for_openmm(box_params, grid_spacing, buffer_nm=buffer_nm)
 
     expected_size_gb = calculate_expected_grid_memory_gb(
-        grid_bounds['grid_counts'], compute_derivatives=True)
+        grid_bounds['grid_counts'], compute_derivatives=compute_derivatives)
     use_tiled_generation = (tiled_threshold_gb > 0 and expected_size_gb > tiled_threshold_gb)
 
     if use_tiled_generation:
@@ -225,7 +251,7 @@ def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
         else:
             tiled_file = grid_file + '.tiled'
         actual_output_file = tiled_file
-        print(f"[Grid {expected_size_gb:.1f} GB > {tiled_threshold_gb:.1f} GB, using tiled mode]", end=" ")
+        print("[Grid {:.1f} GB > {:.1f} GB, using tiled mode]".format(expected_size_gb, tiled_threshold_gb), end=" ")
     else:
         actual_output_file = grid_file
 
@@ -237,10 +263,16 @@ def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
     grid.setAutoGenerateGrid(True)
     grid.setGridType(grid_type)
     grid.setGridCap(grid_cap)
-    grid.setComputeDerivatives(True)
+    grid.setComputeDerivatives(compute_derivatives)
     grid.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
     grid.setReceptorAtoms(receptor_atoms)
     grid.setReceptorPositionsFromLists(rec_pos_list)
+
+    # Set arcsinh and prefilter for generation (applied after grid values are computed)
+    if arcsinh_scale > 0.0:
+        grid.setArcsinhScale(arcsinh_scale)
+    if prefilter_order > 0:
+        grid.setBSplinePrefilterOrder(prefilter_order)
 
     if use_tiled_generation:
         grid.setTiledOutputFile(actual_output_file, tile_size)
@@ -274,8 +306,22 @@ def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
 
 def create_evaluation_system(ligand_prmtop, lig_params, grid_files, method,
                              grid_params_dict=None, tile_size=DEFAULT_TILE_SIZE,
-                             tile_memory_mb=DEFAULT_TILE_MEMORY_MB):
+                             tile_memory_mb=DEFAULT_TILE_MEMORY_MB,
+                             gbsa_params=None):
     """Create an OpenMM system with GridForce for ligand evaluation.
+
+    Args:
+        gbsa_params: If provided, dict with keys:
+            'lig_radii': list of ligand intrinsic radii (nm)
+            'lig_scales': list of ligand OBC scale factors
+            'lig_charges': list of ligand charges (e)
+            'rec_positions': flat list of receptor positions [x0,y0,z0,x1,...] (nm)
+            'rec_radii': list of receptor intrinsic radii (nm)
+            'rec_scales': list of receptor OBC scale factors
+            'grid_origin': (x, y, z) in nm
+            'grid_counts': (nx, ny, nz)
+            'grid_spacing': float in nm
+            'exclusions': list of (i, j) pairs
 
     Returns:
         Tuple of (system, grid_forces_dict, isolated_nb_force)
@@ -373,11 +419,21 @@ def create_evaluation_system(ligand_prmtop, lig_params, grid_files, method,
 
         grid_force.setInterpolationMethod(method)
 
-        inv_power = GRID_INV_POWER.get(grid_type)
-        if inv_power is not None:
-            grid_force.setInvPowerMode(gfp.InvPowerMode_RUNTIME, inv_power)
-        else:
+        if method == 4:
+            # Quintic B-spline: use arcsinh + prefilter instead of inv_power
+            arcsinh_scale = GRID_ARCSINH_SCALE.get(grid_type, 0.0)
+            prefilter_order = GRID_PREFILTER_ORDER.get(grid_type, 0)
+            if arcsinh_scale > 0.0:
+                grid_force.setArcsinhScale(arcsinh_scale)
+            if prefilter_order > 0:
+                grid_force.setBSplinePrefilterOrder(prefilter_order)
             grid_force.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
+        else:
+            inv_power = GRID_INV_POWER.get(grid_type)
+            if inv_power is not None:
+                grid_force.setInvPowerMode(gfp.InvPowerMode_RUNTIME, inv_power)
+            else:
+                grid_force.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
 
         particle_indices = list(range(n_atoms))
         grid_force.addParticleGroup(f'{grid_type}', particle_indices, scaling_factors)
@@ -387,6 +443,39 @@ def create_evaluation_system(ligand_prmtop, lig_params, grid_files, method,
 
         system.addForce(grid_force)
         grid_forces_dict[grid_type] = grid_force
+
+    # Add GBSAGridForce if GBSA params provided
+    if gbsa_params is not None:
+        gbsa_force = gfp.GBSAGridForce()
+        gbsa_force.setNumAtoms(n_atoms)
+        gbsa_force.setParticles(list(range(n_atoms)))
+
+        for i in range(n_atoms):
+            gbsa_force.setAtomParameters(
+                i, gbsa_params['lig_charges'][i],
+                gbsa_params['lig_radii'][i],
+                gbsa_params['lig_scales'][i]
+            )
+
+        # Add exclusions
+        for i, j in gbsa_params['exclusions']:
+            gbsa_force.addExclusion(i, j)
+
+        # Auto-generate grid on GPU
+        gbsa_force.setAutoGenerateGrid(True)
+        n_rec = len(gbsa_params['rec_radii'])
+        gbsa_force.setReceptorAtoms(list(range(n_rec)))
+        gbsa_force.setReceptorPositions(gbsa_params['rec_positions'])
+        gbsa_force.setReceptorRadii(gbsa_params['rec_radii'])
+        gbsa_force.setReceptorScaleFactors(gbsa_params['rec_scales'])
+
+        gbsa_force.setGridOrigin(*gbsa_params['grid_origin'])
+        gbsa_force.setGridCounts(*gbsa_params['grid_counts'])
+        gbsa_force.setGridSpacing(gbsa_params['grid_spacing'])
+        gbsa_force.setInterpolationMethod(0)  # trilinear for GBSA grids
+        gbsa_force.setForceGroup(5)
+        system.addForce(gbsa_force)
+        grid_forces_dict['gbsa'] = gbsa_force
 
     return system, grid_forces_dict, isolated_nb_force
 
@@ -529,10 +618,25 @@ def compute_combined_hessian_analysis(context, grid_forces_dict, system=None,
 
     # Add GridForce Hessians
     for grid_type, grid_force in grid_forces_dict.items():
-        grid_force.computeHessian(context)
-        blocks = np.array(grid_force.getHessianBlocks(context))
-        if len(blocks) == len(combined_blocks):
-            combined_blocks += blocks
+        if grid_type == 'gbsa':
+            # GBSAGridForce: full 3N×3N Hessian (captures cross-atom coupling)
+            grid_force.computeHessian(context)
+            gbsa_full = np.array(grid_force.getFullHessian(context))
+            n3 = 3 * n_atoms
+            gbsa_full = gbsa_full.reshape(n3, n3)
+            for i in range(n_atoms):
+                base = 3 * i
+                combined_blocks[6*i + 0] += gbsa_full[base+0, base+0]
+                combined_blocks[6*i + 1] += gbsa_full[base+1, base+1]
+                combined_blocks[6*i + 2] += gbsa_full[base+2, base+2]
+                combined_blocks[6*i + 3] += gbsa_full[base+0, base+1]
+                combined_blocks[6*i + 4] += gbsa_full[base+0, base+2]
+                combined_blocks[6*i + 5] += gbsa_full[base+1, base+2]
+        else:
+            grid_force.computeHessian(context)
+            blocks = np.array(grid_force.getHessianBlocks(context))
+            if len(blocks) == len(combined_blocks):
+                combined_blocks += blocks
 
     if n_atoms == 0:
         raise ValueError("No atoms in system")

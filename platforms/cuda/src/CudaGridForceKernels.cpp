@@ -354,6 +354,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
             std::cout << "GridForce: Tiled grid saved to " << tiledOutputFile << std::endl;
 
+            // Apply arcsinh transform to tiled file (streaming, tile-by-tile)
+            // Must be done BEFORE prefiltering to compress dynamic range first
+            if (arcsinhScale > 0.0f) {
+                TiledGridData tiledForArcsinh;
+                tiledForArcsinh.openForReading(tiledOutputFile);
+                tiledForArcsinh.applyArcsinhTransform((double)arcsinhScale);
+            }
+
             // Apply B-spline prefilter to the tiled file (streaming, tile-by-tile)
             int bsplineOrder = force.getBSplinePrefilterOrder();
             if (bsplineOrder > 0) {
@@ -486,7 +494,8 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
     // For non-auto-generated grids, apply arcsinh transform + prefilter before upload.
     // (For auto-generated grids, this was already done in the generate block above.)
-    if (!force.getAutoGenerateGrid() && !vals.empty()) {
+    // Skip if values were loaded from file (already transformed during original generation).
+    if (!force.getAutoGenerateGrid() && !force.getValuesPreTransformed() && !vals.empty()) {
         if (arcsinhScale > 0.0f) {
             for (size_t i = 0; i < vals.size(); i++) {
                 vals[i] = std::asinh(vals[i] / (double)arcsinhScale);
