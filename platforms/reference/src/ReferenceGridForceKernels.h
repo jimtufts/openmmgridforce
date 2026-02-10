@@ -107,6 +107,8 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> g_spacing;
     std::vector<double> g_vals;
     std::vector<double> g_scaling_factors;
+    double g_globalScalingFactor;       // Multiplies all per-particle scaling factors (default 1.0)
+    std::vector<double> g_groupScalingFactors;  // Per-group alchemical scaling factors
     std::vector<int> g_ligand_atoms;    // Particle indices for ligand atoms (corresponds to scaling factors)
     double g_inv_power;
     double g_gridCap;

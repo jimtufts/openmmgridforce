@@ -152,6 +152,16 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     // Initialize Nonbond parameters.
     grid_force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
 
+    // Get global alchemical scaling factor
+    g_globalScalingFactor = grid_force.getGlobalScalingFactor();
+
+    // Get per-group scaling factors
+    int numGroups = grid_force.getNumParticleGroups();
+    g_groupScalingFactors.resize(numGroups);
+    for (int i = 0; i < numGroups; i++) {
+        g_groupScalingFactors[i] = grid_force.getParticleGroup(i).groupScalingFactor;
+    }
+
     // Get ligand atom indices
     g_ligand_atoms = grid_force.getLigandAtoms();
     g_inv_power = grid_force.getInvPower();
@@ -706,7 +716,10 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                       << " scaling=" << g_scaling_factors[ia] << std::endl;
         }
 
-        if (is_inside && g_scaling_factors[ia] != 0.0) {
+        // Compute effective scaling factor including global alchemical scaling
+        double effectiveScaling = g_globalScalingFactor * g_scaling_factors[ia];
+
+        if (is_inside && effectiveScaling != 0.0) {
             // Calculate base grid indices
             int ix = (int)(pi[0] / g_spacing[0]);
             int iy = (int)(pi[1] / g_spacing[1]);
@@ -793,8 +806,8 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = Vec3(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
 
                 // Energy and force
-                energy += g_scaling_factors[ia] * interpolated;
-                forceData[ia] -= g_scaling_factors[ia] * grd;
+                energy += effectiveScaling * interpolated;
+                forceData[ia] -= effectiveScaling * grd;
 
             } else if (g_interpolationMethod == 2) {
                 // TRICUBIC HERMITE INTERPOLATION (2x2x2 cell with derivatives)
@@ -892,8 +905,8 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = Vec3(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
 
                 // Energy and force
-                energy += g_scaling_factors[ia] * interpolated;
-                forceData[ia] -= g_scaling_factors[ia] * grd;
+                energy += effectiveScaling * interpolated;
+                forceData[ia] -= effectiveScaling * grd;
 
             } else if (g_interpolationMethod == 3) {
                 // TRIQUINTIC HERMITE INTERPOLATION (C² continuous)
@@ -1013,8 +1026,8 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = Vec3(dvdx, dvdy, dvdz);
 
                 // Energy and force
-                energy += g_scaling_factors[ia] * interpolated;
-                forceData[ia] -= g_scaling_factors[ia] * grd;
+                energy += effectiveScaling * interpolated;
+                forceData[ia] -= effectiveScaling * grd;
 
             } else {
                 // TRILINEAR INTERPOLATION (default, 2x2x2 = 8 points)
@@ -1061,7 +1074,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 interpolated = pow(interpolated, g_inv_power);
             }
 
-	        double enr = g_scaling_factors[ia] * interpolated;
+	        double enr = effectiveScaling * interpolated;
 
             energy += enr;
 
@@ -1082,13 +1095,13 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = grd * power_factor;
             }
 
-            forceData[ia] -= g_scaling_factors[ia] * grd;
+            forceData[ia] -= effectiveScaling * grd;
 
             }  // End of if-else interpolation method selection
 
             // Debug: print energy contribution
             if (exec_count <= 2 && ia < 2) {
-                double energy_contrib = g_scaling_factors[ia] * interpolated;
+                double energy_contrib = effectiveScaling * interpolated;
                 std::cout << "  Interpolated value: " << interpolated << std::endl;
                 std::cout << "  Energy contribution: " << energy_contrib
                           << " (scaling=" << g_scaling_factors[ia] << ")" << std::endl;
@@ -1127,6 +1140,14 @@ void ReferenceCalcGridForceKernel::copyParametersToContext(ContextImpl &context,
                                                            const GridForce &grid_force) {
     grid_force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
     g_inv_power = grid_force.getInvPower();
+    g_globalScalingFactor = grid_force.getGlobalScalingFactor();
+
+    // Update per-group scaling factors
+    int numGroups = grid_force.getNumParticleGroups();
+    g_groupScalingFactors.resize(numGroups);
+    for (int i = 0; i < numGroups; i++) {
+        g_groupScalingFactors[i] = grid_force.getParticleGroupScalingFactor(i);
+    }
 }
 
 vector<double> ReferenceCalcGridForceKernel::getParticleGroupEnergies() {
