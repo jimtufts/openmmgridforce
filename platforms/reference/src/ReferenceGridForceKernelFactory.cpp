@@ -33,6 +33,9 @@
 
 #include "ReferenceGridForceKernelFactory.h"
 #include "ReferenceGridForceKernels.h"
+#include "ReferenceIsolatedNonbondedKernels.h"
+#include "ReferenceIsolatedGBSAKernels.h"
+#include "ReferenceGBSAGridForceKernels.h"
 #include "openmm/OpenMMException.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/reference/ReferencePlatform.h"
@@ -55,6 +58,12 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
                                                 factory);
                 platform.registerKernelFactory(CalcBondedHessianKernel::Name(),
                                                 factory);
+                platform.registerKernelFactory(CalcIsolatedNonbondedForceKernel::Name(),
+                                                factory);
+                platform.registerKernelFactory(CalcIsolatedGBSAForceKernel::Name(),
+                                                factory);
+                platform.registerKernelFactory(CalcGBSAGridForceKernel::Name(),
+                                                factory);
             }
         }
     }
@@ -70,6 +79,12 @@ KernelImpl* ReferenceGridForceKernelFactory::createKernelImpl(std::string name, 
         return new ReferenceCalcGridForceKernel(name, platform);
     if (name == CalcBondedHessianKernel::Name())
         return new ReferenceCalcBondedHessianKernel(name, platform);
+    if (name == CalcIsolatedNonbondedForceKernel::Name())
+        return new ReferenceCalcIsolatedNonbondedForceKernel(name, platform);
+    if (name == CalcIsolatedGBSAForceKernel::Name())
+        return new ReferenceCalcIsolatedGBSAForceKernel(name, platform);
+    if (name == CalcGBSAGridForceKernel::Name())
+        return new ReferenceCalcGBSAGridForceKernel(name, platform);
 
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

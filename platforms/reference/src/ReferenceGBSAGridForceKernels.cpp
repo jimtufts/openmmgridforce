@@ -1,0 +1,672 @@
+/* -------------------------------------------------------------------------- *
+ *                              OpenMMGridForce                               *
+ * -------------------------------------------------------------------------- *
+ * Reference platform implementation of GBSAGridForce kernel.                *
+ * Computes grid-based GB implicit solvation with OBC-II Born radii for      *
+ * isolated particle groups on CPU. Uses DesolvationGrid for receptor HCT.   *
+ * -------------------------------------------------------------------------- */
+
+#include "ReferenceGBSAGridForceKernels.h"
+#include "ReferenceGridInterpolation.h"
+#include "GBSAGridForce.h"
+
+#include "openmm/OpenMMException.h"
+#include "openmm/internal/ContextImpl.h"
+
+#include <cmath>
+#include <algorithm>
+#include <vector>
+#include <string>
+
+using namespace OpenMM;
+using namespace std;
+
+namespace GridForcePlugin {
+
+// OBC-II parameters
+static const double OBC_ALPHA = 1.0;
+static const double OBC_BETA = 0.8;
+static const double OBC_GAMMA = 4.85;
+
+// ==================== isExcluded ====================
+
+bool ReferenceCalcGBSAGridForceKernel::isExcluded(int i, int j) const {
+    if (i >= (int)exclusionSets.size()) return false;
+    return exclusionSets[i].count(j) > 0;
+}
+
+// ==================== interpolateReceptorHCT ====================
+
+double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
+        double x, double y, double z,
+        double R_i_off, bool computeGrad,
+        double& gradX, double& gradY, double& gradZ) const {
+
+    gradX = gradY = gradZ = 0.0;
+
+    if (!desolvationGrid) return 0.0;
+
+    double ox, oy, oz;
+    desolvationGrid->getOrigin(ox, oy, oz);
+    double spacing = desolvationGrid->getSpacing();
+    int nx, ny, nz;
+    desolvationGrid->getCounts(nx, ny, nz);
+    int numBins = desolvationGrid->getNumBins();
+
+    // Compute grid cell
+    double rx = (x - ox) / spacing;
+    double ry = (y - oy) / spacing;
+    double rz = (z - oz) / spacing;
+    int ix = (int)floor(rx);
+    int iy = (int)floor(ry);
+    int iz = (int)floor(rz);
+
+    // Bounds check
+    if (ix < 0 || ix >= nx - 1 || iy < 0 || iy >= ny - 1 || iz < 0 || iz >= nz - 1)
+        return 0.0;
+
+    double fx = rx - ix;
+    double fy = ry - iy;
+    double fz = rz - iz;
+    double ofx = 1.0 - fx;
+    double ofy = 1.0 - fy;
+    double ofz = 1.0 - fz;
+
+    int nyz = ny * nz;
+
+    // Corner indices
+    int c000 = ix * nyz + iy * nz + iz;
+    int c001 = c000 + 1;
+    int c010 = c000 + nz;
+    int c011 = c010 + 1;
+    int c100 = c000 + nyz;
+    int c101 = c100 + 1;
+    int c110 = c100 + nz;
+    int c111 = c110 + 1;
+
+    // Determine bin for this radius
+    double R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+    int binIdx = 0;
+    if (numBins > 1) {
+        const auto& rThresh = desolvationGrid->getRThresholds();
+        for (int b = 0; b < numBins - 1; b++) {
+            if (R_i_off > rThresh[b]) binIdx = b + 1;
+        }
+    }
+    int numPoints = nx * ny * nz;
+    int binOffset = binIdx * numPoints;
+
+    const auto& hctProbeData = desolvationGrid->getHctProbe();
+    const auto& corrN = desolvationGrid->getCorrectionN();
+    const auto& corrA = desolvationGrid->getCorrectionA();
+    const auto& corrB = desolvationGrid->getCorrectionB();
+
+    // Trilinear interpolation for HCT probe
+    double h000 = hctProbeData[c000], h001 = hctProbeData[c001];
+    double h010 = hctProbeData[c010], h011 = hctProbeData[c011];
+    double h100 = hctProbeData[c100], h101 = hctProbeData[c101];
+    double h110 = hctProbeData[c110], h111 = hctProbeData[c111];
+
+    double vmm = ofz * h000 + fz * h001;
+    double vmp = ofz * h010 + fz * h011;
+    double vpm = ofz * h100 + fz * h101;
+    double vpp = ofz * h110 + fz * h111;
+    double vm = ofy * vmm + fy * vmp;
+    double vp = ofy * vpm + fy * vpp;
+    double hct = ofx * vm + fx * vp;
+
+    // Trilinear interpolation for N, A, B correction grids
+    double N000 = corrN[binOffset + c000], N001 = corrN[binOffset + c001];
+    double N010 = corrN[binOffset + c010], N011 = corrN[binOffset + c011];
+    double N100 = corrN[binOffset + c100], N101 = corrN[binOffset + c101];
+    double N110 = corrN[binOffset + c110], N111 = corrN[binOffset + c111];
+
+    double Nmm = ofz * N000 + fz * N001;
+    double Nmp = ofz * N010 + fz * N011;
+    double Npm = ofz * N100 + fz * N101;
+    double Npp = ofz * N110 + fz * N111;
+    double Nm = ofy * Nmm + fy * Nmp;
+    double Np = ofy * Npm + fy * Npp;
+    double N_val = ofx * Nm + fx * Np;
+
+    double A000 = corrA[binOffset + c000], A001 = corrA[binOffset + c001];
+    double A010 = corrA[binOffset + c010], A011 = corrA[binOffset + c011];
+    double A100 = corrA[binOffset + c100], A101 = corrA[binOffset + c101];
+    double A110 = corrA[binOffset + c110], A111 = corrA[binOffset + c111];
+
+    double Amm = ofz * A000 + fz * A001;
+    double Amp = ofz * A010 + fz * A011;
+    double Apm = ofz * A100 + fz * A101;
+    double App = ofz * A110 + fz * A111;
+    double Am = ofy * Amm + fy * Amp;
+    double Ap = ofy * Apm + fy * App;
+    double A_val = ofx * Am + fx * Ap;
+
+    double B000 = corrB[binOffset + c000], B001 = corrB[binOffset + c001];
+    double B010 = corrB[binOffset + c010], B011 = corrB[binOffset + c011];
+    double B100 = corrB[binOffset + c100], B101 = corrB[binOffset + c101];
+    double B110 = corrB[binOffset + c110], B111 = corrB[binOffset + c111];
+
+    double Bmm = ofz * B000 + fz * B001;
+    double Bmp = ofz * B010 + fz * B011;
+    double Bpm = ofz * B100 + fz * B101;
+    double Bpp = ofz * B110 + fz * B111;
+    double Bm = ofy * Bmm + fy * Bmp;
+    double Bp = ofy * Bpm + fy * Bpp;
+    double B_val = ofx * Bm + fx * Bp;
+
+    // Apply correction formula
+    double invRi = 1.0 / R_i_off;
+    double invRp = 1.0 / R_probe_off;
+    double delta = invRi - invRp;
+    double sigma = invRi + invRp;
+    double logTerm = log(R_i_off / R_probe_off);
+
+    double result = hct + delta * (N_val - 0.25 * A_val * sigma) + B_val * logTerm;
+
+    if (computeGrad) {
+        double invSpacing = 1.0 / spacing;
+        double dCorr_dN = delta;
+        double dCorr_dA = -0.25 * delta * sigma;
+        double dCorr_dB = logTerm;
+
+        // Trilinear gradients for HCT
+        double dh_dfx = vp - vm;
+        double dh_dfy = ofx * (vmp - vmm) + fx * (vpp - vpm);
+        double dh_dfz = ofx * (ofy * (h001 - h000) + fy * (h011 - h010)) +
+                         fx * (ofy * (h101 - h100) + fy * (h111 - h110));
+
+        // Trilinear gradients for N
+        double dN_dfx = Np - Nm;
+        double dN_dfy = ofx * (Nmp - Nmm) + fx * (Npp - Npm);
+        double dN_dfz = ofx * (ofy * (N001 - N000) + fy * (N011 - N010)) +
+                         fx * (ofy * (N101 - N100) + fy * (N111 - N110));
+
+        // Trilinear gradients for A
+        double dA_dfx = Ap - Am;
+        double dA_dfy = ofx * (Amp - Amm) + fx * (App - Apm);
+        double dA_dfz = ofx * (ofy * (A001 - A000) + fy * (A011 - A010)) +
+                         fx * (ofy * (A101 - A100) + fy * (A111 - A110));
+
+        // Trilinear gradients for B
+        double dB_dfx = Bp - Bm;
+        double dB_dfy = ofx * (Bmp - Bmm) + fx * (Bpp - Bpm);
+        double dB_dfz = ofx * (ofy * (B001 - B000) + fy * (B011 - B010)) +
+                         fx * (ofy * (B101 - B100) + fy * (B111 - B110));
+
+        gradX = (dh_dfx + dCorr_dN * dN_dfx + dCorr_dA * dA_dfx + dCorr_dB * dB_dfx) * invSpacing;
+        gradY = (dh_dfy + dCorr_dN * dN_dfy + dCorr_dA * dA_dfy + dCorr_dB * dB_dfy) * invSpacing;
+        gradZ = (dh_dfz + dCorr_dN * dN_dfz + dCorr_dA * dA_dfz + dCorr_dB * dB_dfz) * invSpacing;
+    }
+
+    return result;
+}
+
+// ==================== initialize ====================
+
+void ReferenceCalcGBSAGridForceKernel::initialize(
+        const System& system, const GBSAGridForce& force) {
+
+    numAtoms = force.getNumAtoms();
+    if (numAtoms == 0)
+        throw OpenMMException("GBSAGridForce: no atoms defined");
+
+    // Process particle groups
+    int nGroups = force.getNumParticleGroups();
+    if (nGroups > 0) {
+        numParticleGroups = nGroups;
+        groupParticleIndices.resize(nGroups);
+        for (int g = 0; g < nGroups; g++) {
+            string name;
+            vector<int> indices;
+            force.getParticleGroup(g, name, indices);
+            if ((int)indices.size() != numAtoms)
+                throw OpenMMException("GBSAGridForce: particle group has wrong number of indices");
+            groupParticleIndices[g] = indices;
+        }
+    } else {
+        numParticleGroups = 1;
+        groupParticleIndices.resize(1);
+        groupParticleIndices[0] = force.getParticles();
+        if ((int)groupParticleIndices[0].size() != numAtoms)
+            throw OpenMMException("GBSAGridForce: must set particles or add particle groups");
+    }
+
+    // Alchemical scaling
+    globalScalingFactor = force.getGlobalScalingFactor();
+    groupScalingFactors.resize(numParticleGroups, 1.0);
+    for (int g = 0; g < nGroups; g++) {
+        groupScalingFactors[g] = force.getGroupScalingFactor(g);
+    }
+
+    // Atom parameters
+    charges.resize(numAtoms);
+    radii.resize(numAtoms);
+    scaleFactors.resize(numAtoms);
+    for (int i = 0; i < numAtoms; i++) {
+        force.getAtomParameters(i, charges[i], radii[i], scaleFactors[i]);
+    }
+
+    // Exclusions: build per-atom sets
+    exclusionSets.resize(numAtoms);
+    int numExcl = force.getNumExclusions();
+    for (int e = 0; e < numExcl; e++) {
+        int a1, a2;
+        force.getExclusionParticles(e, a1, a2);
+        exclusionSets[a1].insert(a2);
+        exclusionSets[a2].insert(a1);
+    }
+
+    // Solvent parameters
+    double soluteDielectric = force.getSoluteDielectric();
+    double solventDielectric = force.getSolventDielectric();
+    prefactor = -COULOMB_CONSTANT * (1.0 / soluteDielectric - 1.0 / solventDielectric);
+
+    includeSurfaceArea = force.getIncludeSurfaceArea();
+    surfaceTension = force.getSurfaceTension();
+    interpolationMethod = force.getInterpolationMethod();
+
+    // Grid
+    desolvationGrid = force.getDesolvationGrid();
+    if (!desolvationGrid)
+        throw OpenMMException("GBSAGridForce: desolvation grid must be set (auto-generation not supported on Reference platform)");
+    probeRadius = desolvationGrid->getProbeRadius();
+
+    // Initialize per-group result storage
+    groupEnergies_.resize(numParticleGroups, 0.0);
+    groupLigandEnergies_.resize(numParticleGroups, 0.0);
+    groupBornRadii_.resize(numParticleGroups);
+}
+
+// ==================== execute ====================
+
+double ReferenceCalcGBSAGridForceKernel::execute(
+        ContextImpl& context, bool includeForces, bool includeEnergy) {
+
+    vector<Vec3>& posData = refExtractPositions(context);
+    vector<Vec3>& forceData = refExtractForces(context);
+
+    double totalEnergy = 0.0;
+    fill(groupEnergies_.begin(), groupEnergies_.end(), 0.0);
+    fill(groupLigandEnergies_.begin(), groupLigandEnergies_.end(), 0.0);
+
+    for (int g = 0; g < numParticleGroups; g++) {
+        double scale = globalScalingFactor * groupScalingFactors[g];
+        if (scale == 0.0) {
+            groupBornRadii_[g].assign(numAtoms, 0.0);
+            continue;
+        }
+
+        const vector<int>& particles = groupParticleIndices[g];
+
+        // Step 1: Receptor HCT via grid interpolation
+        vector<double> hctReceptor(numAtoms, 0.0);
+        vector<double> hctRecGradX(numAtoms, 0.0);
+        vector<double> hctRecGradY(numAtoms, 0.0);
+        vector<double> hctRecGradZ(numAtoms, 0.0);
+
+        for (int i = 0; i < numAtoms; i++) {
+            int pi = particles[i];
+            double R_i_off = radii[i] - DIELECTRIC_OFFSET;
+            double gx, gy, gz;
+            hctReceptor[i] = interpolateReceptorHCT(
+                posData[pi][0], posData[pi][1], posData[pi][2],
+                R_i_off, includeForces, gx, gy, gz);
+            hctRecGradX[i] = gx;
+            hctRecGradY[i] = gy;
+            hctRecGradZ[i] = gz;
+        }
+
+        // Step 2: Ligand-ligand HCT (with exclusions)
+        vector<double> hctLigand(numAtoms, 0.0);
+        for (int i = 0; i < numAtoms; i++) {
+            int pi = particles[i];
+            double R_i_off = radii[i] - DIELECTRIC_OFFSET;
+
+            for (int j = 0; j < numAtoms; j++) {
+                if (i == j) continue;
+                if (isExcluded(i, j)) continue;
+
+                int pj = particles[j];
+                double dx = posData[pi][0] - posData[pj][0];
+                double dy = posData[pi][1] - posData[pj][1];
+                double dz = posData[pi][2] - posData[pj][2];
+                double r = sqrt(dx * dx + dy * dy + dz * dz);
+                if (r < 1e-10) continue;
+
+                double R_j_off = radii[j] - DIELECTRIC_OFFSET;
+                hctLigand[i] += computeHCTTerm(r, R_i_off, R_j_off, scaleFactors[j]);
+            }
+        }
+
+        // Step 3: Born radii (OBC-II)
+        vector<double> hctTotal(numAtoms);
+        vector<double> bornRadii(numAtoms);
+        for (int i = 0; i < numAtoms; i++) {
+            hctTotal[i] = hctReceptor[i] + hctLigand[i];
+            double R_off = radii[i] - DIELECTRIC_OFFSET;
+            double psi = 0.5 * R_off * hctTotal[i];
+            double psi2 = psi * psi;
+            double psi3 = psi2 * psi;
+            double tanh_arg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+            double tanh_val = tanh(tanh_arg);
+            double inner = 1.0 / R_off - tanh_val / radii[i];
+            if (inner > 0.0)
+                bornRadii[i] = 1.0 / inner;
+            else
+                bornRadii[i] = 500.0;
+        }
+
+        groupBornRadii_[g] = bornRadii;
+
+        // Step 4: GB energy (Still equation) + dE/dR accumulation
+        double gbEnergy = 0.0;
+        vector<double> dE_dR(numAtoms, 0.0);
+
+        // Self-energy terms
+        for (int i = 0; i < numAtoms; i++) {
+            double E_self = 0.5 * prefactor * charges[i] * charges[i] / bornRadii[i];
+            gbEnergy += E_self;
+            dE_dR[i] += -0.5 * prefactor * charges[i] * charges[i] / (bornRadii[i] * bornRadii[i]);
+        }
+
+        // Pairwise terms
+        for (int i = 0; i < numAtoms; i++) {
+            int pi = particles[i];
+            for (int j = i + 1; j < numAtoms; j++) {
+                if (isExcluded(i, j)) continue;
+                int pj = particles[j];
+
+                double dx = posData[pi][0] - posData[pj][0];
+                double dy = posData[pi][1] - posData[pj][1];
+                double dz = posData[pi][2] - posData[pj][2];
+                double r2 = dx * dx + dy * dy + dz * dz;
+
+                double D = bornRadii[i] * bornRadii[j];
+                double alpha_val = r2 / (4.0 * D);
+                double exp_alpha = exp(-alpha_val);
+                double f_gb2 = r2 + D * exp_alpha;
+                double f_gb = sqrt(f_gb2);
+
+                double qq = charges[i] * charges[j];
+                double E_pair = prefactor * qq / f_gb;
+                gbEnergy += E_pair;
+
+                // dE/dR_born for chain rule
+                double df_dRi = bornRadii[j] * exp_alpha * (1.0 + alpha_val) / (2.0 * f_gb);
+                double df_dRj = bornRadii[i] * exp_alpha * (1.0 + alpha_val) / (2.0 * f_gb);
+                dE_dR[i] += -prefactor * qq / f_gb2 * df_dRi;
+                dE_dR[j] += -prefactor * qq / f_gb2 * df_dRj;
+
+                // Direct GB forces
+                if (includeForces) {
+                    double r = sqrt(r2);
+                    if (r > 1e-10) {
+                        double dE_dr = -prefactor * qq * r * (4.0 - exp_alpha)
+                                       / (4.0 * f_gb * f_gb2) * scale;
+                        double invR = 1.0 / r;
+                        double fx = dE_dr * dx * invR;
+                        double fy = dE_dr * dy * invR;
+                        double fz = dE_dr * dz * invR;
+                        forceData[pi][0] -= fx;
+                        forceData[pi][1] -= fy;
+                        forceData[pi][2] -= fz;
+                        forceData[pj][0] += fx;
+                        forceData[pj][1] += fy;
+                        forceData[pj][2] += fz;
+                    }
+                }
+            }
+        }
+
+        gbEnergy *= scale;
+        groupEnergies_[g] += gbEnergy;
+        groupLigandEnergies_[g] += gbEnergy;
+        totalEnergy += gbEnergy;
+
+        // Step 5: Surface area (optional)
+        double saEnergy = 0.0;
+        vector<double> dE_dR_sa(numAtoms, 0.0);
+        if (includeSurfaceArea) {
+            double probe = probeRadius;
+            for (int i = 0; i < numAtoms; i++) {
+                double R_probe_i = radii[i] + probe;
+                double ratio = radii[i] / bornRadii[i];
+                double ratio6 = ratio * ratio * ratio;
+                ratio6 = ratio6 * ratio6;
+                double E_sa = surfaceTension * 4.0 * M_PI * R_probe_i * R_probe_i * ratio6;
+                saEnergy += E_sa;
+
+                // dE_sa/dR_born = surfaceTension * 4pi * R_probe² * 6 * R^6 / R_born^7 * (-1)
+                dE_dR_sa[i] = -6.0 * surfaceTension * 4.0 * M_PI * R_probe_i * R_probe_i
+                              * ratio6 / bornRadii[i];
+            }
+            saEnergy *= scale;
+            groupEnergies_[g] += saEnergy;
+            groupLigandEnergies_[g] += saEnergy;
+            totalEnergy += saEnergy;
+        }
+
+        // Step 6: Chain rule forces
+        if (includeForces) {
+            // Scale dE/dR by alchemical factor
+            for (int i = 0; i < numAtoms; i++) {
+                dE_dR[i] *= scale;
+                if (includeSurfaceArea)
+                    dE_dR[i] += dE_dR_sa[i] * scale;
+            }
+
+            // Compute dR_born/dHCT (OBC-II chain rule)
+            vector<double> dR_dHCT(numAtoms, 0.0);
+            for (int i = 0; i < numAtoms; i++) {
+                double R_off = radii[i] - DIELECTRIC_OFFSET;
+                if (R_off <= 0.0) continue;
+                double psi = 0.5 * R_off * hctTotal[i];
+                double psi2 = psi * psi;
+                double tanh_arg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi * psi2;
+                double tanh_val = tanh(tanh_arg);
+                double sech2 = 1.0 - tanh_val * tanh_val;
+                double dpsi_dhct = 0.5 * R_off;
+                double dtanh_dpsi = sech2 * (OBC_ALPHA - 2.0 * OBC_BETA * psi
+                                              + 3.0 * OBC_GAMMA * psi2);
+                dR_dHCT[i] = bornRadii[i] * bornRadii[i]
+                             * dtanh_dpsi * dpsi_dhct / radii[i];
+            }
+
+            // Combined chain rule factor
+            vector<double> chainFactor(numAtoms);
+            for (int i = 0; i < numAtoms; i++)
+                chainFactor[i] = dE_dR[i] * dR_dHCT[i];
+
+            // 6a: Chain rule forces through ligand-ligand HCT
+            for (int i = 0; i < numAtoms; i++) {
+                int pi = particles[i];
+                double R_i_off = radii[i] - DIELECTRIC_OFFSET;
+
+                for (int j = 0; j < numAtoms; j++) {
+                    if (i == j) continue;
+                    if (isExcluded(i, j)) continue;
+                    int pj = particles[j];
+
+                    double dx = posData[pi][0] - posData[pj][0];
+                    double dy = posData[pi][1] - posData[pj][1];
+                    double dz = posData[pi][2] - posData[pj][2];
+                    double r2 = dx * dx + dy * dy + dz * dz;
+                    double r = sqrt(r2);
+                    if (r < 1e-10) continue;
+
+                    double R_j_off = radii[j] - DIELECTRIC_OFFSET;
+                    double dHCT_dr = computeHCTTermDerivative(r, R_i_off, R_j_off, scaleFactors[j]);
+
+                    double forceMag = -chainFactor[i] * dHCT_dr;
+                    double invR = 1.0 / r;
+                    // Force on atom i
+                    forceData[pi][0] += forceMag * dx * invR;
+                    forceData[pi][1] += forceMag * dy * invR;
+                    forceData[pi][2] += forceMag * dz * invR;
+                    // Newton's 3rd law: reaction force on atom j
+                    forceData[pj][0] -= forceMag * dx * invR;
+                    forceData[pj][1] -= forceMag * dy * invR;
+                    forceData[pj][2] -= forceMag * dz * invR;
+                }
+            }
+
+            // 6b: Chain rule forces through receptor grid HCT
+            for (int i = 0; i < numAtoms; i++) {
+                int pi = particles[i];
+                double forceMag = -chainFactor[i];
+                forceData[pi][0] += forceMag * hctRecGradX[i];
+                forceData[pi][1] += forceMag * hctRecGradY[i];
+                forceData[pi][2] += forceMag * hctRecGradZ[i];
+            }
+        }
+    }
+
+    return totalEnergy;
+}
+
+// ==================== updateParametersInContext ====================
+
+void ReferenceCalcGBSAGridForceKernel::updateParametersInContext(
+        ContextImpl& context, const GBSAGridForce& force) {
+
+    if (numAtoms != force.getNumAtoms())
+        throw OpenMMException("Cannot update GBSAGridForce: number of atoms has changed");
+
+    for (int i = 0; i < numAtoms; i++) {
+        force.getAtomParameters(i, charges[i], radii[i], scaleFactors[i]);
+    }
+
+    double soluteDielectric = force.getSoluteDielectric();
+    double solventDielectric = force.getSolventDielectric();
+    prefactor = -COULOMB_CONSTANT * (1.0 / soluteDielectric - 1.0 / solventDielectric);
+
+    includeSurfaceArea = force.getIncludeSurfaceArea();
+    surfaceTension = force.getSurfaceTension();
+
+    globalScalingFactor = force.getGlobalScalingFactor();
+    int nGroups = force.getNumParticleGroups();
+    for (int g = 0; g < nGroups; g++) {
+        groupScalingFactors[g] = force.getGroupScalingFactor(g);
+    }
+}
+
+// ==================== computeHessian ====================
+
+void ReferenceCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
+    // Numerical finite differences for the first (and only) particle group
+    int hessianSize = 3 * numAtoms;
+    hessianBlocks_.assign(6 * numAtoms, 0.0);
+    fullHessian_.assign(hessianSize * hessianSize, 0.0);
+
+    if (numAtoms == 0 || numParticleGroups == 0) return;
+
+    vector<Vec3>& posData = refExtractPositions(context);
+    const vector<int>& particles = groupParticleIndices[0];
+
+    double delta = 0.001;  // nm
+
+    // Central difference: H[a][b] = (E(+a,+b) + E(-a,-b) - E(+a,-b) - E(-a,+b)) / (4*delta^2)
+    // But for efficiency, use force-based: H[a][b] = -(F_a(+b) - F_a(-b)) / (2*delta)
+
+    // Save original positions
+    vector<Vec3> savedPos(numAtoms);
+    for (int i = 0; i < numAtoms; i++)
+        savedPos[i] = posData[particles[i]];
+
+    // For each coordinate b, perturb +/- delta, compute forces, build Hessian column
+    for (int atomB = 0; atomB < numAtoms; atomB++) {
+        for (int dimB = 0; dimB < 3; dimB++) {
+            int colIdx = 3 * atomB + dimB;
+
+            // Perturb +delta
+            posData[particles[atomB]][dimB] += delta;
+            // Zero forces
+            vector<Vec3>& forceData = refExtractForces(context);
+            for (int i = 0; i < numAtoms; i++) {
+                int pi = particles[i];
+                forceData[pi] = Vec3(0, 0, 0);
+            }
+            execute(context, true, false);
+            vector<Vec3> forcePlus(numAtoms);
+            for (int i = 0; i < numAtoms; i++)
+                forcePlus[i] = forceData[particles[i]];
+
+            // Restore
+            posData[particles[atomB]][dimB] = savedPos[atomB][dimB];
+
+            // Perturb -delta
+            posData[particles[atomB]][dimB] -= delta;
+            for (int i = 0; i < numAtoms; i++) {
+                int pi = particles[i];
+                forceData[pi] = Vec3(0, 0, 0);
+            }
+            execute(context, true, false);
+            vector<Vec3> forceMinus(numAtoms);
+            for (int i = 0; i < numAtoms; i++)
+                forceMinus[i] = forceData[particles[i]];
+
+            // Restore
+            posData[particles[atomB]][dimB] = savedPos[atomB][dimB];
+
+            // H[a][b] = -(F_a(+b) - F_a(-b)) / (2*delta)
+            for (int atomA = 0; atomA < numAtoms; atomA++) {
+                for (int dimA = 0; dimA < 3; dimA++) {
+                    int rowIdx = 3 * atomA + dimA;
+                    double h_ab = -(forcePlus[atomA][dimA] - forceMinus[atomA][dimA]) / (2.0 * delta);
+                    fullHessian_[rowIdx * hessianSize + colIdx] = h_ab;
+                }
+            }
+        }
+    }
+
+    // Extract diagonal blocks
+    for (int i = 0; i < numAtoms; i++) {
+        int base = 3 * i;
+        hessianBlocks_[6 * i + 0] = fullHessian_[(base + 0) * hessianSize + (base + 0)]; // dxx
+        hessianBlocks_[6 * i + 1] = fullHessian_[(base + 1) * hessianSize + (base + 1)]; // dyy
+        hessianBlocks_[6 * i + 2] = fullHessian_[(base + 2) * hessianSize + (base + 2)]; // dzz
+        hessianBlocks_[6 * i + 3] = fullHessian_[(base + 0) * hessianSize + (base + 1)]; // dxy
+        hessianBlocks_[6 * i + 4] = fullHessian_[(base + 0) * hessianSize + (base + 2)]; // dxz
+        hessianBlocks_[6 * i + 5] = fullHessian_[(base + 1) * hessianSize + (base + 2)]; // dyz
+    }
+
+    // Symmetrize the full Hessian
+    for (int i = 0; i < hessianSize; i++) {
+        for (int j = i + 1; j < hessianSize; j++) {
+            double avg = 0.5 * (fullHessian_[i * hessianSize + j] + fullHessian_[j * hessianSize + i]);
+            fullHessian_[i * hessianSize + j] = avg;
+            fullHessian_[j * hessianSize + i] = avg;
+        }
+    }
+}
+
+// ==================== accessors ====================
+
+double ReferenceCalcGBSAGridForceKernel::getGroupEnergy(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= numParticleGroups)
+        throw OpenMMException("GBSAGridForce: group index out of range");
+    return groupEnergies_[groupIndex];
+}
+
+double ReferenceCalcGBSAGridForceKernel::getGroupLigandDesolvationEnergy(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= numParticleGroups)
+        throw OpenMMException("GBSAGridForce: group index out of range");
+    return groupLigandEnergies_[groupIndex];
+}
+
+vector<double> ReferenceCalcGBSAGridForceKernel::getGroupBornRadii(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= numParticleGroups)
+        throw OpenMMException("GBSAGridForce: group index out of range");
+    return groupBornRadii_[groupIndex];
+}
+
+vector<double> ReferenceCalcGBSAGridForceKernel::getHessianBlocks() const {
+    return hessianBlocks_;
+}
+
+vector<double> ReferenceCalcGBSAGridForceKernel::getFullHessian() const {
+    return fullHessian_;
+}
+
+}  // namespace GridForcePlugin
