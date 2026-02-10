@@ -199,6 +199,18 @@ public:
      */
     void applyArcsinhTransform(double scale);
 
+    /**
+     * Apply stored inv_power transform to all grid values: V -> sign(V) * |V|^(1/n).
+     *
+     * This smooths steep potentials (e.g., r^-12 -> r^2) before B-spline prefiltering.
+     * The back-transform is applied in the CUDA evaluation kernel when invPowerMode == STORED.
+     *
+     * Must be called BEFORE applyBSplinePrefilter() if both are used.
+     *
+     * @param invPower  The inv_power exponent (e.g., -6.0 for LJr, -2.0 for LJa)
+     */
+    void applyInvPowerTransform(float invPower);
+
     // ========== Static utilities ==========
 
     /**

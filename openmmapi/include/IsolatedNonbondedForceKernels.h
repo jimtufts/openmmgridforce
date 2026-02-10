@@ -92,6 +92,11 @@ public:
      * @return the full Hessian matrix as a flattened vector (3N x 3N)
      */
     virtual std::vector<double> computeHessian(OpenMM::ContextImpl& context) = 0;
+
+    /**
+     * Get the energy for a specific particle group after the last execute() call.
+     */
+    virtual double getGroupEnergy(int groupIndex) const = 0;
 };
 
 }  // namespace GridForcePlugin

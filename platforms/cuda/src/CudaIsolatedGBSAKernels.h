@@ -105,6 +105,10 @@ private:
     OpenMM::CudaArray bornRadii;     // Computed Born radii
     OpenMM::CudaArray dE_dR;         // dE/dR_born for chain rule
 
+    // Alchemical scaling
+    float globalScalingFactor;
+    OpenMM::CudaArray groupScalingFactorsBuffer;  // Per-group scaling factors [numGroups]
+
     // Device arrays - per-group energies
     OpenMM::CudaArray groupEnergies;              // Total energy
     OpenMM::CudaArray groupLigandSelfEnergies;    // Ligand-ligand GB only

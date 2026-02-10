@@ -230,6 +230,34 @@ public:
      */
     const std::vector<double>& getReceptorPositions() const { return receptorPositions; }
 
+    // ========== Alchemical Scaling ==========
+
+    /**
+     * Get the global scaling factor applied to all energy/force contributions.
+     * Multiplies all per-group scaling factors. Default is 1.0.
+     */
+    double getGlobalScalingFactor() const { return globalScalingFactor; }
+
+    /**
+     * Set the global scaling factor.
+     * Total scale for a group = globalScalingFactor * groupScalingFactor[group].
+     */
+    void setGlobalScalingFactor(double factor) { globalScalingFactor = factor; }
+
+    /**
+     * Get the alchemical scaling factor for a specific particle group.
+     */
+    double getGroupScalingFactor(int groupIndex) const;
+
+    /**
+     * Set the alchemical scaling factor for a specific particle group.
+     * Default is 1.0 for each group.
+     *
+     * @param groupIndex  Index of the particle group
+     * @param factor      Scaling factor (0.0 = fully decoupled, 1.0 = fully coupled)
+     */
+    void setGroupScalingFactor(int groupIndex, double factor);
+
     // ========== Particle Groups (Multi-ligand) ==========
 
     /**
@@ -385,6 +413,10 @@ private:
     std::vector<double> receptorRadii;
     std::vector<double> receptorScaleFactors;
     std::vector<double> receptorPositions;
+
+    // Alchemical scaling
+    double globalScalingFactor;
+    std::vector<double> groupScalingFactors;
 
     // Particle groups
     struct ParticleGroupInfo {

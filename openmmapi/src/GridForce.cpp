@@ -51,6 +51,7 @@ namespace GridForcePlugin {
 
 GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
                          m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
+                         m_globalScalingFactor(1.0),
                          m_autoCalculateScalingFactors(false), m_scalingProperty(""),
                          m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
                          m_computeDerivatives(false),
@@ -67,6 +68,7 @@ GridForce::GridForce(std::shared_ptr<GridData> gridData)
     : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0),
       m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
       m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
+      m_globalScalingFactor(1.0),
       m_autoCalculateScalingFactors(false), m_scalingProperty(""),
       m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
       m_computeDerivatives(false),
@@ -189,6 +191,14 @@ void GridForce::setScalingFactor(int index, double val) {
 
 void GridForce::setScalingFactors(const std::vector<double>& vals) {
     m_scaling_factors = vals;
+}
+
+void GridForce::setGlobalScalingFactor(double factor) {
+    m_globalScalingFactor = factor;
+}
+
+double GridForce::getGlobalScalingFactor() const {
+    return m_globalScalingFactor;
 }
 
 void GridForce::setInvPowerMode(InvPowerMode mode, double inv_power) {
@@ -875,6 +885,183 @@ void GridForce::removeParticleGroup(int index) {
 
 void GridForce::clearParticleGroups() {
     m_particleGroups.clear();
+}
+
+void GridForce::setParticleGroupScalingFactor(int groupIndex, double factor) {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    m_particleGroups[groupIndex].groupScalingFactor = factor;
+}
+
+double GridForce::getParticleGroupScalingFactor(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    return m_particleGroups[groupIndex].groupScalingFactor;
+}
+
+void GridForce::setParticleGroupPositions(Context& context, int groupIndex,
+                                            const std::vector<Vec3>& positions) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    const ParticleGroup& group = m_particleGroups[groupIndex];
+    if (positions.size() != group.particleIndices.size()) {
+        throw OpenMMException("Number of positions (" + std::to_string(positions.size()) +
+                              ") doesn't match group size (" +
+                              std::to_string(group.particleIndices.size()) + ")");
+    }
+
+    // Get current state to read all positions
+    State state = context.getState(State::Positions);
+    std::vector<Vec3> allPositions = state.getPositions();
+
+    // Update only the positions for this group's particles
+    for (size_t i = 0; i < group.particleIndices.size(); i++) {
+        allPositions[group.particleIndices[i]] = positions[i];
+    }
+
+    context.setPositions(allPositions);
+}
+
+std::vector<Vec3> GridForce::getParticleGroupPositions(Context& context, int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    const ParticleGroup& group = m_particleGroups[groupIndex];
+
+    State state = context.getState(State::Positions);
+    const std::vector<Vec3>& allPositions = state.getPositions();
+
+    std::vector<Vec3> groupPositions(group.particleIndices.size());
+    for (size_t i = 0; i < group.particleIndices.size(); i++) {
+        groupPositions[i] = allPositions[group.particleIndices[i]];
+    }
+
+    return groupPositions;
+}
+
+void GridForce::swapParticleGroupPositions(Context& context, int group1, int group2) const {
+    if (group1 < 0 || group1 >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index 1 out of range");
+    }
+    if (group2 < 0 || group2 >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index 2 out of range");
+    }
+    const ParticleGroup& g1 = m_particleGroups[group1];
+    const ParticleGroup& g2 = m_particleGroups[group2];
+    if (g1.particleIndices.size() != g2.particleIndices.size()) {
+        throw OpenMMException("Cannot swap positions between groups of different sizes");
+    }
+
+    State state = context.getState(State::Positions);
+    std::vector<Vec3> allPositions = state.getPositions();
+
+    // Swap positions for corresponding particles
+    for (size_t i = 0; i < g1.particleIndices.size(); i++) {
+        std::swap(allPositions[g1.particleIndices[i]],
+                  allPositions[g2.particleIndices[i]]);
+    }
+
+    context.setPositions(allPositions);
+}
+
+void GridForce::setParticleGroupVelocities(Context& context, int groupIndex,
+                                            const std::vector<Vec3>& velocities) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    const ParticleGroup& group = m_particleGroups[groupIndex];
+    if (velocities.size() != group.particleIndices.size()) {
+        throw OpenMMException("Number of velocities (" + std::to_string(velocities.size()) +
+                              ") doesn't match group size (" +
+                              std::to_string(group.particleIndices.size()) + ")");
+    }
+
+    State state = context.getState(State::Velocities);
+    std::vector<Vec3> allVelocities = state.getVelocities();
+
+    for (size_t i = 0; i < group.particleIndices.size(); i++) {
+        allVelocities[group.particleIndices[i]] = velocities[i];
+    }
+
+    context.setVelocities(allVelocities);
+}
+
+std::vector<Vec3> GridForce::getParticleGroupVelocities(Context& context, int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    const ParticleGroup& group = m_particleGroups[groupIndex];
+
+    State state = context.getState(State::Velocities);
+    const std::vector<Vec3>& allVelocities = state.getVelocities();
+
+    std::vector<Vec3> groupVelocities(group.particleIndices.size());
+    for (size_t i = 0; i < group.particleIndices.size(); i++) {
+        groupVelocities[i] = allVelocities[group.particleIndices[i]];
+    }
+
+    return groupVelocities;
+}
+
+void GridForce::setParticleGroupPositionsFlat(Context& context, int groupIndex,
+                                                const std::vector<double>& coords) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    const ParticleGroup& group = m_particleGroups[groupIndex];
+    if (coords.size() != 3 * group.particleIndices.size()) {
+        throw OpenMMException("Flat coordinate array size (" + std::to_string(coords.size()) +
+                              ") must be 3 * group size (" +
+                              std::to_string(3 * group.particleIndices.size()) + ")");
+    }
+    std::vector<Vec3> positions(group.particleIndices.size());
+    for (size_t i = 0; i < group.particleIndices.size(); i++) {
+        positions[i] = Vec3(coords[3*i], coords[3*i+1], coords[3*i+2]);
+    }
+    setParticleGroupPositions(context, groupIndex, positions);
+}
+
+std::vector<double> GridForce::getParticleGroupPositionsFlat(Context& context, int groupIndex) const {
+    std::vector<Vec3> positions = getParticleGroupPositions(context, groupIndex);
+    std::vector<double> coords(3 * positions.size());
+    for (size_t i = 0; i < positions.size(); i++) {
+        coords[3*i]   = positions[i][0];
+        coords[3*i+1] = positions[i][1];
+        coords[3*i+2] = positions[i][2];
+    }
+    return coords;
+}
+
+void GridForce::setParticleGroupVelocitiesFlat(Context& context, int groupIndex,
+                                                 const std::vector<double>& vels) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    const ParticleGroup& group = m_particleGroups[groupIndex];
+    if (vels.size() != 3 * group.particleIndices.size()) {
+        throw OpenMMException("Flat velocity array size (" + std::to_string(vels.size()) +
+                              ") must be 3 * group size (" +
+                              std::to_string(3 * group.particleIndices.size()) + ")");
+    }
+    std::vector<Vec3> velocities(group.particleIndices.size());
+    for (size_t i = 0; i < group.particleIndices.size(); i++) {
+        velocities[i] = Vec3(vels[3*i], vels[3*i+1], vels[3*i+2]);
+    }
+    setParticleGroupVelocities(context, groupIndex, velocities);
+}
+
+std::vector<double> GridForce::getParticleGroupVelocitiesFlat(Context& context, int groupIndex) const {
+    std::vector<Vec3> velocities = getParticleGroupVelocities(context, groupIndex);
+    std::vector<double> vels(3 * velocities.size());
+    for (size_t i = 0; i < velocities.size(); i++) {
+        vels[3*i]   = velocities[i][0];
+        vels[3*i+1] = velocities[i][1];
+        vels[3*i+2] = velocities[i][2];
+    }
+    return vels;
 }
 
 vector<double> GridForce::getParticleGroupEnergies(Context& context) const {

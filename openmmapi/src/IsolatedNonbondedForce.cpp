@@ -37,7 +37,7 @@ using namespace GridForcePlugin;
 using namespace OpenMM;
 using namespace std;
 
-IsolatedNonbondedForce::IsolatedNonbondedForce() : m_numAtoms(0) {
+IsolatedNonbondedForce::IsolatedNonbondedForce() : m_numAtoms(0), m_globalScalingFactor(1.0) {
 }
 
 int IsolatedNonbondedForce::getNumAtoms() const {
@@ -136,6 +136,47 @@ void IsolatedNonbondedForce::setParticles(const std::vector<int>& particles) {
 
 const std::vector<int>& IsolatedNonbondedForce::getParticles() const {
     return m_particles;
+}
+
+double IsolatedNonbondedForce::getGroupScalingFactor(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(m_groupScalingFactors.size())) {
+        throw OpenMMException("IsolatedNonbondedForce: group index out of range");
+    }
+    return m_groupScalingFactors[groupIndex];
+}
+
+void IsolatedNonbondedForce::setGroupScalingFactor(int groupIndex, double factor) {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(m_groupScalingFactors.size())) {
+        throw OpenMMException("IsolatedNonbondedForce: group index out of range");
+    }
+    m_groupScalingFactors[groupIndex] = factor;
+}
+
+int IsolatedNonbondedForce::addParticleGroup(const string& name, const vector<int>& indices) {
+    if (m_numAtoms > 0 && static_cast<int>(indices.size()) != m_numAtoms) {
+        throw OpenMMException("IsolatedNonbondedForce: particle group size must match template size");
+    }
+    ParticleGroupInfo group;
+    group.name = name;
+    group.indices = indices;
+    m_particleGroups.push_back(group);
+    m_groupScalingFactors.push_back(1.0);
+    return static_cast<int>(m_particleGroups.size()) - 1;
+}
+
+void IsolatedNonbondedForce::getParticleGroup(int index, string& name, vector<int>& indices) const {
+    if (index < 0 || index >= static_cast<int>(m_particleGroups.size())) {
+        throw OpenMMException("IsolatedNonbondedForce: particle group index out of range");
+    }
+    name = m_particleGroups[index].name;
+    indices = m_particleGroups[index].indices;
+}
+
+double IsolatedNonbondedForce::getGroupEnergy(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(m_groupEnergies.size())) {
+        throw OpenMMException("IsolatedNonbondedForce: group energy not available (call getState first)");
+    }
+    return m_groupEnergies[groupIndex];
 }
 
 void IsolatedNonbondedForce::updateParametersInContext(Context& context) {

@@ -169,6 +169,64 @@ public:
     void getExceptionParameters(int index, int& atom1, int& atom2, double& chargeProd,
                                  double& sigma, double& epsilon) const;
 
+    // ========== Alchemical Scaling ==========
+
+    /**
+     * Get the global scaling factor applied to all energy and force contributions.
+     * Default is 1.0.
+     */
+    double getGlobalScalingFactor() const { return m_globalScalingFactor; }
+
+    /**
+     * Set the global scaling factor applied to all energy and force contributions.
+     * Total scale = globalScalingFactor * groupScalingFactor.
+     */
+    void setGlobalScalingFactor(double factor) { m_globalScalingFactor = factor; }
+
+    /**
+     * Get the per-group scaling factor for a particle group.
+     */
+    double getGroupScalingFactor(int groupIndex) const;
+
+    /**
+     * Set the per-group scaling factor for a particle group.
+     */
+    void setGroupScalingFactor(int groupIndex, double factor);
+
+    // ========== Particle Groups ==========
+
+    /**
+     * Add a particle group (replica). Each group contains numAtoms particle indices
+     * from the System, representing one copy of the ligand template.
+     *
+     * @param name     a name for this group
+     * @param indices  particle indices in the System for this group's atoms (must have numAtoms elements)
+     * @return the index of the group that was added
+     */
+    int addParticleGroup(const std::string& name, const std::vector<int>& indices);
+
+    /**
+     * Get the number of particle groups.
+     */
+    int getNumParticleGroups() const { return static_cast<int>(m_particleGroups.size()); }
+
+    /**
+     * Get a particle group.
+     *
+     * @param index    group index (0 to getNumParticleGroups()-1)
+     * @param name     output: group name
+     * @param indices  output: particle indices in the System
+     */
+    void getParticleGroup(int index, std::string& name, std::vector<int>& indices) const;
+
+    // ========== Per-Group Energy Accessors ==========
+
+    /**
+     * Get the total energy for a particle group.
+     * Only available after calling getState() with energy.
+     */
+    double getGroupEnergy(int groupIndex) const;
+
     /**
      * Update the parameters in a Context to match those stored in this Force object.
      * This method provides an efficient way to update certain parameters without
@@ -204,6 +262,23 @@ private:
     std::vector<double> m_exceptionChargeProd;
     std::vector<double> m_exceptionSigma;
     std::vector<double> m_exceptionEpsilon;
+
+    // Alchemical scaling
+    double m_globalScalingFactor;
+    std::vector<double> m_groupScalingFactors;
+
+    // Particle groups
+    struct ParticleGroupInfo {
+        std::string name;
+        std::vector<int> indices;
+    };
+    std::vector<ParticleGroupInfo> m_particleGroups;
+
+    // Per-group energy cache (populated by kernel after execute)
+    mutable std::vector<double> m_groupEnergies;
+
+    friend class IsolatedNonbondedForceImpl;
+    friend class CudaCalcIsolatedNonbondedForceKernel;
 };
 
 }  // namespace GridForcePlugin

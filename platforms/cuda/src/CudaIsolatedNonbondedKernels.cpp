@@ -54,22 +54,54 @@ void CudaCalcIsolatedNonbondedForceKernel::initialize(const System& system, cons
         throw OpenMMException("IsolatedNonbondedForce: Must set number of atoms before initialization");
     }
 
-    // Get particle indices
-    h_particleIndices = force.getParticles();
-    if ((int)h_particleIndices.size() != numAtoms) {
-        throw OpenMMException("IsolatedNonbondedForce: Must call setParticles() with numAtoms indices");
+    // Process particle groups
+    int nGroups = force.getNumParticleGroups();
+    if (nGroups > 0) {
+        // Multi-group mode: concatenate all group particle indices
+        numParticleGroups = nGroups;
+        h_particleIndices.resize(nGroups * numAtoms);
+        for (int g = 0; g < nGroups; g++) {
+            string name;
+            vector<int> indices;
+            force.getParticleGroup(g, name, indices);
+            if ((int)indices.size() != numAtoms) {
+                throw OpenMMException("IsolatedNonbondedForce: particle group " + name + " has wrong number of indices");
+            }
+            for (int i = 0; i < numAtoms; i++) {
+                h_particleIndices[g * numAtoms + i] = indices[i];
+            }
+        }
+    } else {
+        // Single-group mode: use setParticles() as implicit single group
+        numParticleGroups = 1;
+        h_particleIndices = force.getParticles();
+        if ((int)h_particleIndices.size() != numAtoms) {
+            throw OpenMMException("IsolatedNonbondedForce: Must call setParticles() with numAtoms indices or add particle groups");
+        }
     }
 
-    // Allocate GPU arrays
-    particleIndices.initialize<int>(cu, numAtoms, "isolatedNB_particleIndices");
+    // Allocate and upload particle indices for all groups
+    groupParticleIndices.initialize<int>(cu, numParticleGroups * numAtoms, "isolatedNB_groupParticleIndices");
+    groupParticleIndices.upload(h_particleIndices);
+
+    // Allocate per-group energy buffer
+    groupEnergiesBuffer.initialize<float>(cu, numParticleGroups, "isolatedNB_groupEnergies");
+    groupEnergiesHost.resize(numParticleGroups, 0.0f);
+
+    // Alchemical scaling
+    globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
+    vector<float> h_groupScalings(numParticleGroups, 1.0f);
+    for (int g = 0; g < nGroups; g++) {
+        h_groupScalings[g] = static_cast<float>(force.getGroupScalingFactor(g));
+    }
+    groupScalingFactorsBuffer.initialize<float>(cu, numParticleGroups, "isolatedNB_groupScalingFactors");
+    groupScalingFactorsBuffer.upload(h_groupScalings);
+
+    // Upload template atom parameters
     charges.initialize<float>(cu, numAtoms, "isolatedNB_charges");
     sigmas.initialize<float>(cu, numAtoms, "isolatedNB_sigmas");
     epsilons.initialize<float>(cu, numAtoms, "isolatedNB_epsilons");
 
-    // Upload particle indices
-    particleIndices.upload(h_particleIndices);
-
-    // Upload parameters
     vector<float> h_charges(numAtoms);
     vector<float> h_sigmas(numAtoms);
     vector<float> h_epsilons(numAtoms);
@@ -139,48 +171,70 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
         return 0.0;
     }
 
-    // Get the number of pairs
+    // Get the number of pairs per group
     int numPairs = (numAtoms * (numAtoms - 1)) / 2;
     if (numPairs == 0) {
         return 0.0;
     }
+
+    // Zero per-group energy buffer
+    cu.clearBuffer(groupEnergiesBuffer);
+
+    // Total work items: numGroups * numPairs
+    int totalWork = numParticleGroups * numPairs;
 
     // Set up kernel arguments
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
     CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
-    CUdeviceptr particleIndicesPtr = particleIndices.getDevicePointer();
+    CUdeviceptr groupParticleIndicesPtr = groupParticleIndices.getDevicePointer();
     CUdeviceptr chargesPtr = charges.getDevicePointer();
     CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
     CUdeviceptr epsilonsPtr = epsilons.getDevicePointer();
     CUdeviceptr exclusionsPtr = exclusions.getDevicePointer();
     CUdeviceptr exceptionsPtr = exceptions.getDevicePointer();
     CUdeviceptr exceptionParamsPtr = exceptionParams.getDevicePointer();
+    CUdeviceptr groupEnergiesPtr = groupEnergiesBuffer.getDevicePointer();
+    CUdeviceptr groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
 
     void* args[] = {
         &posqPtr,
         &forcePtr,
         &energyPtr,
-        &particleIndicesPtr,
+        &groupParticleIndicesPtr,
         &chargesPtr,
         &sigmasPtr,
         &epsilonsPtr,
         &exclusionsPtr,
         &exceptionsPtr,
         &exceptionParamsPtr,
+        &groupEnergiesPtr,
+        &groupScalingFactorsPtr,
+        &globalScalingFactor,
         &numAtoms,
         &numPairs,
+        &numParticleGroups,
         &paddedNumAtoms,
         &includeEnergy
     };
 
     // Launch kernel
     int blockSize = 128;
-    int numBlocks = (numPairs + blockSize - 1) / blockSize;
+    int numBlocks = (totalWork + blockSize - 1) / blockSize;
     cu.executeKernel(kernel, args, numBlocks * blockSize, blockSize);
 
+    // Download per-group energies
+    groupEnergiesBuffer.download(groupEnergiesHost);
+
     return 0.0;  // Energy is accumulated in the energy buffer
+}
+
+double CudaCalcIsolatedNonbondedForceKernel::getGroupEnergy(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= numParticleGroups) {
+        throw OpenMMException("IsolatedNonbondedForce: group index out of range");
+    }
+    return static_cast<double>(groupEnergiesHost[groupIndex]);
 }
 
 void CudaCalcIsolatedNonbondedForceKernel::copyParametersToContext(ContextImpl& context, const IsolatedNonbondedForce& force) {
@@ -188,7 +242,7 @@ void CudaCalcIsolatedNonbondedForceKernel::copyParametersToContext(ContextImpl& 
         throw OpenMMException("Cannot update IsolatedNonbondedForce: number of atoms has changed");
     }
 
-    // Update parameters
+    // Update atom parameters
     vector<float> h_charges(numAtoms);
     vector<float> h_sigmas(numAtoms);
     vector<float> h_epsilons(numAtoms);
@@ -204,6 +258,17 @@ void CudaCalcIsolatedNonbondedForceKernel::copyParametersToContext(ContextImpl& 
     charges.upload(h_charges);
     sigmas.upload(h_sigmas);
     epsilons.upload(h_epsilons);
+
+    // Update scaling factors
+    globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
+    int nGroups = force.getNumParticleGroups();
+    if (nGroups > 0) {
+        vector<float> h_groupScalings(numParticleGroups);
+        for (int g = 0; g < nGroups; g++) {
+            h_groupScalings[g] = static_cast<float>(force.getGroupScalingFactor(g));
+        }
+        groupScalingFactorsBuffer.upload(h_groupScalings);
+    }
 
     cu.invalidateMolecules();
 }
@@ -244,7 +309,8 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     // Set up kernel arguments
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
-    CUdeviceptr particleIndicesPtr = particleIndices.getDevicePointer();
+    // Hessian uses first group (group 0) particle indices
+    CUdeviceptr particleIndicesPtr = groupParticleIndices.getDevicePointer();
     CUdeviceptr chargesPtr = charges.getDevicePointer();
     CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
     CUdeviceptr epsilonsPtr = epsilons.getDevicePointer();

@@ -53,20 +53,36 @@ public:
      */
     std::vector<double> computeHessian(OpenMM::ContextImpl& context) override;
 
+    /**
+     * Get the energy for a specific particle group after the last execute() call.
+     */
+    double getGroupEnergy(int groupIndex) const override;
+
 private:
     bool hasInitializedKernel;
     int numAtoms;
+    int numParticleGroups;
     OpenMM::CudaContext& cu;
     CUfunction kernel;
 
-    // GPU arrays
-    OpenMM::CudaArray particleIndices;  // Which particles this force applies to
+    // GPU arrays - atom parameters (template, shared by all groups)
     OpenMM::CudaArray charges;          // Partial charges
     OpenMM::CudaArray sigmas;           // LJ sigma parameters
     OpenMM::CudaArray epsilons;         // LJ epsilon parameters
     OpenMM::CudaArray exclusions;       // Excluded atom pairs (int2)
     OpenMM::CudaArray exceptions;       // Exception atom pairs (int2)
     OpenMM::CudaArray exceptionParams;  // Exception parameters (float3: chargeProd, sigma, epsilon)
+
+    // GPU arrays - particle groups
+    OpenMM::CudaArray groupParticleIndices;  // [numGroups * numAtoms] - particle indices per group
+    OpenMM::CudaArray groupEnergiesBuffer;   // [numGroups] - per-group energy accumulation
+
+    // Alchemical scaling
+    float globalScalingFactor;
+    OpenMM::CudaArray groupScalingFactorsBuffer;  // [numGroups] - per-group scaling
+
+    // Host-side cached results
+    mutable std::vector<float> groupEnergiesHost;
 
     std::vector<int> h_particleIndices;  // Host copy for updates
 

@@ -22,16 +22,20 @@ __device__ void decodePairIndex(int pairIdx, int* i, int* j, int numAtoms) {
 extern "C" __global__ void computeIsolatedNonbonded(
     const real4* __restrict__ posq,             // All positions in Context
     unsigned long long* __restrict__ forceBuffers,  // Force output buffers
-    mixed* __restrict__ energyBuffer,           // Energy accumulator
-    const int* __restrict__ particleIndices,    // Which particles this force applies to [numAtoms]
-    const real* __restrict__ charges,           // Partial charges [numAtoms]
-    const real* __restrict__ sigmas,            // LJ sigma [numAtoms]
-    const real* __restrict__ epsilons,          // LJ epsilon [numAtoms]
-    const int2* __restrict__ exclusions,        // Excluded pairs [numExclusions]
-    const int2* __restrict__ exceptions,        // Exception pairs [numExceptions]
+    mixed* __restrict__ energyBuffer,           // Energy accumulator (global total)
+    const int* __restrict__ groupParticleIndices, // Particle indices per group [numGroups * numAtoms]
+    const real* __restrict__ charges,           // Partial charges [numAtoms] (template)
+    const real* __restrict__ sigmas,            // LJ sigma [numAtoms] (template)
+    const real* __restrict__ epsilons,          // LJ epsilon [numAtoms] (template)
+    const int2* __restrict__ exclusions,        // Excluded pairs [numExclusions] (template)
+    const int2* __restrict__ exceptions,        // Exception pairs [numExceptions] (template)
     const float3* __restrict__ exceptionParams, // Exception parameters (chargeProd, sigma, epsilon) [numExceptions]
+    float* __restrict__ groupEnergies,          // Per-group energy accumulation [numGroups]
+    const float* __restrict__ groupScalingFactors, // Per-group scaling [numGroups]
+    const float globalScalingFactor,            // Global scaling factor
     const int numAtoms,
     const int numPairs,
+    const int numGroups,
     const int paddedNumAtoms,
     const bool includeEnergy) {
 
@@ -39,11 +43,22 @@ extern "C" __global__ void computeIsolatedNonbonded(
     // Note: Using local constant to avoid macro conflicts when kernels are concatenated
     const real COULOMB_CONST = 138.935456f;
 
-    // Each thread handles one pair
-    int pairIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pairIdx >= numPairs) return;
+    // Each thread handles one (group, pair) combination
+    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalWork = numGroups * numPairs;
+    if (globalIdx >= totalWork) return;
 
-    // Decode pair index to atom indices within this ligand
+    int groupIdx = globalIdx / numPairs;
+    int pairIdx = globalIdx % numPairs;
+
+    // Get scaling factor for this group
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+    if (scale == 0.0f) return;
+
+    // Pointer to this group's particle indices
+    const int* particleIndices = groupParticleIndices + groupIdx * numAtoms;
+
+    // Decode pair index to atom indices within the template
     int i, j;
     decodePairIndex(pairIdx, &i, &j, numAtoms);
 
@@ -84,7 +99,7 @@ extern "C" __global__ void computeIsolatedNonbonded(
         epsilon = SQRT(epsilons[i] * epsilons[j]);  // Geometric mean
     }
 
-    // Get actual particle indices in the System
+    // Get actual particle indices in the System for this group
     int particleI = particleIndices[i];
     int particleJ = particleIndices[j];
 
@@ -110,24 +125,20 @@ extern "C" __global__ void computeIsolatedNonbonded(
     real sig_r12 = sig_r6 * sig_r6;
     real ljEnergy = 4.0f * epsilon * (sig_r12 - sig_r6);
 
-    // Total energy
-    real pairEnergy = coulombEnergy + ljEnergy;
+    // Total energy (scaled)
+    real pairEnergy = (coulombEnergy + ljEnergy) * scale;
 
-    // Compute force: F = -dE/dr
-    // For LJ: dE/dr = 4ε(-12σ¹²/r¹³ + 6σ⁶/r⁷), so -dE/dr = 4ε(12σ¹²/r¹³ - 6σ⁶/r⁷)
-    // For Coulomb: dE/dr = -qq/(4πε₀r²), so -dE/dr = qq/(4πε₀r²)
-    real coulombForce = coulombEnergy * invR;  // qq/(4πε₀r²)
-    real ljForce = 4.0f * epsilon * (12.0f * sig_r12 - 6.0f * sig_r6) * invR;  // 4ε(12σ¹²/r¹³ - 6σ⁶/r⁷)
-    real forceMagnitude = coulombForce + ljForce;  // -dE/dr along separation vector
+    // Compute force: F = -dE/dr (scaled)
+    real coulombForce = coulombEnergy * invR * scale;
+    real ljForce = 4.0f * epsilon * (12.0f * sig_r12 - 6.0f * sig_r6) * invR * scale;
+    real forceMagnitude = coulombForce + ljForce;
 
     // Force components: F_vec = forceMagnitude * (r_vec/|r|)
-    // where r_vec = posI - posJ points from J toward I
     real fx = forceMagnitude * dx * invR;
     real fy = forceMagnitude * dy * invR;
     real fz = forceMagnitude * dz * invR;
 
     // Accumulate forces (Newton's third law: equal and opposite)
-    // Use OpenMM's force buffer format (fixed-point atomicAdd)
     atomicAdd(&forceBuffers[particleI], static_cast<unsigned long long>((long long)(fx * 0x100000000)));
     atomicAdd(&forceBuffers[particleI + paddedNumAtoms], static_cast<unsigned long long>((long long)(fy * 0x100000000)));
     atomicAdd(&forceBuffers[particleI + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(fz * 0x100000000)));
@@ -139,6 +150,7 @@ extern "C" __global__ void computeIsolatedNonbonded(
     // Accumulate energy
     if (includeEnergy) {
         atomicAdd(energyBuffer, (mixed)pairEnergy);
+        atomicAdd(&groupEnergies[groupIdx], (float)pairEnergy);
     }
 }
 

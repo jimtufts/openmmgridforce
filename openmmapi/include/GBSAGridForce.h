@@ -285,6 +285,30 @@ public:
      */
     void getExclusionParticles(int index, int& atom1, int& atom2) const;
 
+    // ========== Alchemical Scaling ==========
+
+    /**
+     * Get the global scaling factor applied to all energy and force contributions.
+     * Default is 1.0.
+     */
+    double getGlobalScalingFactor() const { return globalScalingFactor; }
+
+    /**
+     * Set the global scaling factor applied to all energy and force contributions.
+     * Total scale = globalScalingFactor * groupScalingFactor.
+     */
+    void setGlobalScalingFactor(double factor) { globalScalingFactor = factor; }
+
+    /**
+     * Get the per-group scaling factor for a particle group.
+     */
+    double getGroupScalingFactor(int groupIndex) const;
+
+    /**
+     * Set the per-group scaling factor for a particle group.
+     */
+    void setGroupScalingFactor(int groupIndex, double factor);
+
     // ========== Particle Groups (Multi-ligand) ==========
 
     /**
@@ -449,6 +473,10 @@ private:
         std::vector<int> particleIndices;
     };
     std::vector<ParticleGroupInfo> particleGroups;
+
+    // Alchemical scaling
+    double globalScalingFactor;
+    std::vector<double> groupScalingFactors;
 
     // Desolvation grid
     std::shared_ptr<DesolvationGrid> desolvationGrid;

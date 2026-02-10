@@ -237,6 +237,21 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         groupStartIndex.upload(groupStarts);
     }
 
+    // Initialize alchemical scaling factors (done after particle group processing
+    // so numParticleGroups is finalized)
+
+    // Initialize alchemical scaling factors
+    globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
+    {
+        int nGroups = force.getNumParticleGroups();
+        std::vector<float> groupScalings(numParticleGroups, 1.0f);
+        for (int i = 0; i < nGroups; i++) {
+            groupScalings[i] = static_cast<float>(force.getGroupScalingFactor(i));
+        }
+        groupScalingFactorsBuffer.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupScalingFactors");
+        groupScalingFactorsBuffer.upload(groupScalings);
+    }
+
     // Allocate per-group energy buffers
     groupEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupEnergies");
     groupLigandSelfEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupLigandSelfEnergies");
@@ -467,11 +482,15 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         cu.executeKernel(computeBornRadiiOBCKernel, bornArgs, numBlocks * blockSize, blockSize);
     }
 
+    // Get scaling factor device pointers
+    CUdeviceptr groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
+
     // Step 4: Compute GB energy and forces
     void* energyArgs[] = {
         &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
         &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor,
-        &forcePtr, &groupEnergiesPtr, &groupLigandEnergiesPtr, &paddedNumAtoms
+        &forcePtr, &groupEnergiesPtr, &groupLigandEnergiesPtr, &paddedNumAtoms,
+        &globalScalingFactor, &groupScalingFactorsPtr
     };
     cu.executeKernel(computeGBEnergyKernel, energyArgs, numBlocks * blockSize, blockSize);
 
@@ -479,6 +498,10 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
         // Download ligand energies first so we can add to them
         groupEnergies.download(groupEnergiesHost);
+
+        // Download group scaling factors for host-side scaling of desolvation
+        std::vector<float> groupScalings(numParticleGroups);
+        groupScalingFactorsBuffer.download(groupScalings);
 
         CUdeviceptr receptorPosPtr = receptorPositions.getDevicePointer();
         CUdeviceptr receptorRadiiPtr = receptorRadii.getDevicePointer();
@@ -536,6 +559,9 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             receptorEnergy.download(recEnergy);
             float desolvation = recEnergy[0] - receptorReferenceEnergyValue;
 
+            // Apply alchemical scaling to desolvation
+            desolvation *= globalScalingFactor * groupScalings[g];
+
             // Store desolvation for this group
             groupReceptorDesolvationsHost[g] = desolvation;
 
@@ -553,7 +579,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
             &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiPtr,
             &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms, &prefactor,
-            &groupCrossTermPtr, &forcePtr, &paddedNumAtoms
+            &groupCrossTermPtr, &forcePtr, &paddedNumAtoms,
+            &globalScalingFactor, &groupScalingFactorsPtr
         };
         cu.executeKernel(computeCrossTermGBEnergyKernel, crossTermArgs, numBlocks * blockSize, blockSize);
 
@@ -573,7 +600,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         void* saArgs[] = {
             &radiiPtr, &bornRadiiPtr, &groupStartPtr,
             &numParticleGroups, &numAtoms,
-            &surfaceTension, &probe, &groupEnergiesPtr
+            &surfaceTension, &probe, &groupEnergiesPtr,
+            &globalScalingFactor, &groupScalingFactorsPtr
         };
         cu.executeKernel(computeSAEnergyKernel, saArgs, numBlocks * blockSize, blockSize);
     }
@@ -582,10 +610,11 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     if (includeForces) {
         CUdeviceptr dE_dRPtr = dE_dR.getDevicePointer();
 
-        // Accumulate dE/dR_born
+        // Accumulate dE/dR_born (scaled by alchemical factors)
         void* bornDerivArgs[] = {
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
-            &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor, &dE_dRPtr
+            &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor, &dE_dRPtr,
+            &globalScalingFactor, &groupScalingFactorsPtr
         };
         cu.executeKernel(accumulateBornRadiiDerivativesKernel, bornDerivArgs, numBlocks * blockSize, blockSize);
 
@@ -593,12 +622,13 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             float probe = (receptorMode == IsolatedGBSAForce::GRID) ? probeRadius : 0.14f;
             void* saDerivArgs[] = {
                 &radiiPtr, &bornRadiiPtr, &groupStartPtr,
-                &numParticleGroups, &numAtoms, &surfaceTension, &probe, &dE_dRPtr
+                &numParticleGroups, &numAtoms, &surfaceTension, &probe, &dE_dRPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(accumulateSADerivativesKernel, saDerivArgs, numBlocks * blockSize, blockSize);
         }
 
-        // Ligand-ligand HCT chain rule forces
+        // Ligand-ligand HCT chain rule forces (scaling propagates via dE_dR)
         void* hctChainArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
             &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
@@ -666,7 +696,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &receptorPosPtr, &receptorRadiiPtr,
                 &receptorSelfHCTPtr, &ligandToReceptorHCTPtr, &receptorBornRadiiPtr, &receptorDeDRPtr,
                 &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
-                &cutoffDistance, &forcePtr, &paddedNumAtoms
+                &cutoffDistance, &forcePtr, &paddedNumAtoms,
+                &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(computeReceptorDesolvationForcesOptimizedKernel, recDesolvForceArgs, numBlocks * blockSize, blockSize);
 
@@ -677,7 +708,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr, &receptorChargesPtr,
                 &receptorSelfHCTPtr, &ligandToReceptorHCTPtr, &receptorBornRadiiPtr,
                 &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
-                &prefactor, &cutoffDistance, &forcePtr, &paddedNumAtoms
+                &prefactor, &cutoffDistance, &forcePtr, &paddedNumAtoms,
+                &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(computeCrossTermChainRuleForcesKernel, crossChainArgs, numBlocks * blockSize, blockSize);
         }
@@ -726,6 +758,17 @@ void CudaCalcIsolatedGBSAForceKernel::updateParametersInContext(ContextImpl& con
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
     cutoffDistance = static_cast<float>(force.getCutoffDistance());
+
+    // Update alchemical scaling factors
+    globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
+    int nGroups = force.getNumParticleGroups();
+    if (nGroups > 0) {
+        std::vector<float> groupScalings(numParticleGroups, 1.0f);
+        for (int i = 0; i < nGroups; i++) {
+            groupScalings[i] = static_cast<float>(force.getGroupScalingFactor(i));
+        }
+        groupScalingFactorsBuffer.upload(groupScalings);
+    }
 }
 
 double CudaCalcIsolatedGBSAForceKernel::getGroupEnergy(int groupIndex) const {

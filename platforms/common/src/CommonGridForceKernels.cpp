@@ -286,6 +286,7 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
     computeKernel->addArg(interpolationMethod);
     computeKernel->addArg((float)outOfBoundsRestraint);
     computeKernel->addArg(cc.getEnergyBuffer());
+    computeKernel->addArg((float)force.getGlobalScalingFactor());
 
     cc.addForce(new GridForceInfo(numAtoms));
 
@@ -363,8 +364,9 @@ void CommonCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl
     g_vals.upload(valsFloat);
     g_scaling_factors.upload(scalingFloat);
 
-    // Update inv_power parameter
+    // Update inv_power and global scaling factor parameters
     computeKernel->setArg(6, (float)inv_power);
+    computeKernel->setArg(10, (float)force.getGlobalScalingFactor());
 }
 
 void CommonCalcGridForceKernel::generateGrid(

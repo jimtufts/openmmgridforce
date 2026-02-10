@@ -889,7 +889,9 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     unsigned long long* __restrict__ forceBuffer,
     float* __restrict__ groupEnergies,
     float* __restrict__ groupLigandSelfEnergies,
-    int paddedNumAtoms
+    int paddedNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -910,6 +912,9 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     }
 
     if (idx >= groupEndIdx) return;
+
+    // Compute alchemical scaling for this group
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
@@ -952,12 +957,9 @@ extern "C" __global__ void computeIsolatedGBEnergy(
         float pairEnergy = prefactor * q_i * q_j * invFgb;
         energy += pairEnergy;
 
-        // Force = -dE/dr
-        // dE/dr = -prefactor * q_i * q_j / f_gb² * df_gb/dr
-        // F_i = -∇_i E = dE/dr * (dx/r)  (toward j if dE/dr > 0)
-        // F_j = -dE/dr * (dx/r)  (opposite direction, Newton's 3rd law)
+        // Force = -dE/dr scaled by alchemical factor
         float dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
-        float dEdR = -prefactor * q_i * q_j * invFgb * invFgb * dFgbDr;
+        float dEdR = -prefactor * q_i * q_j * invFgb * invFgb * dFgbDr * scale;
 
         float invR = 1.0f / r;
         force.x += dEdR * dx * invR;
@@ -975,9 +977,9 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     atomicAdd(&forceBuffer[particleIdx_i + paddedNumAtoms], static_cast<unsigned long long>((long long)(force.y * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_i + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force.z * 0x100000000)));
 
-    // Accumulate energies
-    atomicAdd(&groupEnergies[groupIdx], energy);
-    atomicAdd(&groupLigandSelfEnergies[groupIdx], energy);  // All is ligand-self in this kernel
+    // Accumulate scaled energies
+    atomicAdd(&groupEnergies[groupIdx], energy * scale);
+    atomicAdd(&groupLigandSelfEnergies[groupIdx], energy * scale);
 }
 
 /**
@@ -991,7 +993,9 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     int templateNumAtoms,
     float surfaceTension,
     float probeRadius,
-    float* __restrict__ groupEnergies
+    float* __restrict__ groupEnergies,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -1016,12 +1020,13 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     float R_i = radii[templateIdx];
     float bornR = bornRadii[idx];
 
-    // ACE surface area term
+    // ACE surface area term with alchemical scaling
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
     float Rsolv = R_i + probeRadius;
     float ratio = R_i / bornR;
     float ratio6 = ratio * ratio * ratio * ratio * ratio * ratio;
     float area = 4.0f * 3.14159265f * Rsolv * Rsolv * ratio6;
-    float saEnergy = surfaceTension * area;
+    float saEnergy = surfaceTension * area * scale;
 
     atomicAdd(&groupEnergies[groupIdx], saEnergy);
 }
@@ -1038,7 +1043,9 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
     int numGroups,
     int templateNumAtoms,
     float prefactor,
-    float* __restrict__ dE_dR
+    float* __restrict__ dE_dR,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -1058,6 +1065,9 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
     }
 
     if (idx >= groupEndIdx) return;
+
+    // Alchemical scaling for this group
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
@@ -1106,7 +1116,7 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
         dEdRi += dEdR_pair;
     }
 
-    dE_dR[idx] = dEdRi;
+    dE_dR[idx] = dEdRi * scale;
 }
 
 /**
@@ -1120,7 +1130,9 @@ extern "C" __global__ void accumulateIsolatedSADerivatives(
     int templateNumAtoms,
     float surfaceTension,
     float probeRadius,
-    float* __restrict__ dE_dR
+    float* __restrict__ dE_dR,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -1152,9 +1164,10 @@ extern "C" __global__ void accumulateIsolatedSADerivatives(
     float ratio = R_i / bornR;
     float ratio5 = ratio * ratio * ratio * ratio * ratio;
 
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
     float dEdR_SA = -6.0f * surfaceTension * 4.0f * 3.14159265f * Rsolv * Rsolv * ratio5 * R_i / (bornR * bornR);
 
-    dE_dR[idx] += dEdR_SA;
+    dE_dR[idx] += dEdR_SA * scale;
 }
 
 /**
@@ -1762,7 +1775,9 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     float prefactor,
     float* __restrict__ crossTermEnergies,
     unsigned long long* __restrict__ forceBuffer,
-    int paddedNumAtoms
+    int paddedNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     // Thread per ligand atom
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1783,6 +1798,9 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     }
 
     if (idx >= groupEndIdx) return;
+
+    // Alchemical scaling for this group
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
@@ -1817,9 +1835,9 @@ extern "C" __global__ void computeCrossTermGBEnergy(
         float pairEnergy = prefactor * q_lig * q_rec * invFgb;
         energy += pairEnergy;
 
-        // Force on ligand
+        // Force on ligand (scaled by alchemical factor)
         float dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
-        float dEdR = -prefactor * q_lig * q_rec * invFgb * invFgb * dFgbDr;
+        float dEdR = -prefactor * q_lig * q_rec * invFgb * invFgb * dFgbDr * scale;
 
         float invR = 1.0f / r;
         force_lig.x += dEdR * dx * invR;
@@ -1827,8 +1845,8 @@ extern "C" __global__ void computeCrossTermGBEnergy(
         force_lig.z += dEdR * dz * invR;
     }
 
-    // Accumulate cross-term energy
-    atomicAdd(&crossTermEnergies[groupIdx], energy);
+    // Accumulate scaled cross-term energy
+    atomicAdd(&crossTermEnergies[groupIdx], energy * scale);
 
     // Accumulate forces
     atomicAdd(&forceBuffer[particleIdx_lig], static_cast<unsigned long long>((long long)(force_lig.x * 0x100000000)));
@@ -2017,7 +2035,9 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     int templateNumAtoms,
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
-    int paddedNumAtoms
+    int paddedNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2037,6 +2057,9 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     }
 
     if (idx >= groupEndIdx) return;
+
+    // Alchemical scaling for this group
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
@@ -2104,7 +2127,7 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
         float t3 = 0.125f * (1.0f + S_lig2 * r2_inv) * (l_ij2 - u_ij2)
                  + 0.25f * logf(u_ij / l_ij) * r2_inv;
 
-        float de = bornForces_rec * t3 * r_inv;
+        float de = bornForces_rec * t3 * r_inv * scale;
 
         // Force on ligand (the screening atom)
         // The ligand screens the receptor, so by Newton's 3rd law the force on ligand
@@ -2148,7 +2171,9 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     float prefactor,
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
-    int paddedNumAtoms
+    int paddedNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2168,6 +2193,9 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     }
 
     if (idx >= groupEndIdx) return;
+
+    // Alchemical scaling for this group
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
@@ -2218,7 +2246,7 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     float dTanhArgDPsi_lig = OBC_ALPHA - 2.0f * OBC_BETA * psi_lig + 3.0f * OBC_GAMMA * psi2_lig;
 
     float obcChain_lig = R_lig_off * dTanhArgDPsi_lig * sech2_lig / R_lig;
-    float bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain_lig;
+    float bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain_lig * scale;
 
     // Chain through ligand-ligand HCT (other ligand atoms screening this one)
     int groupSize = groupEndIdx - groupStartIdx;

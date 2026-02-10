@@ -34,6 +34,7 @@
 #include "ReferenceGridForceKernelFactory.h"
 #include "ReferenceGridForceKernels.h"
 #include "ReferenceIsolatedNonbondedKernels.h"
+#include "ReferenceIsolatedBondedKernels.h"
 #include "ReferenceIsolatedGBSAKernels.h"
 #include "ReferenceGBSAGridForceKernels.h"
 #include "openmm/OpenMMException.h"
@@ -64,6 +65,8 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
                                                 factory);
                 platform.registerKernelFactory(CalcGBSAGridForceKernel::Name(),
                                                 factory);
+                platform.registerKernelFactory(CalcIsolatedBondedForceKernel::Name(),
+                                                factory);
             }
         }
     }
@@ -85,6 +88,8 @@ KernelImpl* ReferenceGridForceKernelFactory::createKernelImpl(std::string name, 
         return new ReferenceCalcIsolatedGBSAForceKernel(name, platform);
     if (name == CalcGBSAGridForceKernel::Name())
         return new ReferenceCalcGBSAGridForceKernel(name, platform);
+    if (name == CalcIsolatedBondedForceKernel::Name())
+        return new ReferenceCalcIsolatedBondedForceKernel(name, platform);
 
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

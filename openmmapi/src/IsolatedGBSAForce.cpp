@@ -30,7 +30,8 @@ IsolatedGBSAForce::IsolatedGBSAForce()
       cutoffDistance(NO_CUTOFF),
       receptorMode(NONE),
       interpolationMethod(0),
-      numReceptorAtoms(0) {
+      numReceptorAtoms(0),
+      globalScalingFactor(1.0) {
 }
 
 void IsolatedGBSAForce::setNumAtoms(int n) {
@@ -141,6 +142,20 @@ void IsolatedGBSAForce::setReceptorPositions(const vector<double>& positions) {
     receptorPositions = positions;
 }
 
+double IsolatedGBSAForce::getGroupScalingFactor(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupScalingFactors.size())) {
+        throw OpenMMException("IsolatedGBSAForce: group index out of range");
+    }
+    return groupScalingFactors[groupIndex];
+}
+
+void IsolatedGBSAForce::setGroupScalingFactor(int groupIndex, double factor) {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupScalingFactors.size())) {
+        throw OpenMMException("IsolatedGBSAForce: group index out of range");
+    }
+    groupScalingFactors[groupIndex] = factor;
+}
+
 int IsolatedGBSAForce::addParticleGroup(const string& name, const vector<int>& indices) {
     if (numAtoms > 0 && indices.size() != static_cast<size_t>(numAtoms)) {
         throw OpenMMException("IsolatedGBSAForce: particle group size must match template size");
@@ -149,6 +164,7 @@ int IsolatedGBSAForce::addParticleGroup(const string& name, const vector<int>& i
     group.name = name;
     group.indices = indices;
     particleGroups.push_back(group);
+    groupScalingFactors.push_back(1.0);
     return static_cast<int>(particleGroups.size()) - 1;
 }
 

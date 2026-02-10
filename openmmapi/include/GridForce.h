@@ -86,7 +86,8 @@ struct OPENMM_EXPORT_GRIDFORCE ParticleGroup {
     ParticleGroup(const std::string& name,
                   const std::vector<int>& particleIndices,
                   const std::vector<double>& scalingFactors = std::vector<double>())
-        : name(name), particleIndices(particleIndices), scalingFactors(scalingFactors) {
+        : name(name), particleIndices(particleIndices), scalingFactors(scalingFactors),
+          groupScalingFactor(1.0) {
         // If no scaling factors provided, default to 1.0 for all particles
         if (this->scalingFactors.empty()) {
             this->scalingFactors.resize(particleIndices.size(), 1.0);
@@ -96,6 +97,7 @@ struct OPENMM_EXPORT_GRIDFORCE ParticleGroup {
     std::string name;                    // Group name for identification
     std::vector<int> particleIndices;    // Particle indices in this group
     std::vector<double> scalingFactors;  // Per-particle scaling factors
+    double groupScalingFactor;           // Per-group alchemical scaling factor (default 1.0)
 };
 
 /**
@@ -181,6 +183,24 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * Set all scaling factors at once.
      */
     void setScalingFactors(const std::vector<double>& vals);
+
+    /**
+     * Set the global scaling factor that multiplies all per-particle scaling factors.
+     * This is useful for alchemical free energy calculations where the entire grid
+     * interaction needs to be scaled by a lambda/alpha parameter.
+     *
+     * The total scaling for each particle is: globalScalingFactor * scalingFactor[i]
+     *
+     * @param factor  the global scaling factor (default 1.0)
+     */
+    void setGlobalScalingFactor(double factor);
+
+    /**
+     * Get the global scaling factor.
+     *
+     * @return  the global scaling factor
+     */
+    double getGlobalScalingFactor() const;
 
     /**
      * Enable or disable automatic calculation of scaling factors from the System.
@@ -564,6 +584,125 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     void clearParticleGroups();
 
     /**
+     * Set the alchemical scaling factor for a particle group.
+     * This multiplies all per-particle scaling factors within the group,
+     * enabling per-replica alchemical state control in multi-replica simulations.
+     *
+     * The total scaling for each particle is:
+     *   globalScalingFactor * groupScalingFactor * scalingFactor[i]
+     *
+     * @param groupIndex  index of the particle group
+     * @param factor      the group scaling factor (default 1.0)
+     */
+    void setParticleGroupScalingFactor(int groupIndex, double factor);
+
+    /**
+     * Get the alchemical scaling factor for a particle group.
+     *
+     * @param groupIndex  index of the particle group
+     * @return            the group scaling factor
+     */
+    double getParticleGroupScalingFactor(int groupIndex) const;
+
+    /**
+     * Set the positions of particles in a specific group.
+     * This modifies only the positions of the group's particles in the Context,
+     * leaving all other particles unchanged. Essential for multi-replica simulations
+     * where each group (replica) needs independent position management.
+     *
+     * @param context         the Context to modify
+     * @param groupIndex      index of the particle group
+     * @param positions       positions for the group's particles (must match group size)
+     */
+    void setParticleGroupPositions(OpenMM::Context& context, int groupIndex,
+                                    const std::vector<OpenMM::Vec3>& positions) const;
+
+    /**
+     * Get the positions of particles in a specific group.
+     *
+     * @param context         the Context to query
+     * @param groupIndex      index of the particle group
+     * @return                positions of the group's particles
+     */
+    std::vector<OpenMM::Vec3> getParticleGroupPositions(OpenMM::Context& context, int groupIndex) const;
+
+    /**
+     * Swap positions between two particle groups.
+     * This is used in replica exchange to swap configurations between replicas
+     * without copying data through the host. Both groups must have the same
+     * number of particles.
+     *
+     * @param context   the Context to modify
+     * @param group1    index of the first particle group
+     * @param group2    index of the second particle group
+     */
+    void swapParticleGroupPositions(OpenMM::Context& context, int group1, int group2) const;
+
+    /**
+     * Set the velocities of particles in a specific group.
+     * Essential for HMC where each replica needs velocities drawn from
+     * a Maxwell-Boltzmann distribution at its own temperature.
+     *
+     * @param context         the Context to modify
+     * @param groupIndex      index of the particle group
+     * @param velocities      velocities for the group's particles (must match group size)
+     */
+    void setParticleGroupVelocities(OpenMM::Context& context, int groupIndex,
+                                     const std::vector<OpenMM::Vec3>& velocities) const;
+
+    /**
+     * Get the velocities of particles in a specific group.
+     * Used to compute per-group kinetic energy for HMC accept/reject.
+     *
+     * @param context         the Context to query
+     * @param groupIndex      index of the particle group
+     * @return                velocities of the group's particles
+     */
+    std::vector<OpenMM::Vec3> getParticleGroupVelocities(OpenMM::Context& context, int groupIndex) const;
+
+    /**
+     * Set the positions of particles in a group from a flat coordinate array.
+     * Format: [x0, y0, z0, x1, y1, z1, ...] with 3*N elements.
+     *
+     * @param context     the Context to modify
+     * @param groupIndex  index of the particle group
+     * @param coords      flat array of coordinates (nm), size = 3 * group size
+     */
+    void setParticleGroupPositionsFlat(OpenMM::Context& context, int groupIndex,
+                                        const std::vector<double>& coords) const;
+
+    /**
+     * Get the positions of particles in a group as a flat coordinate array.
+     * Returns: [x0, y0, z0, x1, y1, z1, ...] with 3*N elements.
+     *
+     * @param context     the Context to query
+     * @param groupIndex  index of the particle group
+     * @return            flat array of coordinates (nm), size = 3 * group size
+     */
+    std::vector<double> getParticleGroupPositionsFlat(OpenMM::Context& context, int groupIndex) const;
+
+    /**
+     * Set the velocities of particles in a group from a flat array.
+     * Format: [vx0, vy0, vz0, vx1, vy1, vz1, ...] with 3*N elements.
+     *
+     * @param context     the Context to modify
+     * @param groupIndex  index of the particle group
+     * @param vels        flat array of velocities (nm/ps), size = 3 * group size
+     */
+    void setParticleGroupVelocitiesFlat(OpenMM::Context& context, int groupIndex,
+                                         const std::vector<double>& vels) const;
+
+    /**
+     * Get the velocities of particles in a group as a flat array.
+     * Returns: [vx0, vy0, vz0, vx1, vy1, vz1, ...] with 3*N elements.
+     *
+     * @param context     the Context to query
+     * @param groupIndex  index of the particle group
+     * @return            flat array of velocities (nm/ps), size = 3 * group size
+     */
+    std::vector<double> getParticleGroupVelocitiesFlat(OpenMM::Context& context, int groupIndex) const;
+
+    /**
      * Get per-particle-group energies from the most recent evaluation.
      * Only available after evaluating a Context with particle groups.
      *
@@ -800,6 +939,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> m_spacing;  // the length unit is 'nm'
     std::shared_ptr<std::vector<double>> m_vals;        // Shared grid values for memory efficiency
     std::vector<double> m_scaling_factors;
+    double m_globalScalingFactor;  // Multiplies all per-particle scaling factors (default 1.0)
     double m_inv_power;
     InvPowerMode m_invPowerMode;     // Transformation mode (NONE, RUNTIME, or STORED)
     double m_gridCap;  // Capping threshold for grid values (kJ/mol)

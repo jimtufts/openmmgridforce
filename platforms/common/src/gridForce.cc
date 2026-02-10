@@ -22,15 +22,16 @@ KERNEL void computeGridForce(GLOBAL const real4* RESTRICT posq,
                               const float invPower,
                               const int interpolationMethod,
                               const float outOfBoundsK,
-                              GLOBAL mixed* RESTRICT energyBuffer) {
+                              GLOBAL mixed* RESTRICT energyBuffer,
+                              const float globalScalingFactor) {
     // Get thread index
     const unsigned int index = GLOBAL_ID;
     if (index >= NUM_ATOMS)
         return;
 
-    // Load atom position and scaling factor
+    // Load atom position and scaling factor (with global alchemical scaling)
     real4 pos = posq[index];
-    float scalingFactor = scalingFactors[index];
+    float scalingFactor = globalScalingFactor * scalingFactors[index];
 
     // Initialize force to zero
     real3 atomForce = make_real3(0, 0, 0);

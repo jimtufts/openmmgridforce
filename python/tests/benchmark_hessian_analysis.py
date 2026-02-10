@@ -48,7 +48,7 @@ from openmm.unit import nanometer, kilojoules_per_mole, elementary_charge
 # Import shared utilities from benchmark_utils
 from benchmark_utils import (
     # Constants
-    ONE_4PI_EPS0, METHOD_NAMES, GRID_TYPES, GRID_INV_POWER,
+    ONE_4PI_EPS0, METHOD_NAMES, GRID_TYPES, GRID_INV_POWER, GRID_INV_POWER_STORED,
     GRID_ARCSINH_SCALE, GRID_PREFILTER_ORDER,
     ASTEX_BASE, DEFAULT_SYSTEMS_FILE,
     DEFAULT_GRID_SPACING, DEFAULT_GRID_CAP, TRIQUINTIC_GRID_CAP, METHOD_GRID_CAPS,
@@ -819,9 +819,19 @@ def process_system(system_name, paths, poses, lig_params, platform,
                 sys.stdout.flush()
 
                 gen_start = time.time()
-                # For method 4 (quintic B-spline), use arcsinh + prefilter during generation
-                gen_arcsinh = GRID_ARCSINH_SCALE.get(grid_type, 0.0) if method == 4 else 0.0
-                gen_prefilter = GRID_PREFILTER_ORDER.get(grid_type, 0) if method == 4 else 0
+                # Determine generation settings based on method and inv_power mode
+                inv_power_val = GRID_INV_POWER.get(grid_type)
+                use_stored = GRID_INV_POWER_STORED and inv_power_val is not None
+
+                if use_stored:
+                    # Stored inv_power: transform smooths values, no need for arcsinh
+                    gen_arcsinh = 0.0
+                    gen_prefilter = GRID_PREFILTER_ORDER.get(grid_type, 0) if method in (1, 4) else 0
+                else:
+                    # Legacy: arcsinh + prefilter for B-spline method 4
+                    gen_arcsinh = GRID_ARCSINH_SCALE.get(grid_type, 0.0) if method == 4 else 0.0
+                    gen_prefilter = GRID_PREFILTER_ORDER.get(grid_type, 0) if method == 4 else 0
+
                 # B-spline methods (1, 4) don't need derivatives; skip to save memory
                 need_derivs = (method not in (1, 4))
                 grid_result = generate_grid(
@@ -829,7 +839,9 @@ def process_system(system_name, paths, poses, lig_params, platform,
                     platform, grid_file, platform_properties,
                     arcsinh_scale=gen_arcsinh, prefilter_order=gen_prefilter,
                     compute_derivatives=need_derivs,
-                    tiled_threshold_gb=tiled_threshold_gb
+                    tiled_threshold_gb=tiled_threshold_gb,
+                    inv_power=inv_power_val if use_stored else None,
+                    inv_power_stored=use_stored
                 )
                 gen_time = (time.time() - gen_start) * 1000
                 total_gen_time += gen_time

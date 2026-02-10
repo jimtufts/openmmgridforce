@@ -21,6 +21,7 @@ constexpr double GBSAGridForce::DEFAULT_SA_SURFACE_TENSION;
 
 GBSAGridForce::GBSAGridForce()
     : numAtoms(0),
+      globalScalingFactor(1.0),
       autoGenerateGrid(false),
       gridOrigin{0.0, 0.0, 0.0},
       gridCounts_{0, 0, 0},
@@ -196,11 +197,26 @@ void GBSAGridForce::getExclusionParticles(int index, int& atom1, int& atom2) con
     atom2 = exclusions[index].second;
 }
 
+double GBSAGridForce::getGroupScalingFactor(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupScalingFactors.size())) {
+        throw OpenMMException("GBSAGridForce: group index out of range");
+    }
+    return groupScalingFactors[groupIndex];
+}
+
+void GBSAGridForce::setGroupScalingFactor(int groupIndex, double factor) {
+    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupScalingFactors.size())) {
+        throw OpenMMException("GBSAGridForce: group index out of range");
+    }
+    groupScalingFactors[groupIndex] = factor;
+}
+
 int GBSAGridForce::addParticleGroup(const string& name, const vector<int>& particleIndices) {
     ParticleGroupInfo group;
     group.name = name;
     group.particleIndices = particleIndices;
     particleGroups.push_back(group);
+    groupScalingFactors.push_back(1.0);
     return static_cast<int>(particleGroups.size()) - 1;
 }
 

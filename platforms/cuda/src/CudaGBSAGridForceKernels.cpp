@@ -25,7 +25,7 @@ CudaCalcGBSAGridForceKernel::CudaCalcGBSAGridForceKernel(string name, const Plat
     : CalcGBSAGridForceKernel(name, platform), cu(cu), hasInitializedKernel(false),
       numAtoms(0), numParticleGroups(0), originX(0), originY(0), originZ(0),
       gridSpacing(0), probeRadius(0), numBins(0), prefactor(0),
-      includeSurfaceArea(false), surfaceTension(0), interpolationMethod(0),
+      includeSurfaceArea(false), surfaceTension(0), globalScalingFactor(1.0f), interpolationMethod(0),
       hasHctDerivatives(false), useKDECorrections(false), hasBinnedKDEDerivatives(false),
       computeReceptorHCTKernel(nullptr), computeLigandHCTKernel(nullptr),
       computeBornRadiiKernel(nullptr), computeGBEnergyKernel(nullptr),
@@ -389,6 +389,18 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         groupBornRadiiHost.resize(1);
     }
 
+    // Initialize alchemical scaling
+    globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
+    {
+        int nGroups = force.getNumParticleGroups();
+        vector<float> groupScalings(numParticleGroups, 1.0f);
+        for (int g = 0; g < nGroups; g++) {
+            groupScalings[g] = static_cast<float>(force.getGroupScalingFactor(g));
+        }
+        groupScalingFactorsBuffer.initialize<float>(cu, numParticleGroups, "gbsaGroupScalingFactors");
+        groupScalingFactorsBuffer.upload(groupScalings);
+    }
+
     // Allocate intermediate result buffers
     if (totalParticles > 0) {
         hctReceptor.initialize<float>(cu, totalParticles, "gbsaHctReceptor");
@@ -490,11 +502,13 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
     cu.executeKernel(computeBornRadiiKernel, bornArgs, numBlocks * blockSize, blockSize);
 
     // Step 4: Compute GB energy and forces
+    CUdeviceptr groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
     void* energyArgs[] = {
         &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
         &exclusionAtomsPtr, &exclusionStartPtr, &groupStartPtr,
         &numParticleGroups, &numAtoms, &prefactor,
-        &forcePtr, &groupEnergiesPtr, &paddedNumAtoms
+        &forcePtr, &groupEnergiesPtr, &paddedNumAtoms,
+        &globalScalingFactor, &groupScalingFactorsPtr
     };
     cu.executeKernel(computeGBEnergyKernel, energyArgs, numBlocks * blockSize, blockSize);
 
@@ -503,7 +517,8 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         void* saArgs[] = {
             &radiiPtr, &bornRadiiPtr, &groupStartPtr,
             &numParticleGroups, &numAtoms,
-            &surfaceTension, &probeRadius, &groupEnergiesPtr
+            &surfaceTension, &probeRadius, &groupEnergiesPtr,
+            &globalScalingFactor, &groupScalingFactorsPtr
         };
         cu.executeKernel(computeSAEnergyKernel, saArgs, numBlocks * blockSize, blockSize);
     }
@@ -517,7 +532,8 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         void* bornDerivArgs[] = {
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
             &exclusionAtomsPtr, &exclusionStartPtr, &groupStartPtr,
-            &numParticleGroups, &numAtoms, &prefactor, &dE_dRPtr
+            &numParticleGroups, &numAtoms, &prefactor, &dE_dRPtr,
+            &globalScalingFactor, &groupScalingFactorsPtr
         };
         cu.executeKernel(accumulateBornRadiiDerivativesKernel, bornDerivArgs, numBlocks * blockSize, blockSize);
 
@@ -525,7 +541,8 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         if (includeSurfaceArea) {
             void* saDerivArgs[] = {
                 &radiiPtr, &bornRadiiPtr, &groupStartPtr,
-                &numParticleGroups, &numAtoms, &surfaceTension, &probeRadius, &dE_dRPtr
+                &numParticleGroups, &numAtoms, &surfaceTension, &probeRadius, &dE_dRPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(accumulateSADerivativesKernel, saDerivArgs, numBlocks * blockSize, blockSize);
         }
@@ -594,6 +611,17 @@ void CudaCalcGBSAGridForceKernel::updateParametersInContext(ContextImpl& context
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
     interpolationMethod = force.getInterpolationMethod();
+
+    // Update alchemical scaling
+    globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
+    int nGroups = force.getNumParticleGroups();
+    if (nGroups > 0) {
+        vector<float> groupScalings(numParticleGroups);
+        for (int g = 0; g < nGroups; g++) {
+            groupScalings[g] = static_cast<float>(force.getGroupScalingFactor(g));
+        }
+        groupScalingFactorsBuffer.upload(groupScalings);
+    }
 }
 
 double CudaCalcGBSAGridForceKernel::getGroupEnergy(int groupIndex) const {

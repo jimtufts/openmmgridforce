@@ -112,6 +112,10 @@ private:
     OpenMM::CudaArray gridCorrectionB;
     OpenMM::CudaArray rThresholds;
 
+    // Alchemical scaling
+    float globalScalingFactor;
+    OpenMM::CudaArray groupScalingFactorsBuffer;  // [numParticleGroups]
+
     // Device arrays - atom parameters
     OpenMM::CudaArray charges;
     OpenMM::CudaArray radii;

@@ -52,8 +52,18 @@ void IsolatedNonbondedForceImpl::initialize(ContextImpl& context) {
 }
 
 double IsolatedNonbondedForceImpl::calcForcesAndEnergy(ContextImpl& context, bool includeForces, bool includeEnergy, int groups) {
-    if ((groups & (1 << owner.getForceGroup())) != 0)
-        return kernel.getAs<CalcIsolatedNonbondedForceKernel>().execute(context, includeForces, includeEnergy);
+    if ((groups & (1 << owner.getForceGroup())) != 0) {
+        double energy = kernel.getAs<CalcIsolatedNonbondedForceKernel>().execute(context, includeForces, includeEnergy);
+        // Update per-group energies in the Force object
+        int numGroups = owner.getNumParticleGroups();
+        if (numGroups == 0) numGroups = 1;  // Implicit single group from setParticles()
+        auto& mutableOwner = const_cast<IsolatedNonbondedForce&>(owner);
+        mutableOwner.m_groupEnergies.resize(numGroups);
+        for (int g = 0; g < numGroups; g++) {
+            mutableOwner.m_groupEnergies[g] = kernel.getAs<CalcIsolatedNonbondedForceKernel>().getGroupEnergy(g);
+        }
+        return energy;
+    }
     return 0.0;
 }
 

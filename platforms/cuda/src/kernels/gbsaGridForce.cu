@@ -1339,7 +1339,9 @@ extern "C" __global__ void computeGBEnergy(
     float prefactor,
     unsigned long long* __restrict__ forceBuffer,
     float* __restrict__ groupEnergies,
-    int paddedNumAtoms
+    int paddedNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 

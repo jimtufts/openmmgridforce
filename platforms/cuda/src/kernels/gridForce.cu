@@ -37,7 +37,9 @@ extern "C" __global__ void computeGridForce(
     float* __restrict__ atomEnergyBuffer,   // Per-atom energy buffer (null = don't store)
     int* __restrict__ outOfBoundsBuffer,    // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups,  // Number of particle groups
-    const float arcsinhScale) {  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
+    const float arcsinhScale,  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
+    const float globalScalingFactor,  // Multiplies all per-particle scaling factors (for alchemical scaling)
+    const float* __restrict__ groupScalingFactors) {  // Per-group alchemical scaling factors (null = no per-group scaling)
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -48,9 +50,16 @@ extern "C" __global__ void computeGridForce(
     // Get actual particle index (use filtering if enabled)
     const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
 
-    // Load atom position and scaling factor
+    // Load atom position and scaling factor (with global and per-group alchemical scaling)
     float4 posOrig = posq[particleIndex];
-    float scalingFactor = scalingFactors[particleIndex];
+    float groupScale = 1.0f;
+    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+        int groupIdx = particleToGroupMap[particleIndex];
+        if (groupIdx >= 0 && groupIdx < numGroups) {
+            groupScale = groupScalingFactors[groupIdx];
+        }
+    }
+    float scalingFactor = globalScalingFactor * groupScale * scalingFactors[particleIndex];
 
     // Transform position to grid coordinates (relative to origin)
     float3 pos;

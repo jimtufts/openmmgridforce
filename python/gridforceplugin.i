@@ -37,6 +37,8 @@ namespace std {
 #include "CachedGridData.h"
 #include "IsolatedNonbondedForce.h"
 #include "IsolatedNonbondedForceKernels.h"
+#include "IsolatedBondedForce.h"
+#include "IsolatedBondedForceKernels.h"
 #include "GBSAGridForce.h"
 #include "GBSAGridForceKernels.h"
 #include "IsolatedGBSAForce.h"
@@ -126,6 +128,7 @@ struct ParticleGroup {
     std::string name;
     std::vector<int> particleIndices;
     std::vector<double> scalingFactors;
+    double groupScalingFactor;
 };
 
 class GridData {
@@ -520,6 +523,12 @@ public:
     void setReceptorPositions(const std::vector<double>& positions);
     const std::vector<double>& getReceptorPositions() const;
 
+    // Alchemical scaling
+    double getGlobalScalingFactor() const;
+    void setGlobalScalingFactor(double factor);
+    double getGroupScalingFactor(int groupIndex) const;
+    void setGroupScalingFactor(int groupIndex, double factor);
+
     // Particle groups
     int addParticleGroup(const std::string& name, const std::vector<int>& indices);
     int getNumParticleGroups() const;
@@ -587,6 +596,9 @@ public:
     void addScalingFactor (double val);
     void setScalingFactor (int index, double val);
 
+    void setGlobalScalingFactor(double factor);
+    double getGlobalScalingFactor() const;
+
     void setAutoCalculateScalingFactors(bool enable);
     bool getAutoCalculateScalingFactors() const;
     void setScalingProperty(const std::string& property);
@@ -638,6 +650,18 @@ public:
     const ParticleGroup* getParticleGroupByName(const std::string& name) const;
     void removeParticleGroup(int index);
     void clearParticleGroups();
+    void setParticleGroupScalingFactor(int groupIndex, double factor);
+    double getParticleGroupScalingFactor(int groupIndex) const;
+
+    void swapParticleGroupPositions(OpenMM::Context& context, int group1, int group2) const;
+
+    void setParticleGroupPositionsFlat(OpenMM::Context& context, int groupIndex,
+                                        const std::vector<double>& coords) const;
+    std::vector<double> getParticleGroupPositionsFlat(OpenMM::Context& context, int groupIndex) const;
+
+    void setParticleGroupVelocitiesFlat(OpenMM::Context& context, int groupIndex,
+                                         const std::vector<double>& vels) const;
+    std::vector<double> getParticleGroupVelocitiesFlat(OpenMM::Context& context, int groupIndex) const;
 
     std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
     std::vector<double> getParticleAtomEnergies(OpenMM::Context& context) const;
@@ -886,6 +910,25 @@ public:
     %clear double& sigma_ex;
     %clear double& epsilon_ex;
 
+    // Alchemical scaling
+    double getGlobalScalingFactor() const;
+    void setGlobalScalingFactor(double factor);
+    double getGroupScalingFactor(int groupIndex) const;
+    void setGroupScalingFactor(int groupIndex, double factor);
+
+    // Particle groups
+    int addParticleGroup(const std::string& name, const std::vector<int>& indices);
+    int getNumParticleGroups() const;
+
+    %apply std::string& OUTPUT {std::string& name};
+    %apply std::vector<int>& OUTPUT {std::vector<int>& indices};
+    void getParticleGroup(int index, std::string& name, std::vector<int>& indices) const;
+    %clear std::string& name;
+    %clear std::vector<int>& indices;
+
+    // Per-group energy
+    double getGroupEnergy(int groupIndex) const;
+
     void updateParametersInContext(Context &context);
 
     std::vector<double> computeHessian(OpenMM::Context& context);
@@ -913,6 +956,167 @@ public:
         flat = np.array(self.computeHessian(context))
         n = self.getNumAtoms()
         return flat.reshape(3*n, 3*n)
+    %}
+};
+
+/**
+ * IsolatedBondedForce computes bonded interactions (bonds, angles, torsions)
+ * for multiple isolated ligands with per-group energy reporting.
+ */
+class IsolatedBondedForce : public OpenMM::Force {
+public:
+    IsolatedBondedForce();
+
+    int getNumAtoms() const;
+    void setNumAtoms(int numAtoms);
+
+    // Bonds: E = 0.5 * k * (r - r0)^2
+    int addBond(int atom1, int atom2, double length, double k);
+    int getNumBonds() const;
+
+    %apply int& OUTPUT {int& atom1};
+    %apply int& OUTPUT {int& atom2};
+    %apply double& OUTPUT {double& length};
+    %apply double& OUTPUT {double& k};
+    void getBondParameters(int index, int& atom1, int& atom2, double& length, double& k) const;
+    %clear int& atom1;
+    %clear int& atom2;
+    %clear double& length;
+    %clear double& k;
+
+    void setBondParameters(int index, int atom1, int atom2, double length, double k);
+
+    // Angles: E = 0.5 * k * (theta - theta0)^2
+    int addAngle(int atom1, int atom2, int atom3, double angle, double k);
+    int getNumAngles() const;
+
+    %apply int& OUTPUT {int& atom1};
+    %apply int& OUTPUT {int& atom2};
+    %apply int& OUTPUT {int& atom3};
+    %apply double& OUTPUT {double& angle};
+    %apply double& OUTPUT {double& k};
+    void getAngleParameters(int index, int& atom1, int& atom2, int& atom3,
+                            double& angle, double& k) const;
+    %clear int& atom1;
+    %clear int& atom2;
+    %clear int& atom3;
+    %clear double& angle;
+    %clear double& k;
+
+    void setAngleParameters(int index, int atom1, int atom2, int atom3, double angle, double k);
+
+    // Torsions: E = k * (1 + cos(n*phi - phase))
+    int addTorsion(int atom1, int atom2, int atom3, int atom4,
+                   int periodicity, double phase, double k);
+    int getNumTorsions() const;
+
+    %apply int& OUTPUT {int& atom1};
+    %apply int& OUTPUT {int& atom2};
+    %apply int& OUTPUT {int& atom3};
+    %apply int& OUTPUT {int& atom4};
+    %apply int& OUTPUT {int& periodicity};
+    %apply double& OUTPUT {double& phase};
+    %apply double& OUTPUT {double& k};
+    void getTorsionParameters(int index, int& atom1, int& atom2, int& atom3, int& atom4,
+                              int& periodicity, double& phase, double& k) const;
+    %clear int& atom1;
+    %clear int& atom2;
+    %clear int& atom3;
+    %clear int& atom4;
+    %clear int& periodicity;
+    %clear double& phase;
+    %clear double& k;
+
+    void setTorsionParameters(int index, int atom1, int atom2, int atom3, int atom4,
+                              int periodicity, double phase, double k);
+
+    // Alchemical scaling
+    double getGlobalScalingFactor() const;
+    void setGlobalScalingFactor(double factor);
+    double getGroupScalingFactor(int groupIndex) const;
+    void setGroupScalingFactor(int groupIndex, double factor);
+
+    // Particle groups
+    int addParticleGroup(const std::string& name, const std::vector<int>& indices);
+    int getNumParticleGroups() const;
+
+    %apply std::string& OUTPUT {std::string& name};
+    %apply std::vector<int>& OUTPUT {std::vector<int>& indices};
+    void getParticleGroup(int index, std::string& name, std::vector<int>& indices) const;
+    %clear std::string& name;
+    %clear std::vector<int>& indices;
+
+    // Per-group energy
+    double getGroupEnergy(int groupIndex) const;
+
+    void updateParametersInContext(Context &context);
+
+    // Hessian
+    std::vector<double> computeHessian(OpenMM::Context& context, int groupIndex = 0);
+    std::vector<double> computeInternalForceConstants(OpenMM::Context& context, int groupIndex = 0);
+    std::vector<int> getInternalCoordinateAtomIndices() const;
+
+    %pythoncode %{
+    def getHessianMatrix(self, context, groupIndex=0):
+        """
+        Compute and return the bonded Hessian matrix as a numpy array.
+
+        Args:
+            context: OpenMM Context containing current positions
+            groupIndex: which particle group's positions to use (default 0)
+
+        Returns:
+            numpy.ndarray: Shape (3N, 3N) Hessian matrix where N is the
+                           template atom count. Units: kJ/(mol*nm^2).
+        """
+        import numpy as np
+        flat = np.array(self.computeHessian(context, groupIndex))
+        n = self.getNumAtoms()
+        return flat.reshape(3*n, 3*n)
+
+    def getInternalForceConstants(self, context, groupIndex=0):
+        """
+        Get scalar force constants for each internal DOF.
+
+        Returns:
+            dict with keys 'bonds', 'angles', 'torsions', 'all'
+        """
+        import numpy as np
+        fc = np.array(self.computeInternalForceConstants(context, groupIndex))
+        nb = self.getNumBonds()
+        na = self.getNumAngles()
+        return {
+            'bonds': fc[:nb],
+            'angles': fc[nb:nb+na],
+            'torsions': fc[nb+na:],
+            'all': fc,
+        }
+
+    def getAtomIndicesPerDOF(self):
+        """
+        Get template atom indices for each internal DOF.
+
+        Returns:
+            dict with keys 'bonds', 'angles', 'torsions'
+        """
+        indices = list(self.getInternalCoordinateAtomIndices())
+        nb = self.getNumBonds()
+        na = self.getNumAngles()
+        nt = self.getNumTorsions()
+        offset = 0
+        bonds = []
+        for b in range(nb):
+            bonds.append((indices[offset], indices[offset+1]))
+            offset += 2
+        angles = []
+        for a in range(na):
+            angles.append((indices[offset], indices[offset+1], indices[offset+2]))
+            offset += 3
+        torsions = []
+        for t in range(nt):
+            torsions.append((indices[offset], indices[offset+1], indices[offset+2], indices[offset+3]))
+            offset += 4
+        return {'bonds': bonds, 'angles': angles, 'torsions': torsions}
     %}
 };
 
@@ -1274,6 +1478,11 @@ public:
 class CalcIsolatedGBSAForceKernel : public OpenMM::KernelImpl {
 public:
     static std::string Name() {return "CalcIsolatedGBSAForce";}
+};
+
+class CalcIsolatedBondedForceKernel : public OpenMM::KernelImpl {
+public:
+    static std::string Name() {return "CalcIsolatedBondedForce";}
 };
 
 } // namespace

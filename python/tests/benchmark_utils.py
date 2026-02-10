@@ -51,6 +51,12 @@ GRID_INV_POWER = {
     'lja': -2.0,   # Soften r^-6 -> r^-3 behavior
 }
 
+# Whether to use STORED mode for inv_power (grid stores V^(1/n) values).
+# When True: transform is applied during grid generation, B-spline interpolates smooth values.
+# When False: RUNTIME mode - raw values stored, transform applied per-stencil-point at eval time.
+# STORED mode is strongly preferred for B-spline as it prevents ringing near steep potentials.
+GRID_INV_POWER_STORED = True
+
 # Arcsinh scale per grid type (0.0 = disabled)
 # For quintic B-spline: arcsinh compression helps LJ grids with large dynamic range
 GRID_ARCSINH_SCALE = {
@@ -217,7 +223,8 @@ def add_positional_restraints(system, positions, force_constant_kcal=10.0):
 def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
                   platform_properties=None, buffer_nm=2.0,
                   tiled_threshold_gb=TILED_THRESHOLD_GB, tile_size=DEFAULT_TILE_SIZE,
-                  arcsinh_scale=0.0, prefilter_order=0, compute_derivatives=True):
+                  arcsinh_scale=0.0, prefilter_order=0, compute_derivatives=True,
+                  inv_power=None, inv_power_stored=False):
     """Generate a grid and save to file, using tiled mode for large grids.
 
     Args:
@@ -225,6 +232,10 @@ def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
         prefilter_order: B-spline prefilter order (0=none, 5=quintic).
         compute_derivatives: Whether to compute and store derivatives. B-spline methods
             (1, 4) don't need derivatives, so setting False saves memory/time.
+        inv_power: If set, the inv_power exponent (e.g., -6.0 for LJr, -2.0 for LJa).
+        inv_power_stored: If True and inv_power is set, apply V^(1/n) transform during
+            grid generation (STORED mode). The grid stores smooth transformed values
+            and the CUDA kernel back-transforms at evaluation time.
 
     Returns:
         Dict with grid parameters: counts, origin_nm, spacing_nm, is_tiled, output_file
@@ -264,7 +275,10 @@ def generate_grid(paths, grid_spacing, grid_cap, grid_type, platform, grid_file,
     grid.setGridType(grid_type)
     grid.setGridCap(grid_cap)
     grid.setComputeDerivatives(compute_derivatives)
-    grid.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
+    if inv_power is not None and inv_power_stored:
+        grid.setInvPowerMode(gfp.InvPowerMode_STORED, inv_power)
+    else:
+        grid.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
     grid.setReceptorAtoms(receptor_atoms)
     grid.setReceptorPositionsFromLists(rec_pos_list)
 
@@ -419,21 +433,28 @@ def create_evaluation_system(ligand_prmtop, lig_params, grid_files, method,
 
         grid_force.setInterpolationMethod(method)
 
-        if method == 4:
-            # Quintic B-spline: use arcsinh + prefilter instead of inv_power
+        # Apply arcsinh, prefilter, and inv_power settings
+        inv_power = GRID_INV_POWER.get(grid_type)
+        use_stored = GRID_INV_POWER_STORED and inv_power is not None
+
+        if use_stored:
+            # STORED mode: grid contains V^(1/n), no arcsinh needed
+            grid_force.setInvPowerMode(gfp.InvPowerMode_STORED, inv_power)
+        else:
+            # Legacy mode: may use arcsinh compression
             arcsinh_scale = GRID_ARCSINH_SCALE.get(grid_type, 0.0)
-            prefilter_order = GRID_PREFILTER_ORDER.get(grid_type, 0)
             if arcsinh_scale > 0.0:
                 grid_force.setArcsinhScale(arcsinh_scale)
-            if prefilter_order > 0:
-                grid_force.setBSplinePrefilterOrder(prefilter_order)
-            grid_force.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
-        else:
-            inv_power = GRID_INV_POWER.get(grid_type)
             if inv_power is not None:
                 grid_force.setInvPowerMode(gfp.InvPowerMode_RUNTIME, inv_power)
             else:
                 grid_force.setInvPowerMode(gfp.InvPowerMode_NONE, 0.0)
+
+        # B-spline prefilter is applied during generation; eval kernel doesn't need it
+        # but set it for consistency if the grid was prefiltered
+        prefilter_order = GRID_PREFILTER_ORDER.get(grid_type, 0)
+        if prefilter_order > 0:
+            grid_force.setBSplinePrefilterOrder(prefilter_order)
 
         particle_indices = list(range(n_atoms))
         grid_force.addParticleGroup(f'{grid_type}', particle_indices, scaling_factors)

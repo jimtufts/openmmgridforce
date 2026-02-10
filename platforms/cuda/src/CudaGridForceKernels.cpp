@@ -125,6 +125,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     invPower = (float)inv_power;
     invPowerMode = static_cast<int>(force.getInvPowerMode());
     arcsinhScale = (float)force.getArcsinhScale();
+    globalScalingFactor = (float)force.getGlobalScalingFactor();
     interpolationMethod = interp_method;
 
     // Store ligand atoms and derivative computation flag
@@ -276,6 +277,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         // Initialize per-group energy buffer
         groupEnergyBuffer.initialize<float>(cu, numParticleGroups, "groupEnergyBuffer");
 
+        // Initialize per-group scaling factors buffer
+        std::vector<float> groupScalings(numParticleGroups, 1.0f);
+        for (int i = 0; i < numParticleGroups; i++) {
+            groupScalings[i] = (float)force.getParticleGroup(i).groupScalingFactor;
+        }
+        groupScalingFactorsBuffer.initialize<float>(cu, numParticleGroups, "groupScalingFactors");
+        groupScalingFactorsBuffer.upload(groupScalings);
+
         // Initialize per-atom energy buffer (for debugging/analysis)
         if (totalGroupParticles > 0) {
             atomEnergyBuffer.initialize<float>(cu, totalGroupParticles, "atomEnergyBuffer");
@@ -354,6 +363,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
             std::cout << "GridForce: Tiled grid saved to " << tiledOutputFile << std::endl;
 
+            // Note: The CUDA tile generation kernel already applies V -> sign(V) * |V|^(1/n)
+            // when invPower != 0.0, so tile values already contain transformed values.
+            // No CPU-side transform needed for the tiled path.
+
             // Apply arcsinh transform to tiled file (streaming, tile-by-tile)
             // Must be done BEFORE prefiltering to compress dynamic range first
             if (arcsinhScale > 0.0f) {
@@ -402,9 +415,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
                          ox, oy, oz, vals, derivatives);
 
+            // Note: The CUDA generateGridKernel already applies V -> sign(V) * |V|^(1/n)
+            // when invPower != 0.0, so vals already contain transformed values at this point.
+            // No CPU-side transform needed for the non-tiled path.
+
             // Apply arcsinh transform to compress dynamic range before prefiltering.
             // This prevents Gibbs-like ringing in the prefilter for steep potentials (e.g., LJR).
             // The inverse sinh transform is applied in the CUDA evaluation kernel.
+            // Note: arcsinh and stored inv_power serve similar purposes; typically only one is used.
             if (arcsinhScale > 0.0f) {
                 for (size_t i = 0; i < vals.size(); i++) {
                     vals[i] = std::asinh(vals[i] / (double)arcsinhScale);
@@ -525,6 +543,33 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // (TileManager will handle streaming tiles to GPU on demand)
     bool willUseTiledMode = force.getTiledMode();
 
+    // Auto-enable tiled mode if derivatives won't fit in GPU memory
+    // This prevents Hermite/triquintic evaluation from silently returning zeros
+    // Check both force.hasDerivatives() and GridData derivatives (auto-generated grids
+    // store derivatives on GridData, not directly on force)
+    bool hasDerivs = force.hasDerivatives();
+    if (!hasDerivs) {
+        auto gd = force.getGridData();
+        if (gd && gd->hasDerivatives())
+            hasDerivs = true;
+        if (!hasDerivs) {
+            auto cd = force.getCachedGridData();
+            if (cd && cd->hasDerivatives())
+                hasDerivs = true;
+        }
+    }
+    if (!willUseTiledMode && hasDerivs) {
+        size_t freeMem, totalMem;
+        cuMemGetInfo(&freeMem, &totalMem);
+        size_t derivativesBytes = (size_t)27 * counts[0] * counts[1] * counts[2] * sizeof(float);
+        if (derivativesBytes > (size_t)(freeMem * 0.8)) {
+            willUseTiledMode = true;
+            std::cout << "GridForce: Auto-enabling tiled mode (derivatives need "
+                      << (derivativesBytes / (1024.0 * 1024 * 1024)) << " GB, only "
+                      << (freeMem / (1024.0 * 1024 * 1024)) << " GB available)" << std::endl;
+        }
+    }
+
     // Grid values: check cache first to enable sharing across multiple GridForce instances
     // Priority: TiledInput (no caching needed) > GridData > CachedGridData > vals.data()
     std::shared_ptr<GridData> sharedGridData = force.getGridData();
@@ -604,8 +649,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
     // Upload derivatives if they exist (for tricubic/triquintic interpolation)
     // Skip if using tiled mode - TileManager handles derivative streaming
+    // Skip if auto-generating grid (generation context doesn't need derivatives for evaluation)
     // Also skip if derivatives are too large for GPU memory (will need tiled mode for evaluation)
-    if (!willUseTiledMode && force.hasDerivatives()) {
+    bool isAutoGenContext = force.getAutoGenerateGrid();
+    if (!willUseTiledMode && !isAutoGenContext && force.hasDerivatives()) {
         // Check available GPU memory before attempting to cache derivatives
         size_t freeMem, totalMem;
         cuMemGetInfo(&freeMem, &totalMem);
@@ -644,7 +691,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                     cu.setAsCurrent();
                     try {
                         g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
-                        g_derivatives_shared->upload(derivativesFloat);
+                        // Bypass OpenMM's uploadSubArray which has int overflow
+                        // (offset*elementSize and elements*elementSize overflow for >512M floats)
+                        CUdeviceptr devPtr = g_derivatives_shared->getDevicePointer();
+                        CUresult uploadResult = cuMemcpyHtoD(devPtr, derivativesFloat.data(),
+                            (size_t)derivativesFloat.size() * sizeof(float));
+                        if (uploadResult != CUDA_SUCCESS)
+                            throw OpenMMException("Error uploading large derivative array");
                         derivativeCache[derivCacheKey] = g_derivatives_shared;
                         derivatives_vec.clear();
                         derivatives_vec.shrink_to_fit();
@@ -669,7 +722,12 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 cu.setAsCurrent();
                 try {
                     g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
-                    g_derivatives_shared->upload(derivativesFloat);
+                    // Bypass OpenMM's uploadSubArray which has int overflow
+                    CUdeviceptr devPtr = g_derivatives_shared->getDevicePointer();
+                    CUresult uploadResult = cuMemcpyHtoD(devPtr, derivativesFloat.data(),
+                        (size_t)derivativesFloat.size() * sizeof(float));
+                    if (uploadResult != CUDA_SUCCESS)
+                        throw OpenMMException("Error uploading large derivative array");
                     derivativeCache[derivCacheKey] = g_derivatives_shared;
                     derivatives_vec.clear();
                     derivatives_vec.shrink_to_fit();
@@ -787,8 +845,8 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     }
     analysisBuffersInitialized = false;
 
-    // Initialize tiled mode if enabled
-    tiledMode = force.getTiledMode();
+    // Initialize tiled mode if enabled (or auto-enabled due to memory constraints)
+    tiledMode = willUseTiledMode;
     // Note: tiledInputFile already declared earlier in this function
 
     if (tiledMode) {
@@ -946,6 +1004,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     // Clear group energy buffer if using particle groups
     CUdeviceptr particleToGroupMapPtr = 0;
     CUdeviceptr groupEnergyBufferPtr = 0;
+    CUdeviceptr groupScalingFactorsPtr = 0;
     CUdeviceptr atomEnergyBufferPtr = 0;
     CUdeviceptr outOfBoundsBufferPtr = 0;
     if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
@@ -954,6 +1013,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         groupEnergyBuffer.upload(zeros);
         particleToGroupMapPtr = particleToGroupMap.getDevicePointer();
         groupEnergyBufferPtr = groupEnergyBuffer.getDevicePointer();
+        if (groupScalingFactorsBuffer.isInitialized()) {
+            groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
+        }
 
         // Set up per-atom energy buffer if initialized
         if (atomEnergyBuffer.isInitialized()) {
@@ -996,7 +1058,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &atomEnergyBufferPtr,
         &outOfBoundsBufferPtr,
         &numParticleGroups,
-        &arcsinhScale
+        &arcsinhScale,
+        &globalScalingFactor,
+        &groupScalingFactorsPtr
     };
 
 #if DEBUG_GRIDFORCE
@@ -1087,6 +1151,8 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &outOfBoundsBufferPtr,
             &numParticleGroups,
             &arcsinhScale,
+            &globalScalingFactor,
+            &groupScalingFactorsPtr,
             &tileOffsetsPtr,
             &tileValuePtrsPtr,
             &tileDerivPtrsPtr,
@@ -1171,7 +1237,17 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
     invPower = (float)inv_power;
     invPowerMode = inv_power_mode;
     arcsinhScale = (float)force.getArcsinhScale();
+    globalScalingFactor = (float)force.getGlobalScalingFactor();
     interpolationMethod = interp_method;
+
+    // Update per-group scaling factors if groups exist
+    if (numParticleGroups > 0 && groupScalingFactorsBuffer.isInitialized()) {
+        std::vector<float> groupScalings(numParticleGroups);
+        for (int i = 0; i < numParticleGroups; i++) {
+            groupScalings[i] = (float)force.getParticleGroupScalingFactor(i);
+        }
+        groupScalingFactorsBuffer.upload(groupScalings);
+    }
 }
 
 vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {

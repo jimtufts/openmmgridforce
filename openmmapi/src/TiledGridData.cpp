@@ -468,6 +468,65 @@ void TiledGridData::applyArcsinhTransform(double scale) {
     m_file.open(m_filename, ios::binary | ios::in);
 }
 
+// ========== Stored inv_power transform ==========
+
+void TiledGridData::applyInvPowerTransform(float invPower) {
+    if (invPower == 0.0f) {
+        throw OpenMMException("TiledGridData::applyInvPowerTransform: invPower must be != 0");
+    }
+    if (m_filename.empty() || m_tileIndex.empty()) {
+        throw OpenMMException("TiledGridData: Must call openForReading() before applyInvPowerTransform()");
+    }
+    if (m_file.is_open()) {
+        m_file.close();
+    }
+
+    // Reopen file for read-write
+    m_file.open(m_filename, ios::binary | ios::in | ios::out);
+    if (!m_file.is_open()) {
+        throw OpenMMException("TiledGridData: Unable to reopen file for inv_power transform: " + m_filename);
+    }
+
+    float p = 1.0f / invPower;
+
+    for (int txIdx = 0; txIdx < m_numTilesX; txIdx++) {
+        for (int tyIdx = 0; tyIdx < m_numTilesY; tyIdx++) {
+            for (int tzIdx = 0; tzIdx < m_numTilesZ; tzIdx++) {
+                int tileSizeX, tileSizeY, tileSizeZ;
+                getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX, tileSizeY, tileSizeZ);
+
+                vector<float> tileVals, tileDerivsUnused;
+                readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
+
+                // Apply sign(V) * |V|^(1/n) to each grid value
+                for (size_t i = 0; i < tileVals.size(); i++) {
+                    float v = tileVals[i];
+                    if (v > 0.0f) {
+                        float t = std::pow(v, p);
+                        tileVals[i] = std::isfinite(t) ? t : 0.0f;
+                    } else if (v < 0.0f) {
+                        float t = std::pow(-v, p);
+                        tileVals[i] = std::isfinite(t) ? -t : 0.0f;
+                    }
+                    // v == 0.0f stays 0.0f
+                }
+
+                // Write back values only (skip 6-byte tile dims header)
+                int tileIdx = getTileLinearIndex(txIdx, tyIdx, tzIdx);
+                int64_t offset = m_tileIndex[tileIdx].fileOffset + 6;
+                m_file.seekp(offset);
+                m_file.write(reinterpret_cast<const char*>(tileVals.data()),
+                             tileVals.size() * sizeof(float));
+            }
+        }
+    }
+
+    m_file.close();
+
+    // Reopen in read-only mode
+    m_file.open(m_filename, ios::binary | ios::in);
+}
+
 // ========== B-spline prefilter ==========
 
 void TiledGridData::applyBSplinePrefilter(int order) {

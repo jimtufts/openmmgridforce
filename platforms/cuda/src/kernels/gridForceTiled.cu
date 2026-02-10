@@ -482,6 +482,8 @@ extern "C" __global__ void computeGridForceTiled(
     int* __restrict__ outOfBoundsBuffer,           // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups,
     const float arcsinhScale,  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
+    const float globalScalingFactor,  // Multiplies all per-particle scaling factors (for alchemical scaling)
+    const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling factors (null = no per-group scaling)
     // Tile-specific parameters
     const int* __restrict__ tileOffsets,           // Grid offsets for each tile (x,y,z,x,y,z,...)
     const unsigned long long* __restrict__ tileValuePtrs,   // Device pointers to tile values
@@ -498,7 +500,14 @@ extern "C" __global__ void computeGridForceTiled(
     const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
 
     float4 posOrig = posq[particleIndex];
-    float scalingFactor = scalingFactors[particleIndex];
+    float groupScale = 1.0f;
+    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+        int groupIdx = particleToGroupMap[particleIndex];
+        if (groupIdx >= 0 && groupIdx < numGroups) {
+            groupScale = groupScalingFactors[groupIdx];
+        }
+    }
+    float scalingFactor = globalScalingFactor * groupScale * scalingFactors[particleIndex];
 
     // Transform position to grid coordinates
     float3 pos;
