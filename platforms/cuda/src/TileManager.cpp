@@ -436,12 +436,22 @@ void TileCache::clear() {
     currentMemory_ = 0;
 }
 
+std::set<TileID> TileCache::getLoadedTileIDs() const {
+    std::set<TileID> ids;
+    for (const auto& pair : loadedTiles_) {
+        ids.insert(pair.first);
+    }
+    return ids;
+}
+
 // ============================================================================
 // TileManager implementation
 // ============================================================================
 
 TileManager::TileManager(CudaContext& cu, size_t memoryBudget)
-    : cu_(cu), cache_(cu, memoryBudget), initialized_(false) {
+    : cu_(cu), cache_(cu, memoryBudget), initialized_(false),
+      coverageCheckKernel_(0), coverageCheckInitialized_(false),
+      occupancySize_(0), coverageChecks_(0), coverageMisses_(0) {
 }
 
 TileManager::~TileManager() {
@@ -572,4 +582,107 @@ void TileManager::buildLookupTable(const std::set<TileID>& tiles) {
     // Use simple linear search for now (works for small number of tiles)
     // TODO: Implement proper hash map for many tiles
     lookupTable_.hashMapSize = tiles.size();
+}
+
+// ============================================================================
+// GPU-side tile coverage check
+// ============================================================================
+
+void TileManager::initCoverageCheck(CUmodule module) {
+    if (coverageCheckInitialized_) return;
+    if (!initialized_) {
+        throw std::runtime_error("TileManager: must be initialized before coverage check");
+    }
+
+    // Extract kernel from the combined module
+    coverageCheckKernel_ = cu_.getKernel(module, "checkTileCoverage");
+
+    // Compute occupancy bitmap size
+    int3 tileCount = hostGrid_.getTileCount();
+    occupancySize_ = tileCount.x * tileCount.y * tileCount.z;
+
+    // Allocate GPU buffers
+    tileOccupancy_.reset(new CudaArray(cu_, occupancySize_, sizeof(unsigned char), "tileOccupancy"));
+    needsRetileFlag_.reset(new CudaArray(cu_, 1, sizeof(int), "needsRetileFlag"));
+
+    // Initialize occupancy to all-zero (no tiles loaded)
+    std::vector<unsigned char> zeros(occupancySize_, 0);
+    tileOccupancy_->upload(zeros);
+
+    coverageCheckInitialized_ = true;
+}
+
+void TileManager::updateOccupancyBitmap() {
+    if (!coverageCheckInitialized_) return;
+
+    // Build host-side bitmap from currently loaded tiles
+    std::vector<unsigned char> bitmap(occupancySize_, 0);
+    int3 tileCount = hostGrid_.getTileCount();
+
+    std::set<TileID> loaded = cache_.getLoadedTileIDs();
+    for (const TileID& id : loaded) {
+        int idx = id.tx * tileCount.y * tileCount.z + id.ty * tileCount.z + id.tz;
+        if (idx >= 0 && idx < occupancySize_) {
+            bitmap[idx] = 1;
+        }
+    }
+
+    tileOccupancy_->upload(bitmap);
+}
+
+bool TileManager::checkCoverageOnGPU(CUdeviceptr posqPtr,
+                                      CUdeviceptr particleIndicesPtr,
+                                      int numParticles,
+                                      int paddedNumAtoms) {
+    if (!coverageCheckInitialized_) {
+        throw std::runtime_error("TileManager: coverage check not initialized");
+    }
+
+    coverageChecks_++;
+
+    // Zero the flag
+    std::vector<int> zero(1, 0);
+    needsRetileFlag_->upload(zero);
+
+    // Get grid parameters for the kernel
+    float3 origin = hostGrid_.getOrigin();
+    float3 spacing = hostGrid_.getSpacing();
+    int3 tileCount = hostGrid_.getTileCount();
+    int tileSize = hostGrid_.getConfig().tileSize;
+
+    // Use inverse spacing for multiplication (faster than division in kernel)
+    float invSpacingX = 1.0f / spacing.x;
+    float invSpacingY = 1.0f / spacing.y;
+    float invSpacingZ = 1.0f / spacing.z;
+
+    CUdeviceptr occupancyPtr = tileOccupancy_->getDevicePointer();
+    CUdeviceptr flagPtr = needsRetileFlag_->getDevicePointer();
+    int numTilesX = tileCount.x;
+    int numTilesY = tileCount.y;
+    int numTilesZ = tileCount.z;
+
+    void* args[] = {
+        &posqPtr,
+        &particleIndicesPtr,
+        &numParticles,
+        &paddedNumAtoms,
+        &origin.x, &origin.y, &origin.z,
+        &invSpacingX, &invSpacingY, &invSpacingZ,
+        &tileSize,
+        &occupancyPtr,
+        &numTilesX, &numTilesY, &numTilesZ,
+        &flagPtr
+    };
+
+    cu_.executeKernel(coverageCheckKernel_, args, numParticles, 64);
+
+    // Read back the single flag
+    std::vector<int> flagHost(1);
+    needsRetileFlag_->download(flagHost);
+
+    if (flagHost[0] != 0) {
+        coverageMisses_++;
+        return false;  // Some particles not covered
+    }
+    return true;  // All particles covered
 }

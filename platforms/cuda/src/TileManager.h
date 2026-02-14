@@ -223,6 +223,11 @@ public:
      */
     void clear();
 
+    /**
+     * Get the set of currently loaded tile IDs.
+     */
+    std::set<TileID> getLoadedTileIDs() const;
+
     // Statistics
     size_t getMemoryUsage() const { return currentMemory_; }
     size_t getMaxMemory() const { return maxMemory_; }
@@ -328,6 +333,46 @@ public:
      */
     void clearCache() { cache_.clear(); }
 
+    /**
+     * Initialize GPU-side tile coverage checking.
+     * Must be called once before checkCoverageOnGPU().
+     *
+     * @param module  The compiled CUDA module containing checkTileCoverage kernel
+     */
+    void initCoverageCheck(CUmodule module);
+
+    /**
+     * Check if all particles are within currently-loaded tiles using a GPU kernel.
+     * Avoids downloading particle positions to CPU.
+     *
+     * @param posqPtr           Device pointer to posq array
+     * @param particleIndicesPtr Device pointer to particle index array (0 for all particles)
+     * @param numParticles      Number of particles to check
+     * @param paddedNumAtoms    Padded atom count from CudaContext
+     * @return true if all particles are covered by loaded tiles
+     */
+    bool checkCoverageOnGPU(CUdeviceptr posqPtr,
+                            CUdeviceptr particleIndicesPtr,
+                            int numParticles,
+                            int paddedNumAtoms);
+
+    /**
+     * Update the GPU occupancy bitmap to reflect currently loaded tiles.
+     * Call after prepareTiles() loads new tiles.
+     */
+    void updateOccupancyBitmap();
+
+    /**
+     * Whether the coverage check has been initialized.
+     */
+    bool isCoverageCheckInitialized() const { return coverageCheckInitialized_; }
+
+    /**
+     * Coverage check statistics.
+     */
+    size_t getCoverageChecks() const { return coverageChecks_; }
+    size_t getCoverageMisses() const { return coverageMisses_; }
+
 private:
     void buildLookupTable(const std::set<TileID>& tiles);
 
@@ -336,6 +381,15 @@ private:
     TileCache cache_;
     TileLookupTable lookupTable_;
     bool initialized_;
+
+    // GPU-side tile coverage check state
+    std::unique_ptr<OpenMM::CudaArray> tileOccupancy_;   // byte array: 1=loaded, 0=not
+    std::unique_ptr<OpenMM::CudaArray> needsRetileFlag_;  // single int flag
+    CUfunction coverageCheckKernel_;
+    bool coverageCheckInitialized_;
+    int occupancySize_;  // numTilesX * numTilesY * numTilesZ
+    size_t coverageChecks_;
+    size_t coverageMisses_;
 };
 
 } // namespace GridForcePlugin
