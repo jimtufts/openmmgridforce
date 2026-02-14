@@ -43,114 +43,118 @@ extern "C" __global__ void computeIsolatedNonbonded(
     // Note: Using local constant to avoid macro conflicts when kernels are concatenated
     const real COULOMB_CONST = 138.935456f;
 
-    // Each thread handles one (group, pair) combination
-    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Grid-stride loop: each thread handles multiple (group, pair) combinations.
+    // OpenMM's executeKernel caps the grid size at numThreadBlocks (= SMs * blocksPerSM),
+    // so we must loop to cover all work items when totalWork exceeds the grid capacity.
     int totalWork = numGroups * numPairs;
-    if (globalIdx >= totalWork) return;
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
 
-    int groupIdx = globalIdx / numPairs;
-    int pairIdx = globalIdx % numPairs;
+        int groupIdx = globalIdx / numPairs;
+        int pairIdx = globalIdx % numPairs;
 
-    // Get scaling factor for this group
-    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-    if (scale == 0.0f) return;
+        // Get scaling factor for this group
+        float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+        if (scale == 0.0f) continue;
 
-    // Pointer to this group's particle indices
-    const int* particleIndices = groupParticleIndices + groupIdx * numAtoms;
+        // Pointer to this group's particle indices
+        const int* particleIndices = groupParticleIndices + groupIdx * numAtoms;
 
-    // Decode pair index to atom indices within the template
-    int i, j;
-    decodePairIndex(pairIdx, &i, &j, numAtoms);
+        // Decode pair index to atom indices within the template
+        int i, j;
+        decodePairIndex(pairIdx, &i, &j, numAtoms);
 
-    // Check if this pair is excluded
-    bool excluded = false;
+        // Check if this pair is excluded
+        bool excluded = false;
 #if NUM_EXCLUSIONS > 0
-    for (int k = 0; k < NUM_EXCLUSIONS; k++) {
-        int2 excl = exclusions[k];
-        if ((excl.x == i && excl.y == j) || (excl.x == j && excl.y == i)) {
-            excluded = true;
-            break;
+        for (int k = 0; k < NUM_EXCLUSIONS; k++) {
+            int2 excl = exclusions[k];
+            if ((excl.x == i && excl.y == j) || (excl.x == j && excl.y == i)) {
+                excluded = true;
+                break;
+            }
         }
-    }
 #endif
-    if (excluded) return;
+        if (excluded) continue;
 
-    // Check if this pair is an exception (1-4 interaction with custom parameters)
-    bool isException = false;
-    real qq, sigma, epsilon;
+        // Check if this pair is an exception (1-4 interaction with custom parameters)
+        bool isException = false;
+        real qq, sigma, epsilon;
 #if NUM_EXCEPTIONS > 0
-    for (int k = 0; k < NUM_EXCEPTIONS; k++) {
-        int2 exc = exceptions[k];
-        if ((exc.x == i && exc.y == j) || (exc.x == j && exc.y == i)) {
-            isException = true;
-            float3 params = exceptionParams[k];
-            qq = params.x;          // chargeProd
-            sigma = params.y;       // sigma
-            epsilon = params.z;     // epsilon
-            break;
+        for (int k = 0; k < NUM_EXCEPTIONS; k++) {
+            int2 exc = exceptions[k];
+            if ((exc.x == i && exc.y == j) || (exc.x == j && exc.y == i)) {
+                isException = true;
+                float3 params = exceptionParams[k];
+                qq = params.x;          // chargeProd
+                sigma = params.y;       // sigma
+                epsilon = params.z;     // epsilon
+                break;
+            }
         }
-    }
 #endif
 
-    // If not an exception, use standard combining rules
-    if (!isException) {
-        qq = charges[i] * charges[j];
-        sigma = (sigmas[i] + sigmas[j]) * 0.5f;  // Arithmetic mean
-        epsilon = SQRT(epsilons[i] * epsilons[j]);  // Geometric mean
-    }
+        // If not an exception, use standard combining rules
+        if (!isException) {
+            qq = charges[i] * charges[j];
+            sigma = (sigmas[i] + sigmas[j]) * 0.5f;  // Arithmetic mean
+            epsilon = SQRT(epsilons[i] * epsilons[j]);  // Geometric mean
+        }
 
-    // Get actual particle indices in the System for this group
-    int particleI = particleIndices[i];
-    int particleJ = particleIndices[j];
+        // Get actual particle indices in the System for this group
+        int particleI = particleIndices[i];
+        int particleJ = particleIndices[j];
 
-    // Load positions
-    real4 posqI = posq[particleI];
-    real4 posqJ = posq[particleJ];
+        // Load positions
+        real4 posqI = posq[particleI];
+        real4 posqJ = posq[particleJ];
 
-    // Compute distance
-    real dx = posqI.x - posqJ.x;
-    real dy = posqI.y - posqJ.y;
-    real dz = posqI.z - posqJ.z;
-    real r2 = dx*dx + dy*dy + dz*dz;
-    real invR = RSQRT(r2);
-    real r = r2 * invR;
+        // Compute distance
+        real dx = posqI.x - posqJ.x;
+        real dy = posqI.y - posqJ.y;
+        real dz = posqI.z - posqJ.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
+        real invR = RSQRT(r2);
+        real r = r2 * invR;
 
-    // Coulomb interaction
-    real coulombEnergy = COULOMB_CONST * qq * invR;
+        // Coulomb interaction
+        real coulombEnergy = COULOMB_CONST * qq * invR;
 
-    // Lennard-Jones interaction
-    real sig_r = sigma * invR;
-    real sig_r2 = sig_r * sig_r;
-    real sig_r6 = sig_r2 * sig_r2 * sig_r2;
-    real sig_r12 = sig_r6 * sig_r6;
-    real ljEnergy = 4.0f * epsilon * (sig_r12 - sig_r6);
+        // Lennard-Jones interaction
+        real sig_r = sigma * invR;
+        real sig_r2 = sig_r * sig_r;
+        real sig_r6 = sig_r2 * sig_r2 * sig_r2;
+        real sig_r12 = sig_r6 * sig_r6;
+        real ljEnergy = 4.0f * epsilon * (sig_r12 - sig_r6);
 
-    // Total energy (scaled)
-    real pairEnergy = (coulombEnergy + ljEnergy) * scale;
+        // Total energy (scaled)
+        real pairEnergy = (coulombEnergy + ljEnergy) * scale;
 
-    // Compute force: F = -dE/dr (scaled)
-    real coulombForce = coulombEnergy * invR * scale;
-    real ljForce = 4.0f * epsilon * (12.0f * sig_r12 - 6.0f * sig_r6) * invR * scale;
-    real forceMagnitude = coulombForce + ljForce;
+        // Compute force: F = -dE/dr (scaled)
+        real coulombForce = coulombEnergy * invR * scale;
+        real ljForce = 4.0f * epsilon * (12.0f * sig_r12 - 6.0f * sig_r6) * invR * scale;
+        real forceMagnitude = coulombForce + ljForce;
 
-    // Force components: F_vec = forceMagnitude * (r_vec/|r|)
-    real fx = forceMagnitude * dx * invR;
-    real fy = forceMagnitude * dy * invR;
-    real fz = forceMagnitude * dz * invR;
+        // Force components: F_vec = forceMagnitude * (r_vec/|r|)
+        real fx = forceMagnitude * dx * invR;
+        real fy = forceMagnitude * dy * invR;
+        real fz = forceMagnitude * dz * invR;
 
-    // Accumulate forces (Newton's third law: equal and opposite)
-    atomicAdd(&forceBuffers[particleI], static_cast<unsigned long long>((long long)(fx * 0x100000000)));
-    atomicAdd(&forceBuffers[particleI + paddedNumAtoms], static_cast<unsigned long long>((long long)(fy * 0x100000000)));
-    atomicAdd(&forceBuffers[particleI + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(fz * 0x100000000)));
+        // Accumulate forces (Newton's third law: equal and opposite)
+        atomicAdd(&forceBuffers[particleI], static_cast<unsigned long long>((long long)(fx * 0x100000000)));
+        atomicAdd(&forceBuffers[particleI + paddedNumAtoms], static_cast<unsigned long long>((long long)(fy * 0x100000000)));
+        atomicAdd(&forceBuffers[particleI + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(fz * 0x100000000)));
 
-    atomicAdd(&forceBuffers[particleJ], static_cast<unsigned long long>((long long)(-fx * 0x100000000)));
-    atomicAdd(&forceBuffers[particleJ + paddedNumAtoms], static_cast<unsigned long long>((long long)(-fy * 0x100000000)));
-    atomicAdd(&forceBuffers[particleJ + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(-fz * 0x100000000)));
+        atomicAdd(&forceBuffers[particleJ], static_cast<unsigned long long>((long long)(-fx * 0x100000000)));
+        atomicAdd(&forceBuffers[particleJ + paddedNumAtoms], static_cast<unsigned long long>((long long)(-fy * 0x100000000)));
+        atomicAdd(&forceBuffers[particleJ + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(-fz * 0x100000000)));
 
-    // Accumulate energy
-    if (includeEnergy) {
-        atomicAdd(energyBuffer, (mixed)pairEnergy);
-        atomicAdd(&groupEnergies[groupIdx], (float)pairEnergy);
+        // Accumulate energy
+        if (includeEnergy) {
+            atomicAdd(energyBuffer, (mixed)pairEnergy);
+            atomicAdd(&groupEnergies[groupIdx], (float)pairEnergy);
+        }
     }
 }
 

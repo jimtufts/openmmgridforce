@@ -155,8 +155,9 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
     if (!hasInitializedKernel)
         return 0.0;
 
-    // Zero per-group energy buffer
-    cu.clearBuffer(groupEnergiesBuffer);
+    // Zero per-group energy buffer (only when energy is needed to avoid sync barriers)
+    if (includeEnergy)
+        cu.clearBuffer(groupEnergiesBuffer);
 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
@@ -222,8 +223,9 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
         cu.executeKernel(torsionKernel, args, numBlocks * blockSize, blockSize);
     }
 
-    // Download per-group energies
-    groupEnergiesBuffer.download(groupEnergiesHost);
+    // Download per-group energies (only when energy is needed to avoid sync barriers)
+    if (includeEnergy)
+        groupEnergiesBuffer.download(groupEnergiesHost);
 
     return 0.0;  // Energy accumulated in energy buffer
 }

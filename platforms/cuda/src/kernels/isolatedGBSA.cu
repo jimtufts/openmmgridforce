@@ -1590,70 +1590,72 @@ extern "C" __global__ void computeLigandToReceptorHCT(
     float cutoffDistance,
     float* __restrict__ ligandToReceptorHCT
 ) {
-    // Thread per (group, receptor_atom) pair
-    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Grid-stride loop: each thread handles multiple (group, receptor_atom) pairs.
     int totalWork = numGroups * numReceptorAtoms;
-    if (globalIdx >= totalWork) return;
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
 
-    int groupIdx = globalIdx / numReceptorAtoms;
-    int recIdx = globalIdx % numReceptorAtoms;
+        int groupIdx = globalIdx / numReceptorAtoms;
+        int recIdx = globalIdx % numReceptorAtoms;
 
-    float3 pos_rec = receptorPositions[recIdx];
-    float R_rec = receptorRadii[recIdx];
-    float R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        float3 pos_rec = receptorPositions[recIdx];
+        float R_rec = receptorRadii[recIdx];
+        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
 
-    float hct = 0.0f;
-    float cutoff2 = cutoffDistance * cutoffDistance;
-    bool useCutoff = (cutoffDistance > 0.0f);
+        float hct = 0.0f;
+        float cutoff2 = cutoffDistance * cutoffDistance;
+        bool useCutoff = (cutoffDistance > 0.0f);
 
-    int groupStartIdx = groupStart[groupIdx];
-    int groupEndIdx = groupStart[groupIdx + 1];
+        int groupStartIdx = groupStart[groupIdx];
+        int groupEndIdx = groupStart[groupIdx + 1];
 
-    // Loop over ligand atoms in this group
-    for (int k = groupStartIdx; k < groupEndIdx; k++) {
-        int particleIdx = particleIndices[k];
-        int templateIdx = (k - groupStartIdx) % templateNumAtoms;
+        // Loop over ligand atoms in this group
+        for (int k = groupStartIdx; k < groupEndIdx; k++) {
+            int particleIdx = particleIndices[k];
+            int templateIdx = (k - groupStartIdx) % templateNumAtoms;
 
-        float4 pos_lig = posq[particleIdx];
-        float dx = pos_rec.x - pos_lig.x;
-        float dy = pos_rec.y - pos_lig.y;
-        float dz = pos_rec.z - pos_lig.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+            float4 pos_lig = posq[particleIdx];
+            float dx = pos_rec.x - pos_lig.x;
+            float dy = pos_rec.y - pos_lig.y;
+            float dz = pos_rec.z - pos_lig.z;
+            float r2 = dx*dx + dy*dy + dz*dz;
 
-        if (useCutoff && r2 > cutoff2) continue;
+            if (useCutoff && r2 > cutoff2) continue;
 
-        float r = sqrtf(r2);
-        if (r < 1e-6f) continue;
+            float r = sqrtf(r2);
+            if (r < 1e-6f) continue;
 
-        float R_lig = ligandRadii[templateIdx];
-        float R_lig_off = R_lig - DIELECTRIC_OFFSET;
-        float S_lig = R_lig_off * ligandScaleFactors[templateIdx];
+            float R_lig = ligandRadii[templateIdx];
+            float R_lig_off = R_lig - DIELECTRIC_OFFSET;
+            float S_lig = R_lig_off * ligandScaleFactors[templateIdx];
 
-        // HCT integral: how ligand atom screens receptor atom
-        float r_plus_Slig = r + S_lig;
-        if (R_rec_off >= r_plus_Slig) continue;
+            // HCT integral: how ligand atom screens receptor atom
+            float r_plus_Slig = r + S_lig;
+            if (R_rec_off >= r_plus_Slig) continue;
 
-        float r_minus_Slig = fabsf(r - S_lig);
-        float l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
-        float u_ij = 1.0f / r_plus_Slig;
+            float r_minus_Slig = fabsf(r - S_lig);
+            float l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
+            float u_ij = 1.0f / r_plus_Slig;
 
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float r_inv = 1.0f / r;
+            float l_ij2 = l_ij * l_ij;
+            float u_ij2 = u_ij * u_ij;
+            float r_inv = 1.0f / r;
 
-        float term = l_ij - u_ij +
-                     0.25f * r * (u_ij2 - l_ij2) +
-                     0.5f * r_inv * logf(u_ij / l_ij) +
-                     0.25f * S_lig * S_lig * r_inv * (l_ij2 - u_ij2);
+            float term = l_ij - u_ij +
+                         0.25f * r * (u_ij2 - l_ij2) +
+                         0.5f * r_inv * logf(u_ij / l_ij) +
+                         0.25f * S_lig * S_lig * r_inv * (l_ij2 - u_ij2);
 
-        if (R_rec_off < (S_lig - r)) {
-            term += 2.0f * (1.0f / R_rec_off - l_ij);
+            if (R_rec_off < (S_lig - r)) {
+                term += 2.0f * (1.0f / R_rec_off - l_ij);
+            }
+
+            hct += term;
         }
 
-        hct += term;
+        ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] = hct;
     }
-
-    ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] = hct;
 }
 
 /**

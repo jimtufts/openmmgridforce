@@ -228,6 +228,14 @@ public:
     double getGroupEnergy(int groupIndex) const;
 
     /**
+     * Get energies for all particle groups in a single call.
+     * Only available after calling getState() with energy.
+     *
+     * @return vector of energies (kJ/mol), one per group
+     */
+    std::vector<double> getParticleGroupEnergies() const;
+
+    /**
      * Update the parameters in a Context to match those stored in this Force object.
      * This method provides an efficient way to update certain parameters without
      * recreating the Context.

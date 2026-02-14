@@ -395,18 +395,14 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
 
-    // Clear energy buffers
-    vector<float> zeros(numParticleGroups, 0.0f);
-    groupEnergies.upload(zeros);
-    groupLigandSelfEnergies.upload(zeros);
-    groupReceptorContributions.upload(zeros);
-    groupReceptorDesolvations.upload(zeros);
-    groupCrossTermEnergies.upload(zeros);
-
-    // Clear intermediate buffers
-    vector<float> zerosParticles(totalParticles, 0.0f);
-    hctReceptor.upload(zerosParticles);
-    hctLigand.upload(zerosParticles);
+    // Clear energy and intermediate buffers (async GPU clears — no CPU-GPU sync)
+    cu.clearBuffer(groupEnergies);
+    cu.clearBuffer(groupLigandSelfEnergies);
+    cu.clearBuffer(groupReceptorContributions);
+    cu.clearBuffer(groupReceptorDesolvations);
+    cu.clearBuffer(groupCrossTermEnergies);
+    cu.clearBuffer(hctReceptor);
+    cu.clearBuffer(hctLigand);
 
     // Get device pointers
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
@@ -715,24 +711,27 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         }
     }
 
-    // Download group energies
-    groupEnergies.download(groupEnergiesHost);
-    groupLigandSelfEnergies.download(groupLigandSelfEnergiesHost);
+    // Download group energies only when energy is needed to avoid sync barriers
+    if (includeEnergy) {
+        groupEnergies.download(groupEnergiesHost);
+        groupLigandSelfEnergies.download(groupLigandSelfEnergiesHost);
 
-    // For PAIRWISE mode, desolvation and cross-term were already added to groupEnergiesHost
-    // and downloaded above. Just download them here for accessors.
-    if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-        groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
-        groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
+        // For PAIRWISE mode, desolvation and cross-term were already added to groupEnergiesHost
+        // and downloaded above. Just download them here for accessors.
+        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
+            groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
+            groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
+        }
+
+        // Sum total energy
+        double totalEnergy = 0.0;
+        for (int g = 0; g < numParticleGroups; g++) {
+            totalEnergy += groupEnergiesHost[g];
+        }
+        return totalEnergy;
     }
 
-    // Sum total energy
-    double totalEnergy = 0.0;
-    for (int g = 0; g < numParticleGroups; g++) {
-        totalEnergy += groupEnergiesHost[g];
-    }
-
-    return totalEnergy;
+    return 0.0;
 }
 
 void CudaCalcIsolatedGBSAForceKernel::updateParametersInContext(ContextImpl& context,

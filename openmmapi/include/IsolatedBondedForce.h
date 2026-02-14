@@ -160,6 +160,14 @@ public:
 
     double getGroupEnergy(int groupIndex) const;
 
+    /**
+     * Get energies for all particle groups in a single call.
+     * Only available after calling getState() with energy.
+     *
+     * @return vector of energies (kJ/mol), one per group
+     */
+    std::vector<double> getParticleGroupEnergies() const;
+
     // ========== Parameter Updates ==========
 
     void updateParametersInContext(OpenMM::Context& context);

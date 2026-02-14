@@ -179,6 +179,10 @@ double IsolatedNonbondedForce::getGroupEnergy(int groupIndex) const {
     return m_groupEnergies[groupIndex];
 }
 
+std::vector<double> IsolatedNonbondedForce::getParticleGroupEnergies() const {
+    return m_groupEnergies;
+}
+
 void IsolatedNonbondedForce::updateParametersInContext(Context& context) {
     dynamic_cast<IsolatedNonbondedForceImpl&>(getImplInContext(context)).updateParametersInContext(getContextImpl(context));
 }

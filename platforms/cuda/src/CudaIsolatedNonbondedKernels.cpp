@@ -177,8 +177,9 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
         return 0.0;
     }
 
-    // Zero per-group energy buffer
-    cu.clearBuffer(groupEnergiesBuffer);
+    // Zero per-group energy buffer (only when energy is needed to avoid sync barriers)
+    if (includeEnergy)
+        cu.clearBuffer(groupEnergiesBuffer);
 
     // Total work items: numGroups * numPairs
     int totalWork = numParticleGroups * numPairs;
@@ -224,8 +225,9 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
     int numBlocks = (totalWork + blockSize - 1) / blockSize;
     cu.executeKernel(kernel, args, numBlocks * blockSize, blockSize);
 
-    // Download per-group energies
-    groupEnergiesBuffer.download(groupEnergiesHost);
+    // Download per-group energies (only when energy is needed to avoid sync barriers)
+    if (includeEnergy)
+        groupEnergiesBuffer.download(groupEnergiesHost);
 
     return 0.0;  // Energy is accumulated in the energy buffer
 }

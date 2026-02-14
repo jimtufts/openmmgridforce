@@ -211,6 +211,10 @@ double IsolatedBondedForce::getGroupEnergy(int groupIndex) const {
     return m_groupEnergies[groupIndex];
 }
 
+std::vector<double> IsolatedBondedForce::getParticleGroupEnergies() const {
+    return m_groupEnergies;
+}
+
 // ========== Context Interface ==========
 
 void IsolatedBondedForce::updateParametersInContext(Context& context) {
