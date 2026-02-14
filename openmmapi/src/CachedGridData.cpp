@@ -2,6 +2,7 @@
 #include "openmm/OpenMMException.h"
 #include <cmath>
 #include <map>
+#include <list>
 
 using namespace OpenMM;
 using namespace std;
@@ -19,11 +20,14 @@ CachedGridData::CachedGridData(const std::vector<double>& original_values,
       m_spacing(spacing),
       m_origin({origin_x, origin_y, origin_z}),
       m_current_mode(InvPowerMode::NONE),
-      m_current_inv_power(0.0) {
+      m_current_inv_power(0.0),
+      m_isTransformed(false) {
 
-    // Initialize current data as copies of original (untransformed)
-    m_current_values = std::make_shared<std::vector<double>>(original_values);
-    m_current_derivatives = std::make_shared<std::vector<double>>(original_derivs);
+    // Lazy init: alias current pointers to originals (no copy)
+    m_current_values = std::shared_ptr<std::vector<double>>(
+        &m_original_values, [](std::vector<double>*){});  // no-op deleter
+    m_current_derivatives = std::shared_ptr<std::vector<double>>(
+        &m_original_derivatives, [](std::vector<double>*){});
 }
 
 std::shared_ptr<std::vector<double>> CachedGridData::getCurrentValues() const {
@@ -45,6 +49,14 @@ const std::vector<double>& CachedGridData::getOriginalDerivatives() const {
 void CachedGridData::getCurrentTransformation(InvPowerMode& mode, double& inv_power) const {
     mode = m_current_mode;
     inv_power = m_current_inv_power;
+}
+
+size_t CachedGridData::getMemorySize() const {
+    size_t bytes = sizeof(double) * (m_original_values.size() + m_original_derivatives.size());
+    if (m_isTransformed) {
+        bytes += sizeof(double) * (m_current_values->size() + m_current_derivatives->size());
+    }
+    return bytes;
 }
 
 void CachedGridData::transformValues(std::vector<double>& values, double inv_power) const {
@@ -88,24 +100,36 @@ void CachedGridData::applyTransformation(InvPowerMode mode, double inv_power, in
         return;
     }
 
-    // Step 1: Revert to original (untransformed) state
-    *m_current_values = m_original_values;
-    if (!m_original_derivatives.empty()) {
-        *m_current_derivatives = m_original_derivatives;
-    }
-
-    // Step 2: Apply new transformation if needed
-    if (mode == InvPowerMode::RUNTIME || mode == InvPowerMode::STORED) {
-        // Note: For STORED mode, we assume the grid file already has G^(1/n).
-        // For RUNTIME mode, we transform here.
-        if (mode == InvPowerMode::RUNTIME) {
-            transformValues(*m_current_values, inv_power);
+    if (mode == InvPowerMode::RUNTIME) {
+        // RUNTIME mode needs a real separate copy to transform in-place
+        if (!m_isTransformed) {
+            // Allocate separate copies (currently aliasing originals)
+            m_current_values = std::make_shared<std::vector<double>>(m_original_values);
+            if (!m_original_derivatives.empty()) {
+                m_current_derivatives = std::make_shared<std::vector<double>>(m_original_derivatives);
+            }
+            m_isTransformed = true;
+        } else {
+            // Already have separate copies; revert to original data first
+            *m_current_values = m_original_values;
+            if (!m_original_derivatives.empty()) {
+                *m_current_derivatives = m_original_derivatives;
+            }
         }
-        // For STORED mode, the grid is already transformed, so we don't transform here.
-        // The original values ARE the transformed values.
+        transformValues(*m_current_values, inv_power);
+    } else {
+        // NONE or STORED mode: current == original, switch back to aliasing
+        if (m_isTransformed) {
+            // Free the separate allocations and alias back to originals
+            m_current_values = std::shared_ptr<std::vector<double>>(
+                &m_original_values, [](std::vector<double>*){});
+            m_current_derivatives = std::shared_ptr<std::vector<double>>(
+                &m_original_derivatives, [](std::vector<double>*){});
+            m_isTransformed = false;
+        }
     }
 
-    // Step 3: Update state
+    // Update state
     m_current_mode = mode;
     m_current_inv_power = inv_power;
 }
@@ -117,6 +141,26 @@ std::map<GridCacheKey, std::shared_ptr<CachedGridData>>& GridDataCache::getCache
     return cache;
 }
 
+size_t& GridDataCache::getMaxMemoryRef() {
+    static size_t maxMemory = 0;  // 0 = unlimited
+    return maxMemory;
+}
+
+size_t& GridDataCache::getCurrentMemoryRef() {
+    static size_t currentMemory = 0;
+    return currentMemory;
+}
+
+std::list<GridCacheKey>& GridDataCache::getLRUList() {
+    static std::list<GridCacheKey> lruList;
+    return lruList;
+}
+
+std::map<GridCacheKey, std::list<GridCacheKey>::iterator>& GridDataCache::getLRUMap() {
+    static std::map<GridCacheKey, std::list<GridCacheKey>::iterator> lruMap;
+    return lruMap;
+}
+
 std::shared_ptr<CachedGridData> GridDataCache::get(const void* systemPtr,
                                                      const std::string& filename,
                                                      InvPowerMode mode,
@@ -125,6 +169,15 @@ std::shared_ptr<CachedGridData> GridDataCache::get(const void* systemPtr,
     auto& cache = getCache();
     auto it = cache.find(key);
     if (it != cache.end()) {
+        // Bump to front of LRU list (most recently used)
+        auto& lruList = getLRUList();
+        auto& lruMap = getLRUMap();
+        auto lruIt = lruMap.find(key);
+        if (lruIt != lruMap.end()) {
+            lruList.erase(lruIt->second);
+            lruList.push_front(key);
+            lruIt->second = lruList.begin();
+        }
         return it->second;
     }
     return nullptr;
@@ -136,13 +189,69 @@ void GridDataCache::put(const void* systemPtr,
                          double inv_power,
                          std::shared_ptr<CachedGridData> data) {
     GridCacheKey key{systemPtr, filename, mode, inv_power};
-    getCache()[key] = data;
+    auto& cache = getCache();
+    auto& lruList = getLRUList();
+    auto& lruMap = getLRUMap();
+    auto& currentMemory = getCurrentMemoryRef();
+
+    // If key already exists, remove old entry from tracking
+    auto existingIt = cache.find(key);
+    if (existingIt != cache.end()) {
+        currentMemory -= existingIt->second->getMemorySize();
+        auto lruIt = lruMap.find(key);
+        if (lruIt != lruMap.end()) {
+            lruList.erase(lruIt->second);
+            lruMap.erase(lruIt);
+        }
+    }
+
+    // Insert new entry
+    cache[key] = data;
+    currentMemory += data->getMemorySize();
+    lruList.push_front(key);
+    lruMap[key] = lruList.begin();
+
+    // Evict if over memory cap
+    evictIfNeeded();
+}
+
+void GridDataCache::evictIfNeeded() {
+    size_t maxMem = getMaxMemoryRef();
+    if (maxMem == 0) return;  // unlimited
+
+    auto& cache = getCache();
+    auto& lruList = getLRUList();
+    auto& lruMap = getLRUMap();
+    auto& currentMemory = getCurrentMemoryRef();
+
+    // Evict from back of LRU list (least recently used)
+    while (currentMemory > maxMem && !lruList.empty()) {
+        GridCacheKey evictKey = lruList.back();
+        lruList.pop_back();
+
+        auto cacheIt = cache.find(evictKey);
+        if (cacheIt != cache.end()) {
+            currentMemory -= cacheIt->second->getMemorySize();
+            cache.erase(cacheIt);
+        }
+        lruMap.erase(evictKey);
+    }
 }
 
 void GridDataCache::clearSystem(const void* systemPtr) {
     auto& cache = getCache();
+    auto& lruList = getLRUList();
+    auto& lruMap = getLRUMap();
+    auto& currentMemory = getCurrentMemoryRef();
+
     for (auto it = cache.begin(); it != cache.end(); ) {
         if (it->first.systemPtr == systemPtr) {
+            currentMemory -= it->second->getMemorySize();
+            auto lruIt = lruMap.find(it->first);
+            if (lruIt != lruMap.end()) {
+                lruList.erase(lruIt->second);
+                lruMap.erase(lruIt);
+            }
             it = cache.erase(it);
         } else {
             ++it;
@@ -152,6 +261,24 @@ void GridDataCache::clearSystem(const void* systemPtr) {
 
 void GridDataCache::clearAll() {
     getCache().clear();
+    getLRUList().clear();
+    getLRUMap().clear();
+    getCurrentMemoryRef() = 0;
+}
+
+void GridDataCache::setMaxHostMemory(size_t bytes) {
+    getMaxMemoryRef() = bytes;
+    if (bytes > 0) {
+        evictIfNeeded();
+    }
+}
+
+size_t GridDataCache::getHostMemoryUsage() {
+    return getCurrentMemoryRef();
+}
+
+size_t GridDataCache::getMaxHostMemory() {
+    return getMaxMemoryRef();
 }
 
 }  // namespace GridForcePlugin

@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <map>
+#include <list>
 #include "GridForceTypes.h"
 
 namespace GridForcePlugin {
@@ -113,6 +114,12 @@ public:
         return !m_original_derivatives.empty();
     }
 
+    /**
+     * Get the memory usage of this cached grid data in bytes.
+     * Includes original data plus any separate transformed copies.
+     */
+    size_t getMemorySize() const;
+
 private:
     // Original untransformed data (immutable)
     std::vector<double> m_original_values;
@@ -130,6 +137,7 @@ private:
     // Current transformation state
     InvPowerMode m_current_mode;
     double m_current_inv_power;
+    bool m_isTransformed;  // true if m_current_* are separate allocations (not aliasing originals)
 
     // Helper: Apply inv_power transformation to values
     void transformValues(std::vector<double>& values, double inv_power) const;
@@ -203,8 +211,32 @@ public:
      */
     static void clearAll();
 
+    /**
+     * Set maximum host memory for cached grids (bytes).
+     * When exceeded, least-recently-used entries are evicted.
+     * Set to 0 for unlimited (default).
+     */
+    static void setMaxHostMemory(size_t bytes);
+
+    /**
+     * Get current host memory usage of all cached grids (bytes).
+     */
+    static size_t getHostMemoryUsage();
+
+    /**
+     * Get the configured maximum host memory (bytes). 0 = unlimited.
+     */
+    static size_t getMaxHostMemory();
+
 private:
     static std::map<GridCacheKey, std::shared_ptr<CachedGridData>>& getCache();
+    static size_t& getMaxMemoryRef();
+    static size_t& getCurrentMemoryRef();
+    static std::list<GridCacheKey>& getLRUList();
+    static std::map<GridCacheKey, std::list<GridCacheKey>::iterator>& getLRUMap();
+
+    // Evict LRU entries until memory is under the cap
+    static void evictIfNeeded();
 };
 
 }  // namespace GridForcePlugin
