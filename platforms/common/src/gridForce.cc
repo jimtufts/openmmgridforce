@@ -23,7 +23,8 @@ KERNEL void computeGridForce(GLOBAL const real4* RESTRICT posq,
                               const int interpolationMethod,
                               const float outOfBoundsK,
                               GLOBAL mixed* RESTRICT energyBuffer,
-                              const float globalScalingFactor) {
+                              const float globalScalingFactor,
+                              const float runtimeCap) {
     // Get thread index
     const unsigned int index = GLOBAL_ID;
     if (index >= NUM_ATOMS)
@@ -185,6 +186,16 @@ KERNEL void computeGridForce(GLOBAL const real4* RESTRICT posq,
             dx *= powerFactor;
             dy *= powerFactor;
             dz *= powerFactor;
+        }
+
+        // Apply runtime tanh cap (preserves derivatives for higher-order interpolation)
+        if (runtimeCap > 0.0f) {
+            float t = tanh(interpolated / runtimeCap);
+            float sech2 = 1.0f - t * t;
+            interpolated = runtimeCap * t;
+            dx *= sech2;
+            dy *= sech2;
+            dz *= sech2;
         }
 
         threadEnergy = scalingFactor * interpolated;

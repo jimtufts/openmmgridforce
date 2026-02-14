@@ -535,6 +535,7 @@ public:
 
     // Energy reporting
     double getGroupEnergy(int groupIndex) const;
+    std::vector<double> getParticleGroupEnergies() const;
     double getGroupLigandSelfEnergy(int groupIndex) const;
     double getGroupReceptorContribution(int groupIndex) const;
     double getGroupReceptorDesolvation(int groupIndex) const;
@@ -611,6 +612,8 @@ public:
     double getInvPower() const;
     void setGridCap(double uMax);
     double getGridCap() const;
+    void setRuntimeCap(double cap);
+    double getRuntimeCap() const;
     void setOutOfBoundsRestraint(double k);
     double getOutOfBoundsRestraint() const;
     void setInterpolationMethod(int method);
@@ -664,8 +667,26 @@ public:
     std::vector<double> getParticleGroupVelocitiesFlat(OpenMM::Context& context, int groupIndex) const;
 
     std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
+    std::vector<double> getParticleGroupUnscaledEnergies(OpenMM::Context& context) const;
     std::vector<double> getParticleAtomEnergies(OpenMM::Context& context) const;
     std::vector<int> getParticleOutOfBoundsFlags(OpenMM::Context& context) const;
+
+    // Batch HMC operations
+    void drawAndSetGroupVelocities(OpenMM::Context& context,
+                                    const std::vector<double>& temperatures,
+                                    const std::vector<double>& masses,
+                                    unsigned int seed = 0) const;
+    std::vector<double> computeGroupKineticEnergies(OpenMM::Context& context,
+                                                     const std::vector<double>& masses) const;
+    std::vector<int> acceptRejectGroups(OpenMM::Context& context,
+                                         const std::vector<double>& positionsBackup,
+                                         const std::vector<double>& pe_old,
+                                         const std::vector<double>& pe_new,
+                                         const std::vector<double>& ke_old,
+                                         const std::vector<double>& ke_new,
+                                         const std::vector<double>& temperatures,
+                                         unsigned int seed = 0) const;
+    void setAllParticleGroupScalingFactors(const std::vector<double>& factors);
 
     // Hessian (second derivative) computation for normal modes analysis
     void computeHessian(OpenMM::Context& context) const;
@@ -928,6 +949,7 @@ public:
 
     // Per-group energy
     double getGroupEnergy(int groupIndex) const;
+    std::vector<double> getParticleGroupEnergies() const;
 
     void updateParametersInContext(Context &context);
 
@@ -1048,6 +1070,7 @@ public:
 
     // Per-group energy
     double getGroupEnergy(int groupIndex) const;
+    std::vector<double> getParticleGroupEnergies() const;
 
     void updateParametersInContext(Context &context);
 
@@ -1519,11 +1542,48 @@ def clearGridCache():
     memory accumulation from cached grid data.
     """
     _gridforceplugin.clearGridCache()
+
+def setGridCacheMaxHostMemory(bytes):
+    """
+    Set the maximum host memory for cached grid data.
+
+    When the cache exceeds this limit, least-recently-used grid entries
+    are evicted. Set to 0 for unlimited (default).
+
+    Args:
+        bytes: Maximum memory in bytes. E.g., 16 * 1024**3 for 16 GB.
+    """
+    _gridforceplugin.setGridCacheMaxHostMemory(bytes)
+
+def getGridCacheHostMemoryUsage():
+    """
+    Get the current host memory usage of the grid data cache in bytes.
+    """
+    return _gridforceplugin.getGridCacheHostMemoryUsage()
+
+def getGridCacheMaxHostMemory():
+    """
+    Get the configured maximum host memory for the grid cache in bytes.
+    Returns 0 if unlimited.
+    """
+    return _gridforceplugin.getGridCacheMaxHostMemory()
 %}
 
-// Expose cache clearing function
+// Expose cache clearing and memory management functions
 %inline %{
 void clearGridCache() {
     GridForcePlugin::GridDataCache::clearAll();
+}
+
+void setGridCacheMaxHostMemory(size_t bytes) {
+    GridForcePlugin::GridDataCache::setMaxHostMemory(bytes);
+}
+
+size_t getGridCacheHostMemoryUsage() {
+    return GridForcePlugin::GridDataCache::getHostMemoryUsage();
+}
+
+size_t getGridCacheMaxHostMemory() {
+    return GridForcePlugin::GridDataCache::getMaxHostMemory();
 }
 %}

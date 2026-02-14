@@ -38,9 +38,14 @@
 #include "openmm/Platform.h"
 #include "openmm/Vec3.h"
 #include <vector>
+#include <map>
 
 namespace OpenMM {
     class NonbondedForce;
+}
+
+namespace GridForcePlugin {
+    class IsolatedNonbondedForce;
 }
 
 namespace GridForcePlugin {
@@ -80,24 +85,27 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
                                 const GridForce &force);
 
     std::vector<double> getParticleGroupEnergies();
+    std::vector<double> getParticleGroupUnscaledEnergies();
     std::vector<double> getParticleAtomEnergies();
     std::vector<int> getParticleOutOfBoundsFlags();
 
    private:
     /**
-     * Generate grid from receptor atoms and NonbondedForce parameters.
+     * Generate grid from receptor atoms and NonbondedForce/IsolatedNonbondedForce parameters.
      *
-     * @param system             the System containing the force
-     * @param nonbondedForce     the NonbondedForce to extract parameters from
-     * @param gridType           type of grid ("charge", "ljr", "lja")
-     * @param receptorAtoms      indices of receptor atoms
-     * @param receptorPositions  positions of receptor atoms (nm)
-     * @param originX            grid origin x-coordinate (nm)
-     * @param originY            grid origin y-coordinate (nm)
-     * @param originZ            grid origin z-coordinate (nm)
+     * @param system                    the System containing the force
+     * @param nonbondedForce            the NonbondedForce to extract parameters from (may be nullptr)
+     * @param isolatedNonbondedForce    the IsolatedNonbondedForce to extract parameters from (may be nullptr)
+     * @param gridType                  type of grid ("charge", "ljr", "lja")
+     * @param receptorAtoms             indices of receptor atoms
+     * @param receptorPositions         positions of receptor atoms (nm)
+     * @param originX                   grid origin x-coordinate (nm)
+     * @param originY                   grid origin y-coordinate (nm)
+     * @param originZ                   grid origin z-coordinate (nm)
      */
     void generateGrid(const OpenMM::System& system,
                      const OpenMM::NonbondedForce* nonbondedForce,
+                     const IsolatedNonbondedForce* isolatedNonbondedForce,
                      const std::string& gridType,
                      const std::vector<int>& receptorAtoms,
                      const std::vector<OpenMM::Vec3>& receptorPositions,
@@ -109,9 +117,14 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> g_scaling_factors;
     double g_globalScalingFactor;       // Multiplies all per-particle scaling factors (default 1.0)
     std::vector<double> g_groupScalingFactors;  // Per-group alchemical scaling factors
+    std::vector<std::vector<int>> g_groupParticleIndices;  // Per-group particle indices
+    std::map<int, int> g_atomToGroup;   // Map from particle index to group index
+    std::vector<double> g_groupEnergies;  // Per-group energies from last execute()
+    std::vector<double> g_groupUnscaledEnergies;  // Per-group unscaled energies (no group scaling)
     std::vector<int> g_ligand_atoms;    // Particle indices for ligand atoms (corresponds to scaling factors)
     double g_inv_power;
     double g_gridCap;
+    double g_runtimeCap;
     double g_outOfBoundsRestraint;
     int g_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     double g_origin_x, g_origin_y, g_origin_z;

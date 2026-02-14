@@ -120,12 +120,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 //               << counts[0] << ", " << counts[1] << ", " << counts[2] << "] = "
 //               << (counts[0] * counts[1] * counts[2]) << " points" << std::endl;
 
-    // Store grid cap, invPower, invPowerMode, and arcsinhScale BEFORE generateGrid() is called
+    // Store grid cap, invPower, invPowerMode, arcsinhScale, and runtimeCap BEFORE generateGrid() is called
     gridCap = (float)grid_cap;
     invPower = (float)inv_power;
     invPowerMode = static_cast<int>(force.getInvPowerMode());
     arcsinhScale = (float)force.getArcsinhScale();
     globalScalingFactor = (float)force.getGlobalScalingFactor();
+    runtimeCap = (float)force.getRuntimeCap();
     interpolationMethod = interp_method;
 
     // Store ligand atoms and derivative computation flag
@@ -175,13 +176,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         }
 
         // Extract scaling factors based on property
+        int numTemplateAtoms = isolatedNbForce ? isolatedNbForce->getNumAtoms() : numAtoms;
         scaling_factors.resize(numAtoms);
         for (int i = 0; i < numAtoms; i++) {
             double charge, sigma, epsilon;
             if (nonbondedForce != nullptr) {
                 nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
             } else {
-                isolatedNbForce->getAtomParameters(i, charge, sigma, epsilon);
+                isolatedNbForce->getAtomParameters(i % numTemplateAtoms, charge, sigma, epsilon);
             }
 
 #if DEBUG_GRIDFORCE
@@ -274,8 +276,9 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         particleToGroupMap.initialize<int>(cu, numAtoms, "particleToGroupMap");
         particleToGroupMap.upload(particleToGroupMapHost);
 
-        // Initialize per-group energy buffer
+        // Initialize per-group energy buffers
         groupEnergyBuffer.initialize<float>(cu, numParticleGroups, "groupEnergyBuffer");
+        groupUnscaledEnergyBuffer.initialize<float>(cu, numParticleGroups, "groupUnscaledEnergyBuffer");
 
         // Initialize per-group scaling factors buffer
         std::vector<float> groupScalings(numParticleGroups, 1.0f);
@@ -826,6 +829,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     defines["DEBUG_GRIDFORCE"] = "1";
 #endif
     CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+    kernelModule = module;  // Store for deferred kernel extraction (coverage check)
     kernel = cu.getKernel(module, "computeGridForce");
     addGroupEnergiesKernel = cu.getKernel(module, "addGroupEnergiesToTotal");
 
@@ -1004,32 +1008,35 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     // Clear group energy buffer if using particle groups
     CUdeviceptr particleToGroupMapPtr = 0;
     CUdeviceptr groupEnergyBufferPtr = 0;
+    CUdeviceptr groupUnscaledEnergyBufferPtr = 0;
     CUdeviceptr groupScalingFactorsPtr = 0;
     CUdeviceptr atomEnergyBufferPtr = 0;
     CUdeviceptr outOfBoundsBufferPtr = 0;
     if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
-        // Zero out the group energy buffer
-        vector<float> zeros(numParticleGroups, 0.0f);
-        groupEnergyBuffer.upload(zeros);
+        // Zero group energy buffers only when energy is needed (async GPU clear
+        // instead of synchronous host upload to avoid pipeline stalls during integration)
+        if (includeEnergy) {
+            cu.clearBuffer(groupEnergyBuffer);
+            if (groupUnscaledEnergyBuffer.isInitialized())
+                cu.clearBuffer(groupUnscaledEnergyBuffer);
+        }
+        // Always set device pointers — needed for force computation kernels
         particleToGroupMapPtr = particleToGroupMap.getDevicePointer();
         groupEnergyBufferPtr = groupEnergyBuffer.getDevicePointer();
-        if (groupScalingFactorsBuffer.isInitialized()) {
+        if (groupUnscaledEnergyBuffer.isInitialized())
+            groupUnscaledEnergyBufferPtr = groupUnscaledEnergyBuffer.getDevicePointer();
+        if (groupScalingFactorsBuffer.isInitialized())
             groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
-        }
 
-        // Set up per-atom energy buffer if initialized
+        // Set up per-atom energy/out-of-bounds buffers
         if (atomEnergyBuffer.isInitialized()) {
-            // Zero out the atom energy buffer before kernel execution
-            vector<float> atomZeros(totalGroupParticles, 0.0f);
-            atomEnergyBuffer.upload(atomZeros);
+            if (includeEnergy)
+                cu.clearBuffer(atomEnergyBuffer);
             atomEnergyBufferPtr = atomEnergyBuffer.getDevicePointer();
         }
-
-        // Set up per-atom out-of-bounds buffer if initialized
         if (outOfBoundsBuffer.isInitialized()) {
-            // Zero out the buffer before kernel execution
-            vector<int> oobZeros(totalGroupParticles, 0);
-            outOfBoundsBuffer.upload(oobZeros);
+            if (includeEnergy)
+                cu.clearBuffer(outOfBoundsBuffer);
             outOfBoundsBufferPtr = outOfBoundsBuffer.getDevicePointer();
         }
     }
@@ -1055,12 +1062,14 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &particleIndicesPtr,
         &particleToGroupMapPtr,
         &groupEnergyBufferPtr,
+        &groupUnscaledEnergyBufferPtr,
         &atomEnergyBufferPtr,
         &outOfBoundsBufferPtr,
         &numParticleGroups,
         &arcsinhScale,
         &globalScalingFactor,
-        &groupScalingFactorsPtr
+        &groupScalingFactorsPtr,
+        &runtimeCap
     };
 
 #if DEBUG_GRIDFORCE
@@ -1071,59 +1080,81 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
 #endif
 
     if (tiledMode && tileManager) {
-        // Tiled execution path: determine required tiles and launch tiled kernel
+        // Tiled execution path with GPU-side tile coverage check.
+        // Instead of downloading all positions to CPU every step to determine
+        // required tiles, we launch a tiny kernel that checks if all particles
+        // are within currently-loaded tiles. Only when a particle escapes do we
+        // fall back to the full CPU-side prepareTiles() path.
 
-        // Get particle positions from GPU
-        int totalParticles = cu.getNumAtoms();
-        std::vector<float4> posqHost(totalParticles);
-        cu.getPosq().download(posqHost);
+        bool needsCpuRetile = false;
 
-        // Extract positions for tile determination
-        std::vector<float> positions;
-        if (totalGroupParticles > 0) {
-            // Multi-ligand mode: use flattened group particle indices
-            std::vector<int> groupIndicesHost(totalGroupParticles);
-            allGroupParticleIndices.download(groupIndicesHost);
-            positions.reserve(totalGroupParticles * 3);
-            for (int i = 0; i < totalGroupParticles; i++) {
-                int idx = groupIndicesHost[i];
-                positions.push_back(posqHost[idx].x);
-                positions.push_back(posqHost[idx].y);
-                positions.push_back(posqHost[idx].z);
-            }
-        } else if (!particles.empty()) {
-            // Filtered particles mode
-            positions.reserve(particles.size() * 3);
-            for (int idx : particles) {
-                positions.push_back(posqHost[idx].x);
-                positions.push_back(posqHost[idx].y);
-                positions.push_back(posqHost[idx].z);
-            }
+        if (!tileManager->isCoverageCheckInitialized()) {
+            // First call: initialize coverage check buffers and kernel
+            tileManager->initCoverageCheck(kernelModule);
+            needsCpuRetile = true;  // Must do initial tile loading
         } else {
-            // All particles mode
-            positions.reserve(numAtoms * 3);
-            for (int i = 0; i < numAtoms; i++) {
-                positions.push_back(posqHost[i].x);
-                positions.push_back(posqHost[i].y);
-                positions.push_back(posqHost[i].z);
+            // GPU-side coverage check: one tiny kernel + one 4-byte readback
+            int coverageNumParticles = (totalGroupParticles > 0) ? totalGroupParticles : kernelNumAtoms;
+            CUdeviceptr coverageIndicesPtr = (totalGroupParticles > 0)
+                ? allGroupParticleIndices.getDevicePointer() : 0;
+
+            bool allCovered = tileManager->checkCoverageOnGPU(
+                posqPtr, coverageIndicesPtr, coverageNumParticles, paddedNumAtoms);
+
+            if (!allCovered) {
+                needsCpuRetile = true;
             }
         }
 
-        // Prepare tiles for force computation
-        if (!tileManager->prepareTiles(positions)) {
-            throw OpenMMException("GridForce: Failed to prepare tiles for force computation");
+        if (needsCpuRetile) {
+            // CPU fallback: download positions and run prepareTiles()
+            int totalParticles = cu.getNumAtoms();
+            std::vector<float4> posqHost(totalParticles);
+            cu.getPosq().download(posqHost);
+
+            std::vector<float> positions;
+            if (totalGroupParticles > 0) {
+                std::vector<int> groupIndicesHost(totalGroupParticles);
+                allGroupParticleIndices.download(groupIndicesHost);
+                positions.reserve(totalGroupParticles * 3);
+                for (int i = 0; i < totalGroupParticles; i++) {
+                    int idx = groupIndicesHost[i];
+                    positions.push_back(posqHost[idx].x);
+                    positions.push_back(posqHost[idx].y);
+                    positions.push_back(posqHost[idx].z);
+                }
+            } else if (!particles.empty()) {
+                positions.reserve(particles.size() * 3);
+                for (int idx : particles) {
+                    positions.push_back(posqHost[idx].x);
+                    positions.push_back(posqHost[idx].y);
+                    positions.push_back(posqHost[idx].z);
+                }
+            } else {
+                positions.reserve(numAtoms * 3);
+                for (int i = 0; i < numAtoms; i++) {
+                    positions.push_back(posqHost[i].x);
+                    positions.push_back(posqHost[i].y);
+                    positions.push_back(posqHost[i].z);
+                }
+            }
+
+            if (!tileManager->prepareTiles(positions)) {
+                throw OpenMMException("GridForce: Failed to prepare tiles for force computation");
+            }
+
+            // Update GPU occupancy bitmap to reflect newly loaded tiles
+            tileManager->updateOccupancyBitmap();
         }
 
         // Get tile lookup table (cast away const for CudaArray::getDevicePointer which is non-const)
         TileLookupTable& lookup = const_cast<TileLookupTable&>(tileManager->getLookupTable());
 
-        // Launch tiled kernel
         CUdeviceptr tileOffsetsPtr = lookup.tileOffsets.getDevicePointer();
         CUdeviceptr tileValuePtrsPtr = lookup.tileValuePtrs.getDevicePointer();
         CUdeviceptr tileDerivPtrsPtr = lookup.tileDerivPtrs.isInitialized() ? lookup.tileDerivPtrs.getDevicePointer() : 0;
         int numTiles = lookup.numLoadedTiles;
 
-        // Get tile configuration from TileManager
         const TileConfig& tileConfig = tileManager->getConfig();
         int tileSizeParam = tileConfig.tileSize;
         int tileOverlapParam = tileConfig.overlap;
@@ -1147,6 +1178,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &particleIndicesPtr,
             &particleToGroupMapPtr,
             &groupEnergyBufferPtr,
+            &groupUnscaledEnergyBufferPtr,
             &atomEnergyBufferPtr,
             &outOfBoundsBufferPtr,
             &numParticleGroups,
@@ -1161,9 +1193,6 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &tileOverlapParam
         };
 
-        // Use larger block size to avoid OpenMM's thread block limit
-        // (OpenMM caps gridSize at numThreadBlocks, which with default ThreadBlockSize=64
-        // limits total threads to ~30,720 on typical GPUs)
         cu.executeKernel(tiledKernel, tiledArgs, kernelNumAtoms, 256);
     } else {
         // Standard (non-tiled) execution path
@@ -1175,12 +1204,19 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     cudaDeviceSynchronize();  // Ensure kernel printf output is flushed
 #endif
 
-    // When particle groups are used, the kernel accumulates energy in groupEnergyBuffer
-    // but the Context needs the total in the main energyBuffer. Add group energies to total.
-    if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
+    // When particle groups are used and energy is requested, download group energies
+    // and add them to the main energyBuffer. Skipped during force-only integration
+    // steps to avoid GPU pipeline stalls from synchronous downloads.
+    if (includeEnergy && numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
         // Download and save group energies (buffer will be zeroed on next execute)
         lastGroupEnergies.resize(numParticleGroups);
         groupEnergyBuffer.download(lastGroupEnergies);
+
+        // Download unscaled group energies
+        if (groupUnscaledEnergyBuffer.isInitialized()) {
+            lastGroupUnscaledEnergies.resize(numParticleGroups);
+            groupUnscaledEnergyBuffer.download(lastGroupUnscaledEnergies);
+        }
 
         // Download per-atom energies if buffer is initialized
         if (atomEnergyBuffer.isInitialized()) {
@@ -1238,6 +1274,7 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
     invPowerMode = inv_power_mode;
     arcsinhScale = (float)force.getArcsinhScale();
     globalScalingFactor = (float)force.getGlobalScalingFactor();
+    runtimeCap = (float)force.getRuntimeCap();
     interpolationMethod = interp_method;
 
     // Update per-group scaling factors if groups exist
@@ -1259,6 +1296,19 @@ vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {
         groupEnergies.resize(numParticleGroups);
         for (int i = 0; i < numParticleGroups; i++) {
             groupEnergies[i] = (double)lastGroupEnergies[i];
+        }
+    }
+
+    return groupEnergies;
+}
+
+vector<double> CudaCalcGridForceKernel::getParticleGroupUnscaledEnergies() {
+    vector<double> groupEnergies;
+
+    if (numParticleGroups > 0 && !lastGroupUnscaledEnergies.empty()) {
+        groupEnergies.resize(numParticleGroups);
+        for (int i = 0; i < numParticleGroups; i++) {
+            groupEnergies[i] = (double)lastGroupUnscaledEnergies[i];
         }
     }
 

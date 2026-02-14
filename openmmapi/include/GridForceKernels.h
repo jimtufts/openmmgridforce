@@ -85,6 +85,14 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
      */
     virtual std::vector<double> getParticleGroupEnergies() = 0;
     /**
+     * Get per-particle-group unscaled energies (no group scaling applied).
+     * Tracks globalScale * particleScale * interpolated (omitting groupScale).
+     * This allows extracting unscaled grid energies without re-evaluation.
+     *
+     * @return vector of unscaled energies, one per particle group (empty if no groups)
+     */
+    virtual std::vector<double> getParticleGroupUnscaledEnergies() = 0;
+    /**
      * Get per-atom energies for particles in groups.
      *
      * @return vector of energies, one per particle across all groups

@@ -34,12 +34,14 @@ extern "C" __global__ void computeGridForce(
     const int* __restrict__ particleIndices,  // Filtered particle indices (null = all particles)
     const int* __restrict__ particleToGroupMap,  // Map particle index to group index (null = no groups)
     float* __restrict__ groupEnergyBuffer,  // Per-group energy buffer (null = no groups)
+    float* __restrict__ groupUnscaledEnergyBuffer,  // Per-group unscaled energy (no group scaling, null = don't store)
     float* __restrict__ atomEnergyBuffer,   // Per-atom energy buffer (null = don't store)
     int* __restrict__ outOfBoundsBuffer,    // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups,  // Number of particle groups
     const float arcsinhScale,  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
     const float globalScalingFactor,  // Multiplies all per-particle scaling factors (for alchemical scaling)
-    const float* __restrict__ groupScalingFactors) {  // Per-group alchemical scaling factors (null = no per-group scaling)
+    const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling factors (null = no per-group scaling)
+    const float runtimeCap) {  // Bspline overshoot correction: re-apply tanh cap after interpolation (0=disabled)
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -60,6 +62,7 @@ extern "C" __global__ void computeGridForce(
         }
     }
     float scalingFactor = globalScalingFactor * groupScale * scalingFactors[particleIndex];
+    float unscaledScaling = globalScalingFactor * scalingFactors[particleIndex];  // No group scaling
 
     // Transform position to grid coordinates (relative to origin)
     float3 pos;
@@ -70,6 +73,7 @@ extern "C" __global__ void computeGridForce(
     // Initialize force to zero
     float3 atomForce = make_float3(0.0f, 0.0f, 0.0f);
     float threadEnergy = 0.0f;
+    float threadUnscaledEnergy = 0.0f;
 
     // Calculate grid boundaries
     float3 gridCorner;
@@ -82,7 +86,9 @@ extern "C" __global__ void computeGridForce(
                     pos.y >= 0.0f && pos.y <= gridCorner.y &&
                     pos.z >= 0.0f && pos.z <= gridCorner.z);
 
-    if (isInside && scalingFactor != 0.0f) {
+    // Enter interpolation if scaled OR unscaled energy is needed
+    bool needUnscaled = (groupUnscaledEnergyBuffer != nullptr && unscaledScaling != 0.0f);
+    if (isInside && (scalingFactor != 0.0f || needUnscaled)) {
         // =====================================================================
         // Fast path: Use shared GridInterpolation library when no inv_power transformation
         // =====================================================================
@@ -96,22 +102,36 @@ extern "C" __global__ void computeGridForce(
                 interpolationMethod, true, true);
 
             if (result.isInside) {
+                float val = result.value;
+                float gx = result.gradient.x;
+                float gy = result.gradient.y;
+                float gz = result.gradient.z;
+
                 if (arcsinhScale > 0.0f) {
                     // Arcsinh inverse: V = scale * sinh(g), dV/dr = scale * cosh(g) * dg/dr
-                    float g = result.value;
-                    float sinhG = sinhf(g);
-                    float coshG = coshf(g);
-                    threadEnergy = scalingFactor * arcsinhScale * sinhG;
+                    float sinhG = sinhf(val);
+                    float coshG = coshf(val);
+                    val = arcsinhScale * sinhG;
                     float chainFactor = arcsinhScale * coshG;
-                    atomForce.x = -scalingFactor * chainFactor * result.gradient.x;
-                    atomForce.y = -scalingFactor * chainFactor * result.gradient.y;
-                    atomForce.z = -scalingFactor * chainFactor * result.gradient.z;
-                } else {
-                    threadEnergy = scalingFactor * result.value;
-                    atomForce.x = -scalingFactor * result.gradient.x;
-                    atomForce.y = -scalingFactor * result.gradient.y;
-                    atomForce.z = -scalingFactor * result.gradient.z;
+                    gx *= chainFactor;
+                    gy *= chainFactor;
+                    gz *= chainFactor;
                 }
+
+                if (runtimeCap > 0.0f) {
+                    float t = tanhf(val / runtimeCap);
+                    float sech2 = 1.0f - t * t;
+                    val = runtimeCap * t;
+                    gx *= sech2;
+                    gy *= sech2;
+                    gz *= sech2;
+                }
+
+                threadEnergy = scalingFactor * val;
+                threadUnscaledEnergy = unscaledScaling * val;
+                atomForce.x = -scalingFactor * gx;
+                atomForce.y = -scalingFactor * gy;
+                atomForce.z = -scalingFactor * gz;
             }
             // Fall through to force buffer accumulation below
         }
@@ -523,12 +543,23 @@ extern "C" __global__ void computeGridForce(
             }
         }
 
+        // Apply runtime tanh cap (preserves derivatives for higher-order interpolation)
+        if (runtimeCap > 0.0f) {
+            float t = tanhf(interpolated / runtimeCap);
+            float sech2 = 1.0f - t * t;
+            interpolated = runtimeCap * t;
+            dx *= sech2;
+            dy *= sech2;
+            dz *= sech2;
+        }
+
         // Now convert gradients to forces by dividing by spacing
         dx /= gridSpacing[0];
         dy /= gridSpacing[1];
         dz /= gridSpacing[2];
 
         threadEnergy = scalingFactor * interpolated;
+        threadUnscaledEnergy = unscaledScaling * interpolated;
 
         atomForce.x = -scalingFactor * dx;
         atomForce.y = -scalingFactor * dy;
@@ -567,6 +598,7 @@ extern "C" __global__ void computeGridForce(
             dev.z = pos.z - gridCorner.z;
 
         threadEnergy = 0.5f * outOfBoundsK * (dev.x * dev.x + dev.y * dev.y + dev.z * dev.z);
+        threadUnscaledEnergy = threadEnergy;  // OOB restraint is not group-scaled
         atomForce.x = -outOfBoundsK * dev.x;  // Don't scale the out-of-bounds restraint!
         atomForce.y = -outOfBoundsK * dev.y;  // Don't scale the out-of-bounds restraint!
         atomForce.z = -outOfBoundsK * dev.z;  // Don't scale the out-of-bounds restraint!
@@ -604,6 +636,10 @@ extern "C" __global__ void computeGridForce(
         if (groupIndex >= 0 && groupIndex < numGroups) {
             // Particle in a group - only add to group energy
             atomicAdd(&groupEnergyBuffer[groupIndex], threadEnergy);
+            // Also track unscaled energy (without group scaling factor)
+            if (groupUnscaledEnergyBuffer != nullptr) {
+                atomicAdd(&groupUnscaledEnergyBuffer[groupIndex], threadUnscaledEnergy);
+            }
         } else {
             // Particle not in any group - add to total
             atomicAdd(&energyBuffer[0], threadEnergy);

@@ -115,15 +115,17 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
         }
 
         // Extract scaling factors based on property
+        int numTemplateAtoms = (isolatedNonbondedForce != nullptr) ? isolatedNonbondedForce->getNumAtoms() : numAtoms;
         scaling_factors.resize(numAtoms);
         for (int i = 0; i < numAtoms; i++) {
             double charge, sigma, epsilon;
 
             // Get parameters from whichever force is available
+            // IsolatedNonbondedForce uses template atoms (mod numTemplateAtoms)
             if (nonbondedForce != nullptr) {
                 nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
             } else {
-                isolatedNonbondedForce->getAtomParameters(i, charge, sigma, epsilon);
+                isolatedNonbondedForce->getAtomParameters(i % numTemplateAtoms, charge, sigma, epsilon);
             }
 
             if (scalingProperty == "charge") {
@@ -287,6 +289,7 @@ void CommonCalcGridForceKernel::initialize(const System& system, const GridForce
     computeKernel->addArg((float)outOfBoundsRestraint);
     computeKernel->addArg(cc.getEnergyBuffer());
     computeKernel->addArg((float)force.getGlobalScalingFactor());
+    computeKernel->addArg((float)force.getRuntimeCap());
 
     cc.addForce(new GridForceInfo(numAtoms));
 
@@ -364,9 +367,10 @@ void CommonCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl
     g_vals.upload(valsFloat);
     g_scaling_factors.upload(scalingFloat);
 
-    // Update inv_power and global scaling factor parameters
+    // Update inv_power, global scaling factor, and runtime cap parameters
     computeKernel->setArg(6, (float)inv_power);
     computeKernel->setArg(10, (float)force.getGlobalScalingFactor());
+    computeKernel->setArg(11, (float)force.getRuntimeCap());
 }
 
 void CommonCalcGridForceKernel::generateGrid(
@@ -465,6 +469,11 @@ void CommonCalcGridForceKernel::generateGrid(
 
 vector<double> CommonCalcGridForceKernel::getParticleGroupEnergies() {
     // Common platform does not support per-group energy tracking yet
+    return vector<double>();
+}
+
+vector<double> CommonCalcGridForceKernel::getParticleGroupUnscaledEnergies() {
+    // Common platform does not support per-group unscaled energy tracking yet
     return vector<double>();
 }
 

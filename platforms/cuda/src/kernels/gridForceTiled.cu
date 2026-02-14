@@ -478,6 +478,7 @@ extern "C" __global__ void computeGridForceTiled(
     const int* __restrict__ particleIndices,
     const int* __restrict__ particleToGroupMap,
     float* __restrict__ groupEnergyBuffer,
+    float* __restrict__ groupUnscaledEnergyBuffer,  // Per-group unscaled energy (no group scaling, null = don't store)
     float* __restrict__ atomEnergyBuffer,
     int* __restrict__ outOfBoundsBuffer,           // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups,
@@ -508,6 +509,7 @@ extern "C" __global__ void computeGridForceTiled(
         }
     }
     float scalingFactor = globalScalingFactor * groupScale * scalingFactors[particleIndex];
+    float unscaledScaling = globalScalingFactor * scalingFactors[particleIndex];  // No group scaling
 
     // Transform position to grid coordinates
     float3 pos;
@@ -517,6 +519,7 @@ extern "C" __global__ void computeGridForceTiled(
 
     float3 atomForce = make_float3(0.0f, 0.0f, 0.0f);
     float threadEnergy = 0.0f;
+    float threadUnscaledEnergy = 0.0f;
 
     // Calculate grid boundaries
     float3 gridCorner;
@@ -528,7 +531,9 @@ extern "C" __global__ void computeGridForceTiled(
                      pos.y >= 0.0f && pos.y <= gridCorner.y &&
                      pos.z >= 0.0f && pos.z <= gridCorner.z);
 
-    if (isInside && scalingFactor != 0.0f) {
+    // Enter interpolation if scaled OR unscaled energy is needed
+    bool needUnscaled = (groupUnscaledEnergyBuffer != nullptr && unscaledScaling != 0.0f);
+    if (isInside && (scalingFactor != 0.0f || needUnscaled)) {
         // Calculate grid indices
         int ix = min(max((int)(pos.x / gridSpacing[0]), 0), gridCounts[0] - 2);
         int iy = min(max((int)(pos.y / gridSpacing[1]), 0), gridCounts[1] - 2);
@@ -720,6 +725,7 @@ extern "C" __global__ void computeGridForceTiled(
 
             // Apply scaling factor and compute energy/force
             threadEnergy = scalingFactor * interpolated;
+            threadUnscaledEnergy = unscaledScaling * interpolated;
             atomForce.x = -scalingFactor * dx;
             atomForce.y = -scalingFactor * dy;
             atomForce.z = -scalingFactor * dz;
@@ -752,6 +758,7 @@ extern "C" __global__ void computeGridForceTiled(
             atomForce.z = -2.0f * outOfBoundsK * dz;
         }
         threadEnergy = restraintEnergy;
+        threadUnscaledEnergy = restraintEnergy;  // OOB restraint is not group-scaled
     }
 
     // Store per-atom energy if buffer provided
@@ -771,6 +778,10 @@ extern "C" __global__ void computeGridForceTiled(
         if (groupIdx >= 0 && groupIdx < numGroups) {
             // Particle in a group - only add to group energy
             atomicAdd(&groupEnergyBuffer[groupIdx], threadEnergy);
+            // Also track unscaled energy (without group scaling factor)
+            if (groupUnscaledEnergyBuffer != nullptr) {
+                atomicAdd(&groupUnscaledEnergyBuffer[groupIdx], threadUnscaledEnergy);
+            }
         } else {
             // Particle not in any group - add to total
             atomicAdd(energyBuffer, threadEnergy);

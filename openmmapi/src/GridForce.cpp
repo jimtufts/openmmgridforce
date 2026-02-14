@@ -43,13 +43,14 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <random>
 
 using namespace OpenMM;
 using namespace std;
 
 namespace GridForcePlugin {
 
-GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
+GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
                          m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
                          m_globalScalingFactor(1.0),
                          m_autoCalculateScalingFactors(false), m_scalingProperty(""),
@@ -65,7 +66,7 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
 }
 
 GridForce::GridForce(std::shared_ptr<GridData> gridData)
-    : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0),
+    : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0),
       m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
       m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
       m_globalScalingFactor(1.0),
@@ -186,6 +187,11 @@ void GridForce::addScalingFactor(double val) {
 }
 
 void GridForce::setScalingFactor(int index, double val) {
+    if (index < 0 || index >= (int)m_scaling_factors.size()) {
+        throw OpenMMException("GridForce::setScalingFactor: index " + std::to_string(index) +
+            " out of range [0, " + std::to_string(m_scaling_factors.size()) +
+            "). Use addScalingFactor() to add atoms first, or setAutoCalculateScalingFactors(true).");
+    }
     m_scaling_factors[index] = val;
 }
 
@@ -305,6 +311,14 @@ void GridForce::setGridCap(double uMax) {
 
 double GridForce::getGridCap() const {
     return m_gridCap;
+}
+
+void GridForce::setRuntimeCap(double cap) {
+    m_runtimeCap = cap;
+}
+
+double GridForce::getRuntimeCap() const {
+    return m_runtimeCap;
 }
 
 void GridForce::setOutOfBoundsRestraint(double k) {
@@ -1068,12 +1082,169 @@ vector<double> GridForce::getParticleGroupEnergies(Context& context) const {
     return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleGroupEnergies();
 }
 
+vector<double> GridForce::getParticleGroupUnscaledEnergies(Context& context) const {
+    return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleGroupUnscaledEnergies();
+}
+
 vector<double> GridForce::getParticleAtomEnergies(Context& context) const {
     return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleAtomEnergies();
 }
 
 vector<int> GridForce::getParticleOutOfBoundsFlags(Context& context) const {
     return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleOutOfBoundsFlags();
+}
+
+// =========================================================================
+// Batch HMC operations
+// =========================================================================
+
+void GridForce::drawAndSetGroupVelocities(Context& context,
+                                           const vector<double>& temperatures,
+                                           const vector<double>& masses,
+                                           unsigned int seed) const {
+    int numGroups = getNumParticleGroups();
+    if ((int)temperatures.size() != numGroups)
+        throw OpenMMException("drawAndSetGroupVelocities: temperatures size must equal numGroups");
+
+    // Get current velocities (one GPU→CPU transfer)
+    State state = context.getState(State::Velocities);
+    vector<Vec3> velocities = state.getVelocities();
+
+    // Set up random number generator
+    std::mt19937 rng;
+    if (seed == 0) {
+        std::random_device rd;
+        rng.seed(rd());
+    } else {
+        rng.seed(seed);
+    }
+
+    // kB in kJ/(mol·K) — OpenMM internal units
+    const double kB = 8.3144621e-3;
+
+    // Draw MB velocities for each group
+    for (int k = 0; k < numGroups; k++) {
+        const auto& group = getParticleGroup(k);
+        const vector<int>& indices = group.particleIndices;
+        double T = temperatures[k];
+
+        for (size_t i = 0; i < indices.size(); i++) {
+            int atomIdx = indices[i];
+            // Use per-atom mass from the template (assumes all groups have same atom layout)
+            double mass = (i < masses.size()) ? masses[i] : masses[0];
+            if (mass <= 0.0) continue;
+            double sigma = sqrt(kB * T / mass);  // sqrt(kB*T/m) in nm/ps
+            std::normal_distribution<double> dist(0.0, sigma);
+            velocities[atomIdx] = Vec3(dist(rng), dist(rng), dist(rng));
+        }
+    }
+
+    // Set all velocities at once (one CPU→GPU transfer)
+    context.setVelocities(velocities);
+}
+
+vector<double> GridForce::computeGroupKineticEnergies(Context& context,
+                                                       const vector<double>& masses) const {
+    int numGroups = getNumParticleGroups();
+    vector<double> ke(numGroups, 0.0);
+
+    // Get velocities (one GPU→CPU transfer)
+    State state = context.getState(State::Velocities);
+    vector<Vec3> velocities = state.getVelocities();
+
+    for (int k = 0; k < numGroups; k++) {
+        const auto& group = getParticleGroup(k);
+        const vector<int>& indices = group.particleIndices;
+        double groupKE = 0.0;
+        for (size_t i = 0; i < indices.size(); i++) {
+            int atomIdx = indices[i];
+            double mass = (i < masses.size()) ? masses[i] : masses[0];
+            if (mass <= 0.0) continue;
+            Vec3 v = velocities[atomIdx];
+            groupKE += 0.5 * mass * (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+        }
+        ke[k] = groupKE;
+    }
+
+    return ke;
+}
+
+vector<int> GridForce::acceptRejectGroups(Context& context,
+                                           const vector<double>& positionsBackup,
+                                           const vector<double>& pe_old,
+                                           const vector<double>& pe_new,
+                                           const vector<double>& ke_old,
+                                           const vector<double>& ke_new,
+                                           const vector<double>& temperatures,
+                                           unsigned int seed) const {
+    int numGroups = getNumParticleGroups();
+    if ((int)pe_old.size() != numGroups || (int)pe_new.size() != numGroups ||
+        (int)ke_old.size() != numGroups || (int)ke_new.size() != numGroups ||
+        (int)temperatures.size() != numGroups)
+        throw OpenMMException("acceptRejectGroups: all vectors must have length numGroups");
+
+    const double kB = 8.3144621e-3;  // kJ/(mol·K)
+
+    // Set up RNG
+    std::mt19937 rng;
+    if (seed == 0) {
+        std::random_device rd;
+        rng.seed(rd());
+    } else {
+        rng.seed(seed);
+    }
+    std::uniform_real_distribution<double> uniform(0.0, 1.0);
+
+    // Evaluate accept/reject for each group
+    vector<int> accepted(numGroups, 0);
+    bool anyRejected = false;
+
+    for (int k = 0; k < numGroups; k++) {
+        double dE = (pe_new[k] + ke_new[k]) - (pe_old[k] + ke_old[k]);
+        double RT = kB * temperatures[k];
+        double dE_over_RT = dE / RT;
+
+        if (dE_over_RT < 0.0 || (fabs(dE_over_RT) < 250.0 && uniform(rng) < exp(-dE_over_RT))) {
+            accepted[k] = 1;  // Accept
+        } else {
+            accepted[k] = 0;  // Reject
+            anyRejected = true;
+        }
+    }
+
+    // If any groups were rejected, restore their positions from backup
+    if (anyRejected) {
+        State state = context.getState(State::Positions);
+        vector<Vec3> positions = state.getPositions();
+
+        for (int k = 0; k < numGroups; k++) {
+            if (accepted[k] == 0) {
+                const auto& group = getParticleGroup(k);
+                const vector<int>& indices = group.particleIndices;
+                for (size_t i = 0; i < indices.size(); i++) {
+                    int atomIdx = indices[i];
+                    // positionsBackup is flat [K * N * 3]
+                    size_t offset = k * indices.size() * 3 + i * 3;
+                    positions[atomIdx] = Vec3(positionsBackup[offset],
+                                              positionsBackup[offset + 1],
+                                              positionsBackup[offset + 2]);
+                }
+            }
+        }
+
+        context.setPositions(positions);
+    }
+
+    return accepted;
+}
+
+void GridForce::setAllParticleGroupScalingFactors(const vector<double>& factors) {
+    int numGroups = getNumParticleGroups();
+    if ((int)factors.size() != numGroups)
+        throw OpenMMException("setAllParticleGroupScalingFactors: factors size must equal numGroups");
+    for (int k = 0; k < numGroups; k++) {
+        setParticleGroupScalingFactor(k, factors[k]);
+    }
 }
 
 void GridForce::computeHessian(Context& context) const {

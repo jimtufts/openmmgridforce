@@ -11,6 +11,7 @@
 #include "openmm/Vec3.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/reference/ReferencePlatform.h"
+#include "openmm/reference/SimTKOpenMMRealType.h"
 #include <vector>
 #include <cmath>
 
@@ -34,8 +35,8 @@ inline std::vector<OpenMM::Vec3>& refExtractForces(OpenMM::ContextImpl& context)
 // Dielectric offset constant for GBSA Born radii (nm)
 static constexpr double DIELECTRIC_OFFSET = 0.009;
 
-// Coulomb constant in kJ*nm/(mol*e^2)
-static constexpr double COULOMB_CONSTANT = 138.935456;
+// Coulomb constant in kJ*nm/(mol*e^2) — use OpenMM's exact definition
+static constexpr double COULOMB_CONSTANT = ONE_4PI_EPS0;
 
 /**
  * Compute the HCT integral contribution from atom j to atom i.

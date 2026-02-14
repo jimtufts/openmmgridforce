@@ -49,6 +49,13 @@ public:
      */
     std::vector<double> getParticleGroupEnergies();
     /**
+     * Get per-particle-group unscaled energies (without group scaling factor).
+     * These represent what the energy would be if group scaling were 1.0.
+     *
+     * @return vector of unscaled energies, one per particle group (empty if no groups)
+     */
+    std::vector<double> getParticleGroupUnscaledEnergies();
+    /**
      * Get per-atom energies for particles in groups.
      *
      * @return vector of energies, one per particle across all groups
@@ -167,6 +174,7 @@ private:
     float globalScalingFactor;  // Multiplies all per-particle scaling factors (default 1.0)
     OpenMM::CudaArray groupScalingFactorsBuffer;  // Per-group alchemical scaling factors
     float gridCap;
+    float runtimeCap;
     float outOfBoundsRestraint;
     int interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     float originX, originY, originZ;
@@ -195,7 +203,9 @@ private:
     // Per-group energy tracking
     OpenMM::CudaArray particleToGroupMap;       // Map from particle index to group index
     OpenMM::CudaArray groupEnergyBuffer;        // Per-group energy accumulation (gets zeroed each execute)
+    OpenMM::CudaArray groupUnscaledEnergyBuffer; // Per-group unscaled energy (no group scaling factor)
     std::vector<float> lastGroupEnergies;        // Persistent copy of last group energies
+    std::vector<float> lastGroupUnscaledEnergies; // Persistent copy of last unscaled group energies
     int numParticleGroups;                       // Number of particle groups
 
     // Per-atom energy tracking (for debugging/analysis)
@@ -210,6 +220,7 @@ private:
     bool tiledMode;                              // Whether tiled streaming is enabled
     std::unique_ptr<TileManager> tileManager;   // Manages tile loading and caching
     CUfunction tiledKernel;                      // Kernel for tiled grid evaluation
+    CUmodule kernelModule;                       // Stored for deferred kernel extraction (coverage check)
     std::vector<float> hostGridValues;          // Host-side copy of grid values (for tiling)
     std::vector<float> hostGridDerivatives;     // Host-side copy of derivatives (for tiling)
 

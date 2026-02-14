@@ -300,6 +300,30 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double getGridCap() const;
 
     /**
+     * Set the runtime capping threshold for interpolated grid values.
+     * Applies tanh capping after interpolation (and after arcsinh decompression if active):
+     *   value_capped = cap * tanh(value / cap)
+     *   gradient_capped = gradient * sech^2(value / cap)
+     *
+     * This corrects B-spline interpolation overshoot for grids that are bounded by
+     * construction (e.g. soft grids like sLJr/sELE where the potential IS a tanh function).
+     * B-spline interpolation can overshoot beyond grid-node values; this re-enforces the
+     * bound. For Hermite interpolation methods (tricubic/triquintic), this is unnecessary
+     * since stored derivatives ensure the interpolant reproduces the capped function exactly.
+     *
+     * Typically set to the same value as setGridCap() for soft grids using B-spline.
+     *
+     * @param cap  capping threshold in kJ/mol (0 = disabled, default)
+     */
+    void setRuntimeCap(double cap);
+
+    /**
+     * Get the current runtime capping threshold.
+     * @return  the runtime capping threshold in kJ/mol (0 = disabled)
+     */
+    double getRuntimeCap() const;
+
+    /**
      * Set the force constant for the harmonic restraint applied to atoms outside the grid.
      * When an atom is outside the grid bounds, a harmonic restrain force is applied
      * with energy: E = 0.5 * k * distance^2, where distance is the distance from the
@@ -712,6 +736,17 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> getParticleGroupEnergies(OpenMM::Context& context) const;
 
     /**
+     * Get per-particle-group unscaled energies from the most recent evaluation.
+     * Unscaled means globalScalingFactor * perParticleScale * interpolated
+     * (no per-group alchemical scaling applied). This allows extracting
+     * unscaled grid energies without setting all scaling to 1.0 and re-evaluating.
+     *
+     * @param context  the Context to query
+     * @return         vector of unscaled energies, one per particle group (empty if no groups)
+     */
+    std::vector<double> getParticleGroupUnscaledEnergies(OpenMM::Context& context) const;
+
+    /**
      * Get per-atom energies from the most recent evaluation.
      * Only available after evaluating a Context with particle groups.
      * Returns energies in the same order as particles were added to groups.
@@ -731,6 +766,68 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @return         vector of per-atom flags (empty if no groups)
      */
     std::vector<int> getParticleOutOfBoundsFlags(OpenMM::Context& context) const;
+
+    // =========================================================================
+    // Batch HMC operations (reduce Python→C++ round trips)
+    // =========================================================================
+
+    /**
+     * Draw Maxwell-Boltzmann velocities for each particle group at its temperature
+     * and set them in the Context. This performs a single getState + setVelocities
+     * round trip regardless of the number of groups.
+     *
+     * @param context       the Context to modify
+     * @param temperatures  per-group temperatures in Kelvin (length = numGroups)
+     * @param masses        per-atom masses in amu for ONE group template (length = atoms_per_group)
+     * @param seed          random seed (0 = use random device)
+     */
+    void drawAndSetGroupVelocities(OpenMM::Context& context,
+                                    const std::vector<double>& temperatures,
+                                    const std::vector<double>& masses,
+                                    unsigned int seed = 0) const;
+
+    /**
+     * Compute per-group kinetic energy from current velocities.
+     * Performs a single getState(Velocities) call.
+     *
+     * @param context  the Context to query
+     * @param masses   per-atom masses in amu for ONE group template (length = atoms_per_group)
+     * @return         vector of kinetic energies in kJ/mol, one per group
+     */
+    std::vector<double> computeGroupKineticEnergies(OpenMM::Context& context,
+                                                     const std::vector<double>& masses) const;
+
+    /**
+     * Per-group Metropolis accept/reject. Restores rejected groups' positions
+     * from the backup. Performs at most one getState + one setPositions.
+     *
+     * @param context          the Context to modify
+     * @param positionsBackup  flat backup positions [K*N*3] in nm from before MD
+     * @param pe_old           per-group potential energy before MD (kJ/mol)
+     * @param pe_new           per-group potential energy after MD (kJ/mol)
+     * @param ke_old           per-group kinetic energy before MD (kJ/mol)
+     * @param ke_new           per-group kinetic energy after MD (kJ/mol)
+     * @param temperatures     per-group temperatures in Kelvin
+     * @param seed             random seed (0 = use random device)
+     * @return                 vector of accept flags (1=accepted, 0=rejected)
+     */
+    std::vector<int> acceptRejectGroups(OpenMM::Context& context,
+                                         const std::vector<double>& positionsBackup,
+                                         const std::vector<double>& pe_old,
+                                         const std::vector<double>& pe_new,
+                                         const std::vector<double>& ke_old,
+                                         const std::vector<double>& ke_new,
+                                         const std::vector<double>& temperatures,
+                                         unsigned int seed = 0) const;
+
+    /**
+     * Batch set all particle group scaling factors at once.
+     * This is a convenience method that avoids K individual
+     * setParticleGroupScalingFactor calls.
+     *
+     * @param factors  per-group scaling factors (length = numGroups)
+     */
+    void setAllParticleGroupScalingFactors(const std::vector<double>& factors);
 
     /**
      * Compute Hessian (second derivative) blocks for each atom from the grid potential.
@@ -943,6 +1040,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double m_inv_power;
     InvPowerMode m_invPowerMode;     // Transformation mode (NONE, RUNTIME, or STORED)
     double m_gridCap;  // Capping threshold for grid values (kJ/mol)
+    double m_runtimeCap;  // Runtime capping threshold (kJ/mol), 0 = disabled
     double m_outOfBoundsRestraint;  // Force constant for out-of-bounds harmonic restraint (kJ/mol/nm^2)
     int m_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     int m_bsplinePrefilterOrder;  // 0=none, 3=cubic, 5=quintic

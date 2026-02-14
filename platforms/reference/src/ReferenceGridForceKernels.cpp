@@ -41,6 +41,7 @@
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/reference/ReferencePlatform.h"
 #include "openmm/NonbondedForce.h"
+#include "IsolatedNonbondedForce.h"
 #include <iostream>
 #include <iomanip>
 
@@ -155,17 +156,27 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     // Get global alchemical scaling factor
     g_globalScalingFactor = grid_force.getGlobalScalingFactor();
 
-    // Get per-group scaling factors
+    // Get per-group scaling factors and particle indices
     int numGroups = grid_force.getNumParticleGroups();
     g_groupScalingFactors.resize(numGroups);
+    g_groupParticleIndices.resize(numGroups);
+    g_groupEnergies.resize(numGroups, 0.0);
+    g_groupUnscaledEnergies.resize(numGroups, 0.0);
+    g_atomToGroup.clear();
     for (int i = 0; i < numGroups; i++) {
-        g_groupScalingFactors[i] = grid_force.getParticleGroup(i).groupScalingFactor;
+        const auto& group = grid_force.getParticleGroup(i);
+        g_groupScalingFactors[i] = group.groupScalingFactor;
+        g_groupParticleIndices[i] = group.particleIndices;
+        for (int atomIdx : group.particleIndices) {
+            g_atomToGroup[atomIdx] = i;
+        }
     }
 
     // Get ligand atom indices
     g_ligand_atoms = grid_force.getLigandAtoms();
     g_inv_power = grid_force.getInvPower();
     g_gridCap = grid_force.getGridCap();
+    g_runtimeCap = grid_force.getRuntimeCap();
     g_outOfBoundsRestraint = grid_force.getOutOfBoundsRestraint();
     g_interpolationMethod = grid_force.getInterpolationMethod();
     grid_force.getGridOrigin(g_origin_x, g_origin_y, g_origin_z);
@@ -184,37 +195,52 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
             throw OpenMMException("GridForce: Invalid scaling property '" + scalingProperty + "'. Must be 'charge', 'ljr', or 'lja'");
         }
 
-        // Find NonbondedForce in the system
+        // Find NonbondedForce or IsolatedNonbondedForce in the system
         const NonbondedForce* nonbondedForce = nullptr;
+        const IsolatedNonbondedForce* isolatedNonbondedForce = nullptr;
+
         for (int i = 0; i < system.getNumForces(); i++) {
             if (dynamic_cast<const NonbondedForce*>(&system.getForce(i)) != nullptr) {
                 nonbondedForce = dynamic_cast<const NonbondedForce*>(&system.getForce(i));
                 break;
+            } else if (dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i)) != nullptr) {
+                isolatedNonbondedForce = dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i));
+                // Keep searching in case there's a NonbondedForce (prefer that)
             }
         }
 
-        if (nonbondedForce == nullptr) {
-            throw OpenMMException("GridForce: Auto-calculate scaling factors requires a NonbondedForce in the system");
+        if (nonbondedForce == nullptr && isolatedNonbondedForce == nullptr) {
+            throw OpenMMException("GridForce: Auto-calculate scaling factors requires a NonbondedForce or IsolatedNonbondedForce in the system");
         }
 
         // Extract scaling factors based on property
         int numAtoms = system.getNumParticles();
+        int numTemplateAtoms = (isolatedNonbondedForce != nullptr) ? isolatedNonbondedForce->getNumAtoms() : numAtoms;
         g_scaling_factors.resize(numAtoms);
         for (int i = 0; i < numAtoms; i++) {
             double charge, sigma, epsilon;
-            nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
+
+            // Get parameters from whichever force is available
+            // IsolatedNonbondedForce uses template atoms (mod numTemplateAtoms)
+            if (nonbondedForce != nullptr) {
+                nonbondedForce->getParticleParameters(i, charge, sigma, epsilon);
+            } else {
+                isolatedNonbondedForce->getAtomParameters(i % numTemplateAtoms, charge, sigma, epsilon);
+            }
 
             if (scalingProperty == "charge") {
                 // For electrostatic grids: use charge directly
                 g_scaling_factors[i] = charge;
             } else if (scalingProperty == "ljr") {
-                // For LJ repulsive: sqrt(epsilon) * (2*sigma)^6
-                double diameter = 2.0 * sigma;
-                g_scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 6.0);
+                // For LJ repulsive: sqrt(epsilon) * Rmin^6
+                // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                double rmin = std::pow(2.0, 1.0/6.0) * sigma;
+                g_scaling_factors[i] = std::sqrt(epsilon) * std::pow(rmin, 6.0);
             } else if (scalingProperty == "lja") {
-                // For LJ attractive: sqrt(epsilon) * (2*sigma)^3
-                double diameter = 2.0 * sigma;
-                g_scaling_factors[i] = std::sqrt(epsilon) * std::pow(diameter, 3.0);
+                // For LJ attractive: sqrt(epsilon) * Rmin^3
+                // where Rmin = 2^(1/6) * sigma (AMBER convention)
+                double rmin = std::pow(2.0, 1.0/6.0) * sigma;
+                g_scaling_factors[i] = std::sqrt(epsilon) * std::pow(rmin, 3.0);
             }
         }
 
@@ -236,17 +262,22 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
             throw OpenMMException("GridForce: Grid counts and spacing must be set before auto-generation");
         }
 
-        // Find NonbondedForce
+        // Find NonbondedForce or IsolatedNonbondedForce
         const NonbondedForce* nonbondedForce = nullptr;
+        const IsolatedNonbondedForce* isolatedNonbondedForce = nullptr;
+
         for (int i = 0; i < system.getNumForces(); i++) {
             if (dynamic_cast<const NonbondedForce*>(&system.getForce(i)) != nullptr) {
                 nonbondedForce = dynamic_cast<const NonbondedForce*>(&system.getForce(i));
                 break;
+            } else if (dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i)) != nullptr) {
+                isolatedNonbondedForce = dynamic_cast<const IsolatedNonbondedForce*>(&system.getForce(i));
+                // Keep searching in case there's a NonbondedForce (prefer that)
             }
         }
 
-        if (nonbondedForce == nullptr) {
-            throw OpenMMException("GridForce: Auto-grid generation requires a NonbondedForce in the system");
+        if (nonbondedForce == nullptr && isolatedNonbondedForce == nullptr) {
+            throw OpenMMException("GridForce: Auto-grid generation requires a NonbondedForce or IsolatedNonbondedForce in the system");
         }
 
         // Get receptor atoms and positions
@@ -278,8 +309,8 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
         grid_force.getGridOrigin(ox, oy, oz);
 
         // Generate grid
-        generateGrid(system, nonbondedForce, gridType, receptorAtoms, receptorPositions,
-                     ox, oy, oz);
+        generateGrid(system, nonbondedForce, isolatedNonbondedForce, gridType,
+                     receptorAtoms, receptorPositions, ox, oy, oz);
 
         // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
         const_cast<GridForce&>(grid_force).setGridValues(g_vals);
@@ -478,6 +509,7 @@ std::vector<double> ReferenceCalcGridForceKernel::computeDerivativesAtPoint(
 void ReferenceCalcGridForceKernel::generateGrid(
     const System& system,
     const NonbondedForce* nonbondedForce,
+    const IsolatedNonbondedForce* isolatedNonbondedForce,
     const std::string& gridType,
     const std::vector<int>& receptorAtoms,
     const std::vector<Vec3>& receptorPositions,
@@ -496,7 +528,11 @@ void ReferenceCalcGridForceKernel::generateGrid(
     std::vector<double> charges, sigmas, epsilons;
     for (int atomIdx : receptorAtoms) {
         double q, sig, eps;
-        nonbondedForce->getParticleParameters(atomIdx, q, sig, eps);
+        if (nonbondedForce != nullptr) {
+            nonbondedForce->getParticleParameters(atomIdx, q, sig, eps);
+        } else {
+            isolatedNonbondedForce->getAtomParameters(atomIdx, q, sig, eps);
+        }
         charges.push_back(q);
         sigmas.push_back(sig);
         epsilons.push_back(eps);
@@ -656,6 +692,15 @@ void ReferenceCalcGridForceKernel::generateGrid(
     }
 }
 
+static inline void applyRuntimeCap(double cap, double& interpolated, Vec3& grd) {
+    if (cap > 0.0) {
+        double t = std::tanh(interpolated / cap);
+        double sech2 = 1.0 - t * t;
+        interpolated = cap * t;
+        grd = grd * sech2;
+    }
+}
+
 double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                                              bool includeForces,
                                              bool includeEnergy) {
@@ -671,28 +716,17 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
     double energy = 0.0;
     int natom_lig = g_scaling_factors.size();
 
-    // Debug: print execution info
-    static int exec_count = 0;
-    static bool printed_header = false;
-    if (!printed_header) {
-        printed_header = true;
-        std::cout << "\n=== EXECUTE FUNCTION DEBUG ===" << std::endl;
-        std::cout << "Grid counts: " << g_counts[0] << "x" << g_counts[1] << "x" << g_counts[2] << std::endl;
-        std::cout << "Grid spacing: " << g_spacing[0] << ", " << g_spacing[1] << ", " << g_spacing[2] << std::endl;
-        std::cout << "Grid origin: " << g_origin_x << ", " << g_origin_y << ", " << g_origin_z << std::endl;
-        std::cout << "Interpolation method: " << g_interpolationMethod << std::endl;
-        std::cout << "Number of ligand atoms: " << natom_lig << std::endl;
-        std::cout << "Scaling factors: ";
-        for (int i = 0; i < natom_lig; i++) std::cout << g_scaling_factors[i] << " ";
-        std::cout << std::endl;
-        std::cout << "Has derivatives: " << (g_derivatives.empty() ? "NO" : "YES") << std::endl;
-        if (!g_derivatives.empty()) {
-            std::cout << "Derivative count: " << g_derivatives.size() << std::endl;
-        }
+    // Reset per-group energies
+    for (size_t g = 0; g < g_groupEnergies.size(); g++) {
+        g_groupEnergies[g] = 0.0;
     }
-    exec_count++;
+    for (size_t g = 0; g < g_groupUnscaledEnergies.size(); g++) {
+        g_groupUnscaledEnergies[g] = 0.0;
+    }
 
     for (int ia = 0; ia < natom_lig; ++ia) {
+        double energy_before = energy;
+
         // Get the actual particle index for this ligand atom
         int particle_idx = (g_ligand_atoms.empty()) ? ia : g_ligand_atoms[ia];
 
@@ -708,18 +742,18 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 is_inside = false;
         }
 
-        // Debug: print position info for first few atoms
-        if (exec_count <= 2 && ia < 2) {
-            std::cout << "Atom " << ia << ": pos_orig=(" << pi_orig[0] << "," << pi_orig[1] << "," << pi_orig[2] << ")"
-                      << " -> pi=(" << pi[0] << "," << pi[1] << "," << pi[2] << ")"
-                      << " is_inside=" << is_inside
-                      << " scaling=" << g_scaling_factors[ia] << std::endl;
+        // Compute effective scaling factor including global and per-group alchemical scaling
+        double groupScaling = 1.0;
+        int groupIdx = -1;
+        auto it = g_atomToGroup.find(particle_idx);
+        if (it != g_atomToGroup.end()) {
+            groupIdx = it->second;
+            groupScaling = g_groupScalingFactors[groupIdx];
         }
+        double effectiveScaling = g_globalScalingFactor * groupScaling * g_scaling_factors[ia];
+        double unscaledScaling = g_globalScalingFactor * g_scaling_factors[ia];
 
-        // Compute effective scaling factor including global alchemical scaling
-        double effectiveScaling = g_globalScalingFactor * g_scaling_factors[ia];
-
-        if (is_inside && effectiveScaling != 0.0) {
+        if (is_inside && (effectiveScaling != 0.0 || (groupIdx >= 0 && unscaledScaling != 0.0))) {
             // Calculate base grid indices
             int ix = (int)(pi[0] / g_spacing[0]);
             int iy = (int)(pi[1] / g_spacing[1]);
@@ -732,13 +766,6 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
 
             double interpolated = 0.0;
             Vec3 grd(0.0, 0.0, 0.0);
-
-            // Debug: print which interpolation path we're taking
-            if (exec_count <= 2 && ia < 2) {
-                std::cout << "  Cell indices: ix=" << ix << ", iy=" << iy << ", iz=" << iz
-                          << ", fx=" << fx << ", fy=" << fy << ", fz=" << fz << std::endl;
-                std::cout << "  Interpolation method: " << g_interpolationMethod << std::endl;
-            }
 
             if (g_interpolationMethod == 1) {
                 // CUBIC B-SPLINE INTERPOLATION (4x4x4 = 64 points)
@@ -804,6 +831,9 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
 
                 // Convert gradients to forces (divide by spacing)
                 grd = Vec3(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
+
+                // Apply runtime cap (tanh capping after interpolation)
+                applyRuntimeCap(g_runtimeCap, interpolated, grd);
 
                 // Energy and force
                 energy += effectiveScaling * interpolated;
@@ -904,27 +934,20 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 // Convert gradients to forces
                 grd = Vec3(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
 
+                // Apply runtime cap (tanh capping after interpolation)
+                applyRuntimeCap(g_runtimeCap, interpolated, grd);
+
                 // Energy and force
                 energy += effectiveScaling * interpolated;
                 forceData[ia] -= effectiveScaling * grd;
 
             } else if (g_interpolationMethod == 3) {
                 // TRIQUINTIC HERMITE INTERPOLATION (C² continuous)
-                static int triq_eval_count = 0;
-                if (triq_eval_count < 5) {
-                    triq_eval_count++;
-                    std::cout << ">>> ENTERING TRIQUINTIC BRANCH (eval #" << triq_eval_count << ")" << std::endl;
-                    std::cout << "    Ligand atom: " << ia << std::endl;
-                    std::cout << "    Cell: (" << ix << "," << iy << "," << iz << ")" << std::endl;
-                    std::cout << "    Local coords: (" << fx << "," << fy << "," << fz << ")" << std::endl;
-                    std::cout << "    Derivatives empty? " << (g_derivatives.empty() ? "YES" : "NO") << std::endl;
-                }
                 // Uses tensor-product quintic Hermite interpolation with precomputed derivatives
                 // Requires Version 2 grid format with 27 derivatives per point
 
                 // Check if derivatives are available
                 if (g_derivatives.empty()) {
-                    std::cout << "ERROR: Derivatives are empty! Throwing exception..." << std::endl;
                     throw OpenMMException("GridForce: Triquintic interpolation (method=3) requires precomputed derivatives. Generate grid with setComputeDerivatives(True) or use a different interpolation method.");
                 }
 
@@ -1025,15 +1048,15 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 // Convert gradients to forces
                 grd = Vec3(dvdx, dvdy, dvdz);
 
+                // Apply runtime cap (tanh capping after interpolation)
+                applyRuntimeCap(g_runtimeCap, interpolated, grd);
+
                 // Energy and force
                 energy += effectiveScaling * interpolated;
                 forceData[ia] -= effectiveScaling * grd;
 
             } else {
                 // TRILINEAR INTERPOLATION (default, 2x2x2 = 8 points)
-                if (exec_count <= 2 && ia < 2) {
-                    std::cout << ">>> USING TRILINEAR INTERPOLATION (default)" << std::endl;
-                }
 
             int im = ix * nyz + iy * g_counts[2] + iz;
             int imp = im + g_counts[2];  // iy --> iy + 1
@@ -1074,10 +1097,6 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 interpolated = pow(interpolated, g_inv_power);
             }
 
-	        double enr = effectiveScaling * interpolated;
-
-            energy += enr;
-
             // x coordinate
             double dvdx = -vm + vp;
             // y coordinate
@@ -1095,27 +1114,23 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = grd * power_factor;
             }
 
+            // Apply runtime cap (tanh capping after interpolation)
+            applyRuntimeCap(g_runtimeCap, interpolated, grd);
+
+            energy += effectiveScaling * interpolated;
             forceData[ia] -= effectiveScaling * grd;
 
             }  // End of if-else interpolation method selection
 
-            // Debug: print energy contribution
-            if (exec_count <= 2 && ia < 2) {
-                double energy_contrib = effectiveScaling * interpolated;
-                std::cout << "  Interpolated value: " << interpolated << std::endl;
-                std::cout << "  Energy contribution: " << energy_contrib
-                          << " (scaling=" << g_scaling_factors[ia] << ")" << std::endl;
+            // Track unscaled per-group energy (omits group scaling factor)
+            if (groupIdx >= 0) {
+                g_groupUnscaledEnergies[groupIdx] += unscaledScaling * interpolated;
             }
         } else {
             // Out of bounds - apply restraint based on distance from grid boundaries
             // NOTE: This restraint is NOT scaled by scaling_factors - it applies uniformly
             // to all particles to keep them within the grid boundaries
-
-            if (exec_count <= 2 && ia < 2) {
-                std::cout << ">>> ATOM OUT OF BOUNDS" << std::endl;
-                std::cout << "  Position: (" << pi[0] << "," << pi[1] << "," << pi[2] << ")" << std::endl;
-                std::cout << "  Grid corner: (" << hCorner[0] << "," << hCorner[1] << "," << hCorner[2] << ")" << std::endl;
-            }
+            double oobEnergy = 0.0;
             Vec3 grd(0.0, 0.0, 0.0);
             for (int k = 0; k < 3; k++) {
                 double dev = 0.0;
@@ -1125,11 +1140,23 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 } else if (pi[k] > hCorner[k]) {
                     dev = pi[k] - hCorner[k];  // Positive distance from upper bound
                 }
-                energy += 0.5 * g_outOfBoundsRestraint * dev * dev;
+                double oobTerm = 0.5 * g_outOfBoundsRestraint * dev * dev;
+                energy += oobTerm;
+                oobEnergy += oobTerm;
                 grd[k] = g_outOfBoundsRestraint * dev;
             }
 
             forceData[ia] -= grd;  // Don't scale the out-of-bounds restraint!
+
+            // Track OOB energy in unscaled buffer too (OOB is not group-scaled)
+            if (groupIdx >= 0) {
+                g_groupUnscaledEnergies[groupIdx] += oobEnergy;
+            }
+        }
+
+        // Track per-group energy contribution
+        if (groupIdx >= 0) {
+            g_groupEnergies[groupIdx] += energy - energy_before;
         }
     }
 
@@ -1140,6 +1167,7 @@ void ReferenceCalcGridForceKernel::copyParametersToContext(ContextImpl &context,
                                                            const GridForce &grid_force) {
     grid_force.getGridParameters(g_counts, g_spacing, g_vals, g_scaling_factors);
     g_inv_power = grid_force.getInvPower();
+    g_runtimeCap = grid_force.getRuntimeCap();
     g_globalScalingFactor = grid_force.getGlobalScalingFactor();
 
     // Update per-group scaling factors
@@ -1151,8 +1179,11 @@ void ReferenceCalcGridForceKernel::copyParametersToContext(ContextImpl &context,
 }
 
 vector<double> ReferenceCalcGridForceKernel::getParticleGroupEnergies() {
-    // Reference platform does not support per-group energy tracking yet
-    return vector<double>();
+    return g_groupEnergies;
+}
+
+vector<double> ReferenceCalcGridForceKernel::getParticleGroupUnscaledEnergies() {
+    return g_groupUnscaledEnergies;
 }
 
 vector<double> ReferenceCalcGridForceKernel::getParticleAtomEnergies() {
