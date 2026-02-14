@@ -50,7 +50,7 @@ public:
 
     // Solvent parameters
     static constexpr double DEFAULT_SOLUTE_DIELECTRIC = 1.0;
-    static constexpr double DEFAULT_SOLVENT_DIELECTRIC = 78.5;
+    static constexpr double DEFAULT_SOLVENT_DIELECTRIC = 78.3;  // matches OpenMM GBSAOBCForce
     static constexpr double DEFAULT_SA_SURFACE_TENSION = 2.25936;  // kJ/mol/nm² (matches OpenMM)
 
     /**

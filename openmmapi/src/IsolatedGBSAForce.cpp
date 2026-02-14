@@ -25,7 +25,7 @@ IsolatedGBSAForce::IsolatedGBSAForce()
       gbMethod(OBC_II),
       soluteDielectric(DEFAULT_SOLUTE_DIELECTRIC),
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
-      includeSurfaceArea(false),
+      includeSurfaceArea(true),
       surfaceTension(DEFAULT_SA_SURFACE_TENSION),
       cutoffDistance(NO_CUTOFF),
       receptorMode(NONE),
@@ -181,6 +181,10 @@ double IsolatedGBSAForce::getGroupEnergy(int groupIndex) const {
         throw OpenMMException("IsolatedGBSAForce: group energy not available (call getState first)");
     }
     return groupEnergies[groupIndex];
+}
+
+std::vector<double> IsolatedGBSAForce::getParticleGroupEnergies() const {
+    return groupEnergies;
 }
 
 double IsolatedGBSAForce::getGroupLigandSelfEnergy(int groupIndex) const {

@@ -34,7 +34,7 @@ GBSAGridForce::GBSAGridForce()
       kdeEpsilonB_(0.03),
       soluteDielectric(DEFAULT_SOLUTE_DIELECTRIC),
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
-      includeSurfaceArea(false),
+      includeSurfaceArea(true),
       surfaceTension(DEFAULT_SA_SURFACE_TENSION),
       interpolationMethod(0),
       bsplinePrefilterOrder(0) {

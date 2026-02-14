@@ -60,7 +60,7 @@ public:
 
     // Default solvent parameters
     static constexpr double DEFAULT_SOLUTE_DIELECTRIC = 1.0;
-    static constexpr double DEFAULT_SOLVENT_DIELECTRIC = 78.5;
+    static constexpr double DEFAULT_SOLVENT_DIELECTRIC = 78.3;  // matches OpenMM GBSAOBCForce
     static constexpr double DEFAULT_SA_SURFACE_TENSION = 2.25936;  // kJ/mol/nm^2 (matches OpenMM)
 
     // Cutoff
@@ -286,6 +286,14 @@ public:
      * Only valid after calling getState() on the Context.
      */
     double getGroupEnergy(int groupIndex) const;
+
+    /**
+     * Get energies for all particle groups in a single call.
+     * Only valid after calling getState() on the Context.
+     *
+     * @return vector of energies (kJ/mol), one per group
+     */
+    std::vector<double> getParticleGroupEnergies() const;
 
     /**
      * Get the ligand self-solvation energy (ligand-ligand GB only).

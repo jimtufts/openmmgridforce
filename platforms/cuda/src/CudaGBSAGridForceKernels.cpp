@@ -444,10 +444,11 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
 
-    // Clear group energies
-    vector<float> zeros(numParticleGroups, 0.0f);
-    groupEnergies.upload(zeros);
-    groupLigandEnergies.upload(zeros);
+    // Clear group energies (async GPU clear to avoid pipeline stalls during integration)
+    if (includeEnergy) {
+        cu.clearBuffer(groupEnergies);
+        cu.clearBuffer(groupLigandEnergies);
+    }
 
     // Get device pointers
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
@@ -570,22 +571,25 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
         cu.executeKernel(computeReceptorHCTGradientForceKernel, receptorGradArgs, numBlocks * blockSize, blockSize);
     }
 
-    // Download group energies
-    groupEnergies.download(groupEnergiesHost);
-    groupLigandEnergies.download(groupLigandEnergiesHost);
+    // Download group energies only when energy is needed to avoid sync barriers
+    if (includeEnergy) {
+        groupEnergies.download(groupEnergiesHost);
+        groupLigandEnergies.download(groupLigandEnergiesHost);
 
-    // Copy ligand energies for separate reporting
-    for (int g = 0; g < numParticleGroups; g++) {
-        groupLigandEnergiesHost[g] = groupEnergiesHost[g];
+        // Copy ligand energies for separate reporting
+        for (int g = 0; g < numParticleGroups; g++) {
+            groupLigandEnergiesHost[g] = groupEnergiesHost[g];
+        }
+
+        // Sum total energy
+        double totalEnergy = 0.0;
+        for (int g = 0; g < numParticleGroups; g++) {
+            totalEnergy += groupEnergiesHost[g];
+        }
+        return totalEnergy;
     }
 
-    // Sum total energy
-    double totalEnergy = 0.0;
-    for (int g = 0; g < numParticleGroups; g++) {
-        totalEnergy += groupEnergiesHost[g];
-    }
-
-    return totalEnergy;
+    return 0.0;
 }
 
 void CudaCalcGBSAGridForceKernel::updateParametersInContext(ContextImpl& context,
