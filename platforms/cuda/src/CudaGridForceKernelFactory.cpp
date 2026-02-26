@@ -5,11 +5,17 @@
 #include "CudaGridForceKernels.h"
 #include "CudaIsolatedNonbondedKernels.h"
 #include "CudaIsolatedBondedKernels.h"
+#include "CudaIsolatedSiteKernels.h"
 #include "CudaGBSAGridForceKernels.h"
 #include "CudaIsolatedGBSAKernels.h"
+#include "CudaMultiGroupHMCKernels.h"
+#include "CudaMultiGroupNUTSKernels.h"
+#include "MultiGroupHMCKernels.h"
+#include "MultiGroupNUTSKernels.h"
 #include "GridForce.h"
 #include "IsolatedNonbondedForce.h"
 #include "IsolatedBondedForce.h"
+#include "IsolatedSiteForce.h"
 #include "GBSAGridForce.h"
 #include "IsolatedGBSAForce.h"
 #include "openmm/cuda/CudaContext.h"
@@ -30,6 +36,9 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
         platform.registerKernelFactory(CalcGBSAGridForceKernel::Name(), factory);
         platform.registerKernelFactory(CalcIsolatedGBSAForceKernel::Name(), factory);
         platform.registerKernelFactory(CalcIsolatedBondedForceKernel::Name(), factory);
+        platform.registerKernelFactory(CalcIsolatedSiteForceKernel::Name(), factory);
+        platform.registerKernelFactory(IntegrateMultiGroupHMCStepKernel::Name(), factory);
+        platform.registerKernelFactory(IntegrateMultiGroupNUTSStepKernel::Name(), factory);
     }
     catch (...) {
     }
@@ -52,5 +61,11 @@ KernelImpl* CudaGridForceKernelFactory::createKernelImpl(std::string name, const
         return new CudaCalcIsolatedGBSAForceKernel(name, platform, cu);
     if (name == CalcIsolatedBondedForceKernel::Name())
         return new CudaCalcIsolatedBondedForceKernel(name, platform, cu);
+    if (name == CalcIsolatedSiteForceKernel::Name())
+        return new CudaCalcIsolatedSiteForceKernel(name, platform, cu);
+    if (name == IntegrateMultiGroupHMCStepKernel::Name())
+        return new CudaIntegrateMultiGroupHMCStepKernel(name, platform, cu);
+    if (name == IntegrateMultiGroupNUTSStepKernel::Name())
+        return new CudaIntegrateMultiGroupNUTSStepKernel(name, platform, cu);
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

@@ -22,6 +22,7 @@ namespace std {
   %template(vectorii) vector < vector<int> >;
   %template(vectorpairii) vector< pair<int,int> >;
   %template(vectorstring) vector<string>;
+  %template(vectorll) vector<long long>;
   %template(mapstringstring) map<string,string>;
   %template(mapstringdouble) map<string,double>;
   %template(mapii) map<int,int>;
@@ -39,12 +40,18 @@ namespace std {
 #include "IsolatedNonbondedForceKernels.h"
 #include "IsolatedBondedForce.h"
 #include "IsolatedBondedForceKernels.h"
+#include "IsolatedSiteForce.h"
+#include "IsolatedSiteForceKernels.h"
 #include "GBSAGridForce.h"
 #include "GBSAGridForceKernels.h"
 #include "IsolatedGBSAForce.h"
 #include "IsolatedGBSAForceKernels.h"
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
+#include "MultiGroupHMCIntegrator.h"
+#include "MultiGroupHMCKernels.h"
+#include "MultiGroupNUTSIntegrator.h"
+#include "MultiGroupNUTSKernels.h"
 #include "OpenMM.h"
 #include "OpenMMAmoeba.h"
 #include "OpenMMDrude.h"
@@ -549,6 +556,9 @@ public:
     std::vector<double> getReceptorBornRadii(int groupIndex) const;
     double getGroupReceptorSurfaceAreaChange(int groupIndex) const;
 
+    // Unscaled energies (no per-group alchemical scaling)
+    std::vector<double> getParticleGroupUnscaledEnergies(OpenMM::Context& context) const;
+
     // Hessian
     std::vector<double> computeHessian(OpenMM::Context& context);
 
@@ -620,6 +630,14 @@ public:
     int getInterpolationMethod() const;
     void setBSplinePrefilterOrder(int order);
     int getBSplinePrefilterOrder() const;
+    void setAdaptiveRegularization(double cReg);
+    double getAdaptiveRegularization() const;
+    void setRegularizationThreshold(double threshold);
+    double getRegularizationThreshold() const;
+    void setPrefilterPCGTolerance(double tol);
+    double getPrefilterPCGTolerance() const;
+    void setPrefilterMaxIterations(int maxIter);
+    int getPrefilterMaxIterations() const;
     void setArcsinhScale(double scale);
     double getArcsinhScale() const;
 
@@ -687,6 +705,12 @@ public:
                                          const std::vector<double>& temperatures,
                                          unsigned int seed = 0) const;
     void setAllParticleGroupScalingFactors(const std::vector<double>& factors);
+
+    void setParticleGroupRuntimeCap(int groupIndex, double cap);
+    double getParticleGroupRuntimeCap(int groupIndex) const;
+    void setAllParticleGroupRuntimeCaps(const std::vector<double>& caps);
+    std::vector<double> getAllParticleGroupRuntimeCaps() const;
+    std::vector<float> getParticleGroupAtomRawEnergies(OpenMM::Context& context) const;
 
     // Hessian (second derivative) computation for normal modes analysis
     void computeHessian(OpenMM::Context& context) const;
@@ -1506,6 +1530,254 @@ public:
 class CalcIsolatedBondedForceKernel : public OpenMM::KernelImpl {
 public:
     static std::string Name() {return "CalcIsolatedBondedForce";}
+};
+
+class CalcIsolatedSiteForceKernel : public OpenMM::KernelImpl {
+public:
+    static std::string Name() {return "CalcIsolatedSiteForce";}
+};
+
+/**
+ * IsolatedSiteForce applies a flat-bottom sphere restraint on per-group
+ * center of mass. Keeps each ligand replica within a binding site sphere.
+ *
+ * E = 0.5 * k * max(0, r_com - maxR)^2
+ */
+class IsolatedSiteForce : public OpenMM::Force {
+public:
+    IsolatedSiteForce();
+
+    int getNumAtoms() const;
+    void setNumAtoms(int numAtoms);
+
+    // Site parameters
+    void setSiteCenter(double x, double y, double z);
+
+    %apply double& OUTPUT {double& x};
+    %apply double& OUTPUT {double& y};
+    %apply double& OUTPUT {double& z};
+    void getSiteCenter(double& x, double& y, double& z) const;
+    %clear double& x;
+    %clear double& y;
+    %clear double& z;
+
+    void setMaxRadius(double maxR);
+    double getMaxRadius() const;
+
+    void setForceConstant(double k);
+    double getForceConstant() const;
+
+    // Atom masses for COM computation
+    void setAtomMasses(const std::vector<double>& masses);
+    const std::vector<double>& getAtomMasses() const;
+
+    // Alchemical scaling
+    double getGlobalScalingFactor() const;
+    void setGlobalScalingFactor(double factor);
+    double getGroupScalingFactor(int groupIndex) const;
+    void setGroupScalingFactor(int groupIndex, double factor);
+
+    // Particle groups
+    int addParticleGroup(const std::string& name, const std::vector<int>& indices);
+    int getNumParticleGroups() const;
+
+    %apply std::string& OUTPUT {std::string& name};
+    %apply std::vector<int>& OUTPUT {std::vector<int>& indices};
+    void getParticleGroup(int index, std::string& name, std::vector<int>& indices) const;
+    %clear std::string& name;
+    %clear std::vector<int>& indices;
+
+    // Per-group energy
+    double getGroupEnergy(int groupIndex) const;
+    std::vector<double> getParticleGroupEnergies() const;
+
+    void updateParametersInContext(Context &context);
+};
+
+class IntegrateMultiGroupHMCStepKernel : public OpenMM::KernelImpl {
+public:
+    static std::string Name() {return "IntegrateMultiGroupHMCStep";}
+};
+
+/**
+ * MultiGroupHMCIntegrator: GPU-native multi-group HMC integrator with
+ * RESPA multi-timestep integration and per-group temperatures/timesteps.
+ *
+ * Each call to step(1) performs one complete HMC trial per particle group:
+ * draw MB velocities, run RESPA NVE trajectory, Metropolis accept/reject.
+ */
+class MultiGroupHMCIntegrator : public OpenMM::Integrator {
+public:
+    enum MomentumRefreshMode { FULL = 0, PARTIAL = 1 };
+
+    MultiGroupHMCIntegrator(int numGroups, int atomsPerGroup, double stepSize);
+
+    // Group configuration
+    int getNumGroups() const;
+    int getAtomsPerGroup() const;
+
+    // Per-group temperatures (Kelvin)
+    void setGroupTemperature(int group, double temperature);
+    double getGroupTemperature(int group) const;
+    void setAllGroupTemperatures(const std::vector<double>& temperatures);
+    std::vector<double> getAllGroupTemperatures() const;
+
+    // RESPA force group schedule: vector of (forceGroupIndex, substeps) pairs
+    void setForceGroupSchedule(const std::vector<std::pair<int,int> >& schedule);
+    const std::vector<std::pair<int,int> >& getForceGroupSchedule() const;
+
+    // HMC trajectory length (number of outer RESPA steps per trial)
+    void setNumOuterSteps(int steps);
+    int getNumOuterSteps() const;
+
+    // Per-group timestep (ps)
+    void setGroupStepSize(int group, double stepSize);
+    double getGroupStepSize(int group) const;
+    void setAllGroupStepSizes(const std::vector<double>& stepSizes);
+    std::vector<double> getAllGroupStepSizes() const;
+
+    // Momentum refreshment
+    void setMomentumRefreshMode(MomentumRefreshMode mode);
+    MomentumRefreshMode getMomentumRefreshMode() const;
+    void setPartialRefreshAngle(double theta);
+    double getPartialRefreshAngle() const;
+
+    // Stability guard
+    void setStabilityThreshold(double threshold);
+    double getStabilityThreshold() const;
+
+    // Accept/reject results
+    bool getGroupAccepted(int group) const;
+    std::vector<int> getAllGroupAccepted() const;
+    double getGroupAcceptanceRate(int group) const;
+    int getGroupAcceptCount(int group) const;
+    int getGroupTrialCount(int group) const;
+    int getGroupStabilityRejectCount(int group) const;
+    std::vector<int> getAllGroupStabilityRejectCounts() const;
+    void resetAcceptanceCounts();
+
+    // Diagnostics
+    double getGroupDeltaH(int group) const;
+    std::vector<double> getAllGroupDeltaH() const;
+
+    // External MC configuration
+    void setNumMCTrials(int trials);
+    int getNumMCTrials() const;
+    void setMCStepSize(double stepSize);
+    double getMCStepSize() const;
+    void setGroupMCEnabled(int group, bool enabled);
+    bool getGroupMCEnabled(int group) const;
+    void setAllGroupMCEnabled(const std::vector<int>& enabled);
+    std::vector<int> getAllGroupMCEnabled() const;
+    int getMCAttempted() const;
+    int getMCAccepted() const;
+    std::vector<int> getAllGroupMCAccepted() const;
+    void resetMCCounts();
+
+    // Random number seed
+    int getRandomNumberSeed() const;
+    void setRandomNumberSeed(int seed);
+
+    // Integrator interface
+    void step(int steps);
+};
+
+class IntegrateMultiGroupNUTSStepKernel : public OpenMM::KernelImpl {
+public:
+    static std::string Name() {return "IntegrateMultiGroupNUTSStep";}
+};
+
+/**
+ * MultiGroupNUTSIntegrator: GPU-native multi-group NUTS integrator with
+ * RESPA multi-timestep integration and per-group temperatures/timesteps.
+ *
+ * Implements the No-U-Turn Sampler (Hoffman & Gelman, 2014) adapted for
+ * simultaneous multi-group execution. Each call to step(1) performs one
+ * complete NUTS trial per particle group with adaptive trajectory length.
+ */
+class MultiGroupNUTSIntegrator : public OpenMM::Integrator {
+public:
+    enum MomentumRefreshMode { FULL = 0, PARTIAL = 1 };
+
+    MultiGroupNUTSIntegrator(int numGroups, int atomsPerGroup, double stepSize);
+
+    // Group configuration
+    int getNumGroups() const;
+    int getAtomsPerGroup() const;
+
+    // Per-group temperatures (Kelvin)
+    void setGroupTemperature(int group, double temperature);
+    double getGroupTemperature(int group) const;
+    void setAllGroupTemperatures(const std::vector<double>& temperatures);
+    std::vector<double> getAllGroupTemperatures() const;
+
+    // RESPA force group schedule: vector of (forceGroupIndex, substeps) pairs
+    void setForceGroupSchedule(const std::vector<std::pair<int,int> >& schedule);
+    const std::vector<std::pair<int,int> >& getForceGroupSchedule() const;
+
+    // NUTS tree depth
+    void setMaxTreeDepth(int depth);
+    int getMaxTreeDepth() const;
+
+    // Per-group timestep (ps)
+    void setGroupStepSize(int group, double stepSize);
+    double getGroupStepSize(int group) const;
+    void setAllGroupStepSizes(const std::vector<double>& stepSizes);
+    std::vector<double> getAllGroupStepSizes() const;
+
+    // Momentum refreshment
+    void setMomentumRefreshMode(MomentumRefreshMode mode);
+    MomentumRefreshMode getMomentumRefreshMode() const;
+    void setPartialRefreshAngle(double theta);
+    double getPartialRefreshAngle() const;
+
+    // Stability guard
+    void setStabilityThreshold(double threshold);
+    double getStabilityThreshold() const;
+
+    // Tree depth diagnostics
+    int getGroupTreeDepth(int group) const;
+    std::vector<int> getAllGroupTreeDepths() const;
+    double getGroupMeanTreeDepth(int group) const;
+
+    // Divergence diagnostics
+    bool getGroupDivergent(int group) const;
+    std::vector<int> getAllGroupDivergent() const;
+
+    // Accept/reject results (accept = non-divergent)
+    bool getGroupAccepted(int group) const;
+    std::vector<int> getAllGroupAccepted() const;
+    double getGroupAcceptanceRate(int group) const;
+    int getGroupAcceptCount(int group) const;
+    int getGroupTrialCount(int group) const;
+    int getGroupDivergenceCount(int group) const;
+    std::vector<int> getAllGroupDivergenceCounts() const;
+    void resetAcceptanceCounts();
+
+    // External MC configuration
+    void setNumMCTrials(int trials);
+    int getNumMCTrials() const;
+    void setMCStepSize(double stepSize);
+    double getMCStepSize() const;
+    void setGroupMCEnabled(int group, bool enabled);
+    bool getGroupMCEnabled(int group) const;
+    void setAllGroupMCEnabled(const std::vector<int>& enabled);
+    std::vector<int> getAllGroupMCEnabled() const;
+    int getMCAttempted() const;
+    int getMCAccepted() const;
+    std::vector<int> getAllGroupMCAccepted() const;
+    void resetMCCounts();
+
+    // GPU tree building toggle
+    void setGpuTreeBuilding(bool enabled);
+    bool getGpuTreeBuilding() const;
+
+    // Random number seed
+    int getRandomNumberSeed() const;
+    void setRandomNumberSeed(int seed);
+
+    // Integrator interface
+    void step(int steps);
 };
 
 } // namespace

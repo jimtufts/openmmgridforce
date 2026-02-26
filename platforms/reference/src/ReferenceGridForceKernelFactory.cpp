@@ -35,8 +35,11 @@
 #include "ReferenceGridForceKernels.h"
 #include "ReferenceIsolatedNonbondedKernels.h"
 #include "ReferenceIsolatedBondedKernels.h"
+#include "ReferenceIsolatedSiteKernels.h"
 #include "ReferenceIsolatedGBSAKernels.h"
 #include "ReferenceGBSAGridForceKernels.h"
+#include "ReferenceMultiGroupHMCKernels.h"
+#include "ReferenceMultiGroupNUTSKernels.h"
 #include "openmm/OpenMMException.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/reference/ReferencePlatform.h"
@@ -67,6 +70,12 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
                                                 factory);
                 platform.registerKernelFactory(CalcIsolatedBondedForceKernel::Name(),
                                                 factory);
+                platform.registerKernelFactory(CalcIsolatedSiteForceKernel::Name(),
+                                                factory);
+                platform.registerKernelFactory(IntegrateMultiGroupHMCStepKernel::Name(),
+                                                factory);
+                platform.registerKernelFactory(IntegrateMultiGroupNUTSStepKernel::Name(),
+                                                factory);
             }
         }
     }
@@ -90,6 +99,12 @@ KernelImpl* ReferenceGridForceKernelFactory::createKernelImpl(std::string name, 
         return new ReferenceCalcGBSAGridForceKernel(name, platform);
     if (name == CalcIsolatedBondedForceKernel::Name())
         return new ReferenceCalcIsolatedBondedForceKernel(name, platform);
+    if (name == CalcIsolatedSiteForceKernel::Name())
+        return new ReferenceCalcIsolatedSiteForceKernel(name, platform);
+    if (name == IntegrateMultiGroupHMCStepKernel::Name())
+        return new ReferenceIntegrateMultiGroupHMCStepKernel(name, platform);
+    if (name == IntegrateMultiGroupNUTSStepKernel::Name())
+        return new ReferenceIntegrateMultiGroupNUTSStepKernel(name, platform);
 
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }
