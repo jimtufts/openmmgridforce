@@ -52,6 +52,8 @@ namespace GridForcePlugin {
 
 GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
                          m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
+                         m_adaptiveRegularization(0.0), m_regularizationThreshold(0.0),
+                         m_prefilterPCGTolerance(1e-6), m_prefilterMaxIterations(200),
                          m_globalScalingFactor(1.0),
                          m_autoCalculateScalingFactors(false), m_scalingProperty(""),
                          m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
@@ -69,6 +71,8 @@ GridForce::GridForce(std::shared_ptr<GridData> gridData)
     : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0),
       m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
       m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
+      m_adaptiveRegularization(0.0), m_regularizationThreshold(0.0),
+      m_prefilterPCGTolerance(1e-6), m_prefilterMaxIterations(200),
       m_globalScalingFactor(1.0),
       m_autoCalculateScalingFactors(false), m_scalingProperty(""),
       m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
@@ -360,6 +364,50 @@ void GridForce::setArcsinhScale(double scale) {
 
 double GridForce::getArcsinhScale() const {
     return m_arcsinhScale;
+}
+
+void GridForce::setAdaptiveRegularization(double cReg) {
+    if (cReg < 0.0) {
+        throw OpenMMException("GridForce: adaptive regularization coefficient must be >= 0.0");
+    }
+    m_adaptiveRegularization = cReg;
+}
+
+double GridForce::getAdaptiveRegularization() const {
+    return m_adaptiveRegularization;
+}
+
+void GridForce::setRegularizationThreshold(double threshold) {
+    if (threshold < 0.0) {
+        throw OpenMMException("GridForce: regularization threshold must be >= 0.0");
+    }
+    m_regularizationThreshold = threshold;
+}
+
+double GridForce::getRegularizationThreshold() const {
+    return m_regularizationThreshold;
+}
+
+void GridForce::setPrefilterPCGTolerance(double tol) {
+    if (tol <= 0.0) {
+        throw OpenMMException("GridForce: PCG tolerance must be > 0.0");
+    }
+    m_prefilterPCGTolerance = tol;
+}
+
+double GridForce::getPrefilterPCGTolerance() const {
+    return m_prefilterPCGTolerance;
+}
+
+void GridForce::setPrefilterMaxIterations(int maxIter) {
+    if (maxIter < 1) {
+        throw OpenMMException("GridForce: max iterations must be >= 1");
+    }
+    m_prefilterMaxIterations = maxIter;
+}
+
+int GridForce::getPrefilterMaxIterations() const {
+    return m_prefilterMaxIterations;
 }
 
 void GridForce::setTiledMode(bool enable, int tileSize, int memoryBudgetMB) {
@@ -1245,6 +1293,42 @@ void GridForce::setAllParticleGroupScalingFactors(const vector<double>& factors)
     for (int k = 0; k < numGroups; k++) {
         setParticleGroupScalingFactor(k, factors[k]);
     }
+}
+
+void GridForce::setParticleGroupRuntimeCap(int groupIndex, double cap) {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    m_particleGroups[groupIndex].groupRuntimeCap = cap;
+}
+
+double GridForce::getParticleGroupRuntimeCap(int groupIndex) const {
+    if (groupIndex < 0 || groupIndex >= (int)m_particleGroups.size()) {
+        throw OpenMMException("Particle group index out of range");
+    }
+    return m_particleGroups[groupIndex].groupRuntimeCap;
+}
+
+void GridForce::setAllParticleGroupRuntimeCaps(const vector<double>& caps) {
+    int numGroups = getNumParticleGroups();
+    if ((int)caps.size() != numGroups)
+        throw OpenMMException("setAllParticleGroupRuntimeCaps: caps size must equal numGroups");
+    for (int k = 0; k < numGroups; k++) {
+        setParticleGroupRuntimeCap(k, caps[k]);
+    }
+}
+
+vector<double> GridForce::getAllParticleGroupRuntimeCaps() const {
+    int numGroups = getNumParticleGroups();
+    vector<double> caps(numGroups);
+    for (int k = 0; k < numGroups; k++) {
+        caps[k] = m_particleGroups[k].groupRuntimeCap;
+    }
+    return caps;
+}
+
+vector<float> GridForce::getParticleGroupAtomRawEnergies(Context& context) const {
+    return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleGroupAtomRawEnergies();
 }
 
 void GridForce::computeHessian(Context& context) const {

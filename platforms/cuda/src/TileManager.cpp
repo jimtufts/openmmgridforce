@@ -509,9 +509,10 @@ bool TileManager::prepareTiles(const std::vector<float>& positions) {
         cache_.loadTiles(tilesToLoad, hostGrid_);
     }
 
-    // Build lookup table for kernel
-    // Safe now because we validated all tiles fit in memory
-    buildLookupTable(requiredTiles);
+    // Build lookup table for kernel from ALL cached tiles (not just required ones).
+    // This ensures the kernel can find any cached tile, even if a later coverage
+    // check passes and prepareTiles() isn't called again for different positions.
+    buildLookupTable(cache_.getLoadedTileIDs());
 
     return true;
 }

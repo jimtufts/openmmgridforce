@@ -41,7 +41,9 @@ extern "C" __global__ void computeGridForce(
     const float arcsinhScale,  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
     const float globalScalingFactor,  // Multiplies all per-particle scaling factors (for alchemical scaling)
     const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling factors (null = no per-group scaling)
-    const float runtimeCap) {  // Bspline overshoot correction: re-apply tanh cap after interpolation (0=disabled)
+    const float runtimeCap,   // Global runtime cap (0=disabled)
+    const float* __restrict__ groupRuntimeCaps,    // Per-group runtime caps (null = use global, 0 = use global)
+    float* __restrict__ atomRawEnergyBuffer) {     // Per-atom raw (pre-cap) energy storage (null = don't store)
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -63,6 +65,15 @@ extern "C" __global__ void computeGridForce(
     }
     float scalingFactor = globalScalingFactor * groupScale * scalingFactors[particleIndex];
     float unscaledScaling = globalScalingFactor * scalingFactors[particleIndex];  // No group scaling
+
+    // Resolve effective runtime cap: per-group if available, else global
+    float effectiveCap = runtimeCap;
+    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+        int gIdx = particleToGroupMap[particleIndex];
+        if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
+            effectiveCap = groupRuntimeCaps[gIdx];
+        }
+    }
 
     // Transform position to grid coordinates (relative to origin)
     float3 pos;
@@ -118,13 +129,21 @@ extern "C" __global__ void computeGridForce(
                     gz *= chainFactor;
                 }
 
-                if (runtimeCap > 0.0f) {
-                    float t = tanhf(val / runtimeCap);
-                    float sech2 = 1.0f - t * t;
-                    val = runtimeCap * t;
-                    gx *= sech2;
-                    gy *= sech2;
-                    gz *= sech2;
+                // Store raw (pre-cap) energy for u_kln recomputation
+                if (atomRawEnergyBuffer != nullptr) {
+                    atomRawEnergyBuffer[index] = unscaledScaling * val;
+                }
+
+                if (effectiveCap > 0.0f) {
+                    // Algebraic cap: f(v) = v*C/(|v|+C), bounded by C
+                    // Gradient factor: C^2 / (|v|+C)^2 (decays as 1/v^2, not exp)
+                    float absVal = fabsf(val);
+                    float denom = absVal + effectiveCap;
+                    float gradFactor = (effectiveCap * effectiveCap) / (denom * denom);
+                    val = val * effectiveCap / denom;
+                    gx *= gradFactor;
+                    gy *= gradFactor;
+                    gz *= gradFactor;
                 }
 
                 threadEnergy = scalingFactor * val;
@@ -543,14 +562,21 @@ extern "C" __global__ void computeGridForce(
             }
         }
 
-        // Apply runtime tanh cap (preserves derivatives for higher-order interpolation)
-        if (runtimeCap > 0.0f) {
-            float t = tanhf(interpolated / runtimeCap);
-            float sech2 = 1.0f - t * t;
-            interpolated = runtimeCap * t;
-            dx *= sech2;
-            dy *= sech2;
-            dz *= sech2;
+        // Store raw (pre-cap) energy for u_kln recomputation
+        if (atomRawEnergyBuffer != nullptr) {
+            atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
+        }
+
+        // Apply runtime algebraic cap: f(v) = v*C/(|v|+C), bounded by C
+        // Gradient factor: C^2 / (|v|+C)^2 (decays as 1/v^2, not exponentially)
+        if (effectiveCap > 0.0f) {
+            float absVal = fabsf(interpolated);
+            float denom = absVal + effectiveCap;
+            float gradFactor = (effectiveCap * effectiveCap) / (denom * denom);
+            interpolated = interpolated * effectiveCap / denom;
+            dx *= gradFactor;
+            dy *= gradFactor;
+            dz *= gradFactor;
         }
 
         // Now convert gradients to forces by dividing by spacing

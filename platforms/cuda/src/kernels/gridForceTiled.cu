@@ -485,6 +485,9 @@ extern "C" __global__ void computeGridForceTiled(
     const float arcsinhScale,  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
     const float globalScalingFactor,  // Multiplies all per-particle scaling factors (for alchemical scaling)
     const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling factors (null = no per-group scaling)
+    const float runtimeCap,   // Global runtime cap (0=disabled)
+    const float* __restrict__ groupRuntimeCaps,    // Per-group runtime caps (null = use global, 0 = use global)
+    float* __restrict__ atomRawEnergyBuffer,       // Per-atom raw (pre-cap) energy storage (null = don't store)
     // Tile-specific parameters
     const int* __restrict__ tileOffsets,           // Grid offsets for each tile (x,y,z,x,y,z,...)
     const unsigned long long* __restrict__ tileValuePtrs,   // Device pointers to tile values
@@ -510,6 +513,15 @@ extern "C" __global__ void computeGridForceTiled(
     }
     float scalingFactor = globalScalingFactor * groupScale * scalingFactors[particleIndex];
     float unscaledScaling = globalScalingFactor * scalingFactors[particleIndex];  // No group scaling
+
+    // Resolve effective runtime cap: per-group if available, else global
+    float effectiveCap = runtimeCap;
+    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+        int gIdx = particleToGroupMap[particleIndex];
+        if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
+            effectiveCap = groupRuntimeCaps[gIdx];
+        }
+    }
 
     // Transform position to grid coordinates
     float3 pos;
@@ -723,6 +735,22 @@ extern "C" __global__ void computeGridForceTiled(
                 dz *= arcsinhScale * coshG;
             }
 
+            // Store raw (pre-cap) energy for u_kln recomputation
+            if (atomRawEnergyBuffer != nullptr) {
+                atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
+            }
+
+            // Apply runtime algebraic cap: f(v) = v*C/(|v|+C), bounded by C
+            if (effectiveCap > 0.0f) {
+                float absVal = fabsf(interpolated);
+                float denom = absVal + effectiveCap;
+                float gradFactor = (effectiveCap * effectiveCap) / (denom * denom);
+                interpolated = interpolated * effectiveCap / denom;
+                dx *= gradFactor;
+                dy *= gradFactor;
+                dz *= gradFactor;
+            }
+
             // Apply scaling factor and compute energy/force
             threadEnergy = scalingFactor * interpolated;
             threadUnscaledEnergy = unscaledScaling * interpolated;
@@ -774,7 +802,7 @@ extern "C" __global__ void computeGridForceTiled(
     // Accumulate energy - EITHER to group OR to total, not both
     // (This matches the non-tiled kernel behavior)
     if (particleToGroupMap != nullptr && groupEnergyBuffer != nullptr) {
-        int groupIdx = particleToGroupMap[index];
+        int groupIdx = particleToGroupMap[particleIndex];
         if (groupIdx >= 0 && groupIdx < numGroups) {
             // Particle in a group - only add to group energy
             atomicAdd(&groupEnergyBuffer[groupIdx], threadEnergy);

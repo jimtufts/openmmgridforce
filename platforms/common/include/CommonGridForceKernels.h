@@ -44,6 +44,7 @@ public:
     virtual std::vector<double> getParticleGroupEnergies();
     virtual std::vector<double> getParticleGroupUnscaledEnergies();
     virtual std::vector<double> getParticleAtomEnergies();
+    virtual std::vector<float> getParticleGroupAtomRawEnergies();
     virtual std::vector<int> getParticleOutOfBoundsFlags();
 
 protected:

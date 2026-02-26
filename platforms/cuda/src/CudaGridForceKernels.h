@@ -62,6 +62,7 @@ public:
      *         (in the same order as particles were added to groups)
      */
     std::vector<double> getParticleAtomEnergies();
+    std::vector<float> getParticleGroupAtomRawEnergies();
     /**
      * Get per-atom out-of-bounds flags for particles in groups.
      *
@@ -173,6 +174,7 @@ private:
     float arcsinhScale;       // 0.0=disabled, >0.0=arcsinh(V/scale) transform
     float globalScalingFactor;  // Multiplies all per-particle scaling factors (default 1.0)
     OpenMM::CudaArray groupScalingFactorsBuffer;  // Per-group alchemical scaling factors
+    OpenMM::CudaArray groupRuntimeCapsBuffer;     // Per-group runtime caps (0 = use global)
     float gridCap;
     float runtimeCap;
     float outOfBoundsRestraint;
@@ -209,8 +211,10 @@ private:
     int numParticleGroups;                       // Number of particle groups
 
     // Per-atom energy tracking (for debugging/analysis)
-    OpenMM::CudaArray atomEnergyBuffer;         // Per-atom energy storage
+    OpenMM::CudaArray atomEnergyBuffer;         // Per-atom energy storage (post-cap)
     std::vector<float> lastAtomEnergies;         // Persistent copy of last atom energies
+    OpenMM::CudaArray atomRawEnergyBuffer;      // Per-atom raw (pre-cap) energy storage
+    std::vector<float> lastAtomRawEnergies;      // Persistent copy of last raw energies
 
     // Per-atom out-of-bounds tracking
     OpenMM::CudaArray outOfBoundsBuffer;        // Per-atom out-of-bounds flags (0=inside, 1=outside)
@@ -254,6 +258,14 @@ private:
     std::vector<float> lastMinEigenvalue;
     std::vector<int> lastNumNegative;
     float lastTotalEntropy;
+
+    bool skipGroupEnergyDownload_ = false;
+public:
+    void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
+    void* getGroupEnergyDevicePointer() override {
+        return groupEnergyBuffer.isInitialized()
+            ? (void*)groupEnergyBuffer.getDevicePointer() : nullptr;
+    }
 };
 
 // Clear GPU-side grid caches to free CUDA memory

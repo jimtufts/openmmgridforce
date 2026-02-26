@@ -159,6 +159,7 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     // Get per-group scaling factors and particle indices
     int numGroups = grid_force.getNumParticleGroups();
     g_groupScalingFactors.resize(numGroups);
+    g_groupRuntimeCaps.resize(numGroups);
     g_groupParticleIndices.resize(numGroups);
     g_groupEnergies.resize(numGroups, 0.0);
     g_groupUnscaledEnergies.resize(numGroups, 0.0);
@@ -166,6 +167,7 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     for (int i = 0; i < numGroups; i++) {
         const auto& group = grid_force.getParticleGroup(i);
         g_groupScalingFactors[i] = group.groupScalingFactor;
+        g_groupRuntimeCaps[i] = group.groupRuntimeCap;
         g_groupParticleIndices[i] = group.particleIndices;
         for (int atomIdx : group.particleIndices) {
             g_atomToGroup[atomIdx] = i;
@@ -694,10 +696,13 @@ void ReferenceCalcGridForceKernel::generateGrid(
 
 static inline void applyRuntimeCap(double cap, double& interpolated, Vec3& grd) {
     if (cap > 0.0) {
-        double t = std::tanh(interpolated / cap);
-        double sech2 = 1.0 - t * t;
-        interpolated = cap * t;
-        grd = grd * sech2;
+        // Algebraic cap: f(v) = v*C/(|v|+C), bounded by C
+        // Gradient factor: C^2 / (|v|+C)^2 (decays as 1/v^2, not exponentially)
+        double absVal = std::abs(interpolated);
+        double denom = absVal + cap;
+        double gradFactor = (cap * cap) / (denom * denom);
+        interpolated = interpolated * cap / denom;
+        grd = grd * gradFactor;
     }
 }
 
@@ -752,6 +757,12 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
         }
         double effectiveScaling = g_globalScalingFactor * groupScaling * g_scaling_factors[ia];
         double unscaledScaling = g_globalScalingFactor * g_scaling_factors[ia];
+
+        // Resolve effective runtime cap: per-group if available, else global
+        double effectiveCap = g_runtimeCap;
+        if (groupIdx >= 0 && groupIdx < (int)g_groupRuntimeCaps.size() && g_groupRuntimeCaps[groupIdx] > 0.0) {
+            effectiveCap = g_groupRuntimeCaps[groupIdx];
+        }
 
         if (is_inside && (effectiveScaling != 0.0 || (groupIdx >= 0 && unscaledScaling != 0.0))) {
             // Calculate base grid indices
@@ -833,7 +844,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = Vec3(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
 
                 // Apply runtime cap (tanh capping after interpolation)
-                applyRuntimeCap(g_runtimeCap, interpolated, grd);
+                applyRuntimeCap(effectiveCap, interpolated, grd);
 
                 // Energy and force
                 energy += effectiveScaling * interpolated;
@@ -935,7 +946,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = Vec3(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
 
                 // Apply runtime cap (tanh capping after interpolation)
-                applyRuntimeCap(g_runtimeCap, interpolated, grd);
+                applyRuntimeCap(effectiveCap, interpolated, grd);
 
                 // Energy and force
                 energy += effectiveScaling * interpolated;
@@ -1049,7 +1060,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 grd = Vec3(dvdx, dvdy, dvdz);
 
                 // Apply runtime cap (tanh capping after interpolation)
-                applyRuntimeCap(g_runtimeCap, interpolated, grd);
+                applyRuntimeCap(effectiveCap, interpolated, grd);
 
                 // Energy and force
                 energy += effectiveScaling * interpolated;
@@ -1115,7 +1126,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
             }
 
             // Apply runtime cap (tanh capping after interpolation)
-            applyRuntimeCap(g_runtimeCap, interpolated, grd);
+            applyRuntimeCap(effectiveCap, interpolated, grd);
 
             energy += effectiveScaling * interpolated;
             forceData[ia] -= effectiveScaling * grd;
@@ -1170,11 +1181,13 @@ void ReferenceCalcGridForceKernel::copyParametersToContext(ContextImpl &context,
     g_runtimeCap = grid_force.getRuntimeCap();
     g_globalScalingFactor = grid_force.getGlobalScalingFactor();
 
-    // Update per-group scaling factors
+    // Update per-group scaling factors and runtime caps
     int numGroups = grid_force.getNumParticleGroups();
     g_groupScalingFactors.resize(numGroups);
+    g_groupRuntimeCaps.resize(numGroups);
     for (int i = 0; i < numGroups; i++) {
         g_groupScalingFactors[i] = grid_force.getParticleGroupScalingFactor(i);
+        g_groupRuntimeCaps[i] = grid_force.getParticleGroupRuntimeCap(i);
     }
 }
 
@@ -1189,6 +1202,11 @@ vector<double> ReferenceCalcGridForceKernel::getParticleGroupUnscaledEnergies() 
 vector<double> ReferenceCalcGridForceKernel::getParticleAtomEnergies() {
     // Reference platform does not support per-atom energy tracking yet
     return vector<double>();
+}
+
+vector<float> ReferenceCalcGridForceKernel::getParticleGroupAtomRawEnergies() {
+    // Reference platform does not support per-atom raw energy tracking yet
+    return vector<float>();
 }
 
 vector<int> ReferenceCalcGridForceKernel::getParticleOutOfBoundsFlags() {

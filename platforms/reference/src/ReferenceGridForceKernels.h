@@ -87,6 +87,7 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> getParticleGroupEnergies();
     std::vector<double> getParticleGroupUnscaledEnergies();
     std::vector<double> getParticleAtomEnergies();
+    std::vector<float> getParticleGroupAtomRawEnergies();
     std::vector<int> getParticleOutOfBoundsFlags();
 
    private:
@@ -117,6 +118,7 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> g_scaling_factors;
     double g_globalScalingFactor;       // Multiplies all per-particle scaling factors (default 1.0)
     std::vector<double> g_groupScalingFactors;  // Per-group alchemical scaling factors
+    std::vector<double> g_groupRuntimeCaps;     // Per-group runtime caps (0 = use global)
     std::vector<std::vector<int>> g_groupParticleIndices;  // Per-group particle indices
     std::map<int, int> g_atomToGroup;   // Map from particle index to group index
     std::vector<double> g_groupEnergies;  // Per-group energies from last execute()

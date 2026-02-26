@@ -99,6 +99,14 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
      */
     virtual std::vector<double> getParticleAtomEnergies() = 0;
     /**
+     * Get per-atom raw (pre-cap) energies for particles in groups.
+     * Returns float for GPU efficiency. Values are globalScale * particleScale * interpolated,
+     * before the tanh runtime cap.
+     *
+     * @return vector of raw energies, one per particle across all groups
+     */
+    virtual std::vector<float> getParticleGroupAtomRawEnergies() = 0;
+    /**
      * Get per-atom out-of-bounds flags for particles in groups.
      *
      * @return vector of flags (0=inside, 1=outside), one per particle across all groups
@@ -202,6 +210,9 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
     virtual double getTotalEntropy() {
         return 0.0;
     }
+
+    virtual void setSkipGroupEnergyDownload(bool) {}
+    virtual void* getGroupEnergyDevicePointer() { return nullptr; }
 };
 
 /**

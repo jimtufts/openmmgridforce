@@ -87,7 +87,7 @@ struct OPENMM_EXPORT_GRIDFORCE ParticleGroup {
                   const std::vector<int>& particleIndices,
                   const std::vector<double>& scalingFactors = std::vector<double>())
         : name(name), particleIndices(particleIndices), scalingFactors(scalingFactors),
-          groupScalingFactor(1.0) {
+          groupScalingFactor(1.0), groupRuntimeCap(0.0) {
         // If no scaling factors provided, default to 1.0 for all particles
         if (this->scalingFactors.empty()) {
             this->scalingFactors.resize(particleIndices.size(), 1.0);
@@ -98,6 +98,7 @@ struct OPENMM_EXPORT_GRIDFORCE ParticleGroup {
     std::vector<int> particleIndices;    // Particle indices in this group
     std::vector<double> scalingFactors;  // Per-particle scaling factors
     double groupScalingFactor;           // Per-group alchemical scaling factor (default 1.0)
+    double groupRuntimeCap;              // Per-group runtime cap (kJ/mol), 0 = use global cap
 };
 
 /**
@@ -413,6 +414,68 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @return  B-spline degree (0, 3, or 5)
      */
     int getBSplinePrefilterOrder() const;
+
+    /**
+     * Set the adaptive regularization coefficient for B-spline prefiltering.
+     *
+     * When > 0, uses an adaptive regularized least-squares prefilter (PCG solver)
+     * instead of the standard Thomas algorithm. This smooths Gibbs-like ringing
+     * near singularities (e.g., receptor atoms in LJr grids) while preserving
+     * exact interpolation in smooth regions.
+     *
+     * When == 0 (default), uses the standard Thomas algorithm (exact interpolation).
+     *
+     * Only applies to cubic B-spline prefilter (order 3).
+     *
+     * @param cReg  regularization coefficient (>= 0.0, default 0.0)
+     */
+    void setAdaptiveRegularization(double cReg);
+
+    /**
+     * Get the adaptive regularization coefficient.
+     */
+    double getAdaptiveRegularization() const;
+
+    /**
+     * Set the gradient threshold for adaptive regularization.
+     *
+     * Grid points with gradient magnitude below this threshold receive zero
+     * regularization (preserving exact interpolation). Points above the
+     * threshold receive regularization proportional to (|grad| - threshold).
+     *
+     * @param threshold  gradient magnitude threshold (>= 0.0, default 0.0)
+     */
+    void setRegularizationThreshold(double threshold);
+
+    /**
+     * Get the regularization gradient threshold.
+     */
+    double getRegularizationThreshold() const;
+
+    /**
+     * Set the PCG solver tolerance for adaptive prefiltering.
+     * The solver stops when relative residual ||r|| / ||b|| < tolerance.
+     *
+     * @param tol  relative tolerance (default 1e-6)
+     */
+    void setPrefilterPCGTolerance(double tol);
+
+    /**
+     * Get the PCG solver tolerance.
+     */
+    double getPrefilterPCGTolerance() const;
+
+    /**
+     * Set the maximum PCG iterations for adaptive prefiltering.
+     *
+     * @param maxIter  maximum iterations (default 200)
+     */
+    void setPrefilterMaxIterations(int maxIter);
+
+    /**
+     * Get the maximum PCG iterations.
+     */
+    int getPrefilterMaxIterations() const;
 
     /**
      * Enable tiled grid mode for memory-efficient large grids.
@@ -830,6 +893,49 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     void setAllParticleGroupScalingFactors(const std::vector<double>& factors);
 
     /**
+     * Set the runtime cap for a particle group.
+     * When > 0, overrides the global runtimeCap for this group.
+     * The cap is applied as: E = cap * tanh(raw / cap).
+     *
+     * @param groupIndex  index of the particle group
+     * @param cap         the runtime cap in kJ/mol (0 = use global)
+     */
+    void setParticleGroupRuntimeCap(int groupIndex, double cap);
+
+    /**
+     * Get the runtime cap for a particle group.
+     *
+     * @param groupIndex  index of the particle group
+     * @return            the per-group runtime cap (0 = using global)
+     */
+    double getParticleGroupRuntimeCap(int groupIndex) const;
+
+    /**
+     * Batch set all particle group runtime caps at once.
+     *
+     * @param caps  per-group runtime caps (length = numGroups), 0 = use global
+     */
+    void setAllParticleGroupRuntimeCaps(const std::vector<double>& caps);
+
+    /**
+     * Get all particle group runtime caps.
+     *
+     * @return  per-group runtime caps (length = numGroups)
+     */
+    std::vector<double> getAllParticleGroupRuntimeCaps() const;
+
+    /**
+     * Get per-atom raw (pre-cap) energies from the most recent evaluation.
+     * These are the interpolated grid values multiplied by globalScale * perParticleScale,
+     * BEFORE the tanh runtime cap is applied. Useful for recomputing capped energies
+     * at different cap values (e.g., for u_kln in alchemical free energy calculations).
+     *
+     * @param context  the Context to query
+     * @return         vector of raw energies, one per atom across all groups (K*N values)
+     */
+    std::vector<float> getParticleGroupAtomRawEnergies(OpenMM::Context& context) const;
+
+    /**
      * Compute Hessian (second derivative) blocks for each atom from the grid potential.
      * This computes the 3x3 Hessian block for each atom, storing 6 unique components
      * per atom: [d²V/dx², d²V/dy², d²V/dz², d²V/dxdy, d²V/dxdz, d²V/dydz].
@@ -1045,6 +1151,10 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     int m_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     int m_bsplinePrefilterOrder;  // 0=none, 3=cubic, 5=quintic
     double m_arcsinhScale;  // 0.0=disabled, >0.0=arcsinh(V/scale) transform
+    double m_adaptiveRegularization;   // 0.0=disabled, >0.0=adaptive reg strength
+    double m_regularizationThreshold;  // gradient threshold for adaptive reg
+    double m_prefilterPCGTolerance;    // PCG solver tolerance
+    int m_prefilterMaxIterations;      // PCG max iterations
     bool m_autoCalculateScalingFactors;
     std::string m_scalingProperty;
 

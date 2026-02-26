@@ -482,6 +482,11 @@ vector<double> CommonCalcGridForceKernel::getParticleAtomEnergies() {
     return vector<double>();
 }
 
+vector<float> CommonCalcGridForceKernel::getParticleGroupAtomRawEnergies() {
+    // Common platform does not support per-atom raw energy tracking yet
+    return vector<float>();
+}
+
 vector<int> CommonCalcGridForceKernel::getParticleOutOfBoundsFlags() {
     // Common platform does not support per-atom out-of-bounds tracking yet
     return vector<int>();

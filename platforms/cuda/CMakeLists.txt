@@ -42,8 +42,9 @@ SET(SOURCE_FILES) # empty
 SET(SOURCE_INCLUDE_FILES)
 
 FILE(GLOB src_files ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+FILE(GLOB cuda_src_files ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu)
 FILE(GLOB incl_files ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
-SET(SOURCE_FILES ${SOURCE_FILES} ${src_files} ${KERNELS_CPP})
+SET(SOURCE_FILES ${SOURCE_FILES} ${src_files} ${cuda_src_files} ${KERNELS_CPP})
 SET(SOURCE_INCLUDE_FILES ${SOURCE_INCLUDE_FILES} ${incl_files})
 
 INCLUDE_DIRECTORIES(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -62,7 +63,7 @@ INCLUDE_DIRECTORIES(BEFORE ${CUDAToolkit_INCLUDE_DIRS})
 ADD_LIBRARY(${SHARED_TARGET} SHARED ${SOURCE_FILES} ${SOURCE_INCLUDE_FILES} ${API_INCLUDE_FILES})
 ADD_DEPENDENCIES(${SHARED_TARGET} CudaKernels)
 
-TARGET_LINK_LIBRARIES(${SHARED_TARGET} CUDA::cuda_driver CUDA::cudart OpenMM OpenMMCUDA OpenMMGridForce)
+TARGET_LINK_LIBRARIES(${SHARED_TARGET} CUDA::cuda_driver CUDA::cudart CUDA::cublas OpenMM OpenMMCUDA OpenMMGridForce)
 
 SET_TARGET_PROPERTIES(${SHARED_TARGET} PROPERTIES
     CUDA_ARCHITECTURES 89
@@ -73,6 +74,12 @@ SET_TARGET_PROPERTIES(${SHARED_TARGET} PROPERTIES
 # Set CUDA compilation flags for compatibility with older drivers
 # Generate PTX for older CUDA versions to ensure driver compatibility
 SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_89,code=sm_89")
+
+# Use system GCC as CUDA host compiler to avoid incompatibilities with
+# conda-provided GCC 14+ (whose C++20 standard library headers conflict with nvcc)
+IF(EXISTS /usr/bin/g++)
+    SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -ccbin /usr/bin/g++")
+ENDIF()
 
 INSTALL(TARGETS ${SHARED_TARGET} DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/plugins)
 

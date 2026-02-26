@@ -14,6 +14,7 @@
 #include "openmm/PeriodicTorsionForce.h"
 #include "IsolatedNonbondedForce.h"
 #include "BSplinePrefilter.h"
+#include "CudaAdaptivePrefilter.h"
 #include <cuda_runtime.h>
 #include <map>
 #include <iostream>
@@ -288,10 +289,21 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         groupScalingFactorsBuffer.initialize<float>(cu, numParticleGroups, "groupScalingFactors");
         groupScalingFactorsBuffer.upload(groupScalings);
 
+        // Initialize per-group runtime caps buffer
+        std::vector<float> groupCaps(numParticleGroups, 0.0f);
+        for (int i = 0; i < numParticleGroups; i++) {
+            groupCaps[i] = (float)force.getParticleGroup(i).groupRuntimeCap;
+        }
+        groupRuntimeCapsBuffer.initialize<float>(cu, numParticleGroups, "groupRuntimeCaps");
+        groupRuntimeCapsBuffer.upload(groupCaps);
+
         // Initialize per-atom energy buffer (for debugging/analysis)
         if (totalGroupParticles > 0) {
             atomEnergyBuffer.initialize<float>(cu, totalGroupParticles, "atomEnergyBuffer");
             lastAtomEnergies.resize(totalGroupParticles, 0.0f);
+            // Initialize per-atom raw (pre-cap) energy buffer
+            atomRawEnergyBuffer.initialize<float>(cu, totalGroupParticles, "atomRawEnergyBuffer");
+            lastAtomRawEnergies.resize(totalGroupParticles, 0.0f);
             // Initialize per-atom out-of-bounds buffer
             outOfBoundsBuffer.initialize<int>(cu, totalGroupParticles, "outOfBoundsBuffer");
             lastOutOfBoundsFlags.resize(totalGroupParticles, 0);
@@ -437,7 +449,20 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             // Applied at generation time so prefiltered coefficients are stored in the file.
             int bsplineOrder = force.getBSplinePrefilterOrder();
             if (bsplineOrder > 0) {
-                bsplinePrefilter3DByOrder(vals, counts[0], counts[1], counts[2], bsplineOrder);
+                double cReg = force.getAdaptiveRegularization();
+                if (cReg > 0.0 && bsplineOrder == 3) {
+                    // Adaptive regularized prefilter (GPU-accelerated PCG solver)
+                    CudaAdaptivePrefilter prefilter(
+                        counts[0], counts[1], counts[2], cReg,
+                        force.getRegularizationThreshold(),
+                        force.getPrefilterPCGTolerance(),
+                        force.getPrefilterMaxIterations());
+                    prefilter.apply(vals);
+                    std::cout << "  Adaptive prefilter: " << prefilter.getLastIterationCount()
+                              << " PCG iterations, residual " << prefilter.getLastResidual() << std::endl;
+                } else {
+                    bsplinePrefilter3DByOrder(vals, counts[0], counts[1], counts[2], bsplineOrder);
+                }
             }
 
             // Create GridData object with auto-generated values so saveToFile() uses new format
@@ -524,7 +549,19 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         }
         int bsplineOrder = force.getBSplinePrefilterOrder();
         if (bsplineOrder > 0) {
-            bsplinePrefilter3DByOrder(vals, counts[0], counts[1], counts[2], bsplineOrder);
+            double cReg = force.getAdaptiveRegularization();
+            if (cReg > 0.0 && bsplineOrder == 3) {
+                CudaAdaptivePrefilter prefilter(
+                    counts[0], counts[1], counts[2], cReg,
+                    force.getRegularizationThreshold(),
+                    force.getPrefilterPCGTolerance(),
+                    force.getPrefilterMaxIterations());
+                prefilter.apply(vals);
+                std::cout << "  Adaptive prefilter: " << prefilter.getLastIterationCount()
+                          << " PCG iterations, residual " << prefilter.getLastResidual() << std::endl;
+            } else {
+                bsplinePrefilter3DByOrder(vals, counts[0], counts[1], counts[2], bsplineOrder);
+            }
         }
     }
 
@@ -1011,7 +1048,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     CUdeviceptr groupUnscaledEnergyBufferPtr = 0;
     CUdeviceptr groupScalingFactorsPtr = 0;
     CUdeviceptr atomEnergyBufferPtr = 0;
+    CUdeviceptr atomRawEnergyBufferPtr = 0;
     CUdeviceptr outOfBoundsBufferPtr = 0;
+    CUdeviceptr groupRuntimeCapsPtr = 0;
     if (numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
         // Zero group energy buffers only when energy is needed (async GPU clear
         // instead of synchronous host upload to avoid pipeline stalls during integration)
@@ -1027,12 +1066,19 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             groupUnscaledEnergyBufferPtr = groupUnscaledEnergyBuffer.getDevicePointer();
         if (groupScalingFactorsBuffer.isInitialized())
             groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
+        if (groupRuntimeCapsBuffer.isInitialized())
+            groupRuntimeCapsPtr = groupRuntimeCapsBuffer.getDevicePointer();
 
         // Set up per-atom energy/out-of-bounds buffers
         if (atomEnergyBuffer.isInitialized()) {
             if (includeEnergy)
                 cu.clearBuffer(atomEnergyBuffer);
             atomEnergyBufferPtr = atomEnergyBuffer.getDevicePointer();
+        }
+        if (atomRawEnergyBuffer.isInitialized()) {
+            if (includeEnergy)
+                cu.clearBuffer(atomRawEnergyBuffer);
+            atomRawEnergyBufferPtr = atomRawEnergyBuffer.getDevicePointer();
         }
         if (outOfBoundsBuffer.isInitialized()) {
             if (includeEnergy)
@@ -1069,7 +1115,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &arcsinhScale,
         &globalScalingFactor,
         &groupScalingFactorsPtr,
-        &runtimeCap
+        &runtimeCap,
+        &groupRuntimeCapsPtr,
+        &atomRawEnergyBufferPtr
     };
 
 #if DEBUG_GRIDFORCE
@@ -1185,6 +1233,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &arcsinhScale,
             &globalScalingFactor,
             &groupScalingFactorsPtr,
+            &runtimeCap,
+            &groupRuntimeCapsPtr,
+            &atomRawEnergyBufferPtr,
             &tileOffsetsPtr,
             &tileValuePtrsPtr,
             &tileDerivPtrsPtr,
@@ -1208,26 +1259,34 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     // and add them to the main energyBuffer. Skipped during force-only integration
     // steps to avoid GPU pipeline stalls from synchronous downloads.
     if (includeEnergy && numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
-        // Download and save group energies (buffer will be zeroed on next execute)
-        lastGroupEnergies.resize(numParticleGroups);
-        groupEnergyBuffer.download(lastGroupEnergies);
+        if (!skipGroupEnergyDownload_) {
+            // Download and save group energies (buffer will be zeroed on next execute)
+            lastGroupEnergies.resize(numParticleGroups);
+            groupEnergyBuffer.download(lastGroupEnergies);
 
-        // Download unscaled group energies
-        if (groupUnscaledEnergyBuffer.isInitialized()) {
-            lastGroupUnscaledEnergies.resize(numParticleGroups);
-            groupUnscaledEnergyBuffer.download(lastGroupUnscaledEnergies);
-        }
+            // Download unscaled group energies
+            if (groupUnscaledEnergyBuffer.isInitialized()) {
+                lastGroupUnscaledEnergies.resize(numParticleGroups);
+                groupUnscaledEnergyBuffer.download(lastGroupUnscaledEnergies);
+            }
 
-        // Download per-atom energies if buffer is initialized
-        if (atomEnergyBuffer.isInitialized()) {
-            lastAtomEnergies.resize(totalGroupParticles);
-            atomEnergyBuffer.download(lastAtomEnergies);
-        }
+            // Download per-atom energies if buffer is initialized
+            if (atomEnergyBuffer.isInitialized()) {
+                lastAtomEnergies.resize(totalGroupParticles);
+                atomEnergyBuffer.download(lastAtomEnergies);
+            }
 
-        // Download per-atom out-of-bounds flags if buffer is initialized
-        if (outOfBoundsBuffer.isInitialized()) {
-            lastOutOfBoundsFlags.resize(totalGroupParticles);
-            outOfBoundsBuffer.download(lastOutOfBoundsFlags);
+            // Download per-atom raw (pre-cap) energies if buffer is initialized
+            if (atomRawEnergyBuffer.isInitialized()) {
+                lastAtomRawEnergies.resize(totalGroupParticles);
+                atomRawEnergyBuffer.download(lastAtomRawEnergies);
+            }
+
+            // Download per-atom out-of-bounds flags if buffer is initialized
+            if (outOfBoundsBuffer.isInitialized()) {
+                lastOutOfBoundsFlags.resize(totalGroupParticles);
+                outOfBoundsBuffer.download(lastOutOfBoundsFlags);
+            }
         }
 
         // Use a kernel to sum group energies and add to main energy buffer
@@ -1285,6 +1344,15 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
         }
         groupScalingFactorsBuffer.upload(groupScalings);
     }
+
+    // Update per-group runtime caps if groups exist
+    if (numParticleGroups > 0 && groupRuntimeCapsBuffer.isInitialized()) {
+        std::vector<float> groupCaps(numParticleGroups);
+        for (int i = 0; i < numParticleGroups; i++) {
+            groupCaps[i] = (float)force.getParticleGroupRuntimeCap(i);
+        }
+        groupRuntimeCapsBuffer.upload(groupCaps);
+    }
 }
 
 vector<double> CudaCalcGridForceKernel::getParticleGroupEnergies() {
@@ -1327,6 +1395,13 @@ vector<double> CudaCalcGridForceKernel::getParticleAtomEnergies() {
     }
 
     return atomEnergies;
+}
+
+vector<float> CudaCalcGridForceKernel::getParticleGroupAtomRawEnergies() {
+    if (numParticleGroups > 0 && !lastAtomRawEnergies.empty()) {
+        return lastAtomRawEnergies;
+    }
+    return vector<float>();
 }
 
 vector<int> CudaCalcGridForceKernel::getParticleOutOfBoundsFlags() {

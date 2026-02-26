@@ -89,6 +89,10 @@ std::vector<double> GridForceImpl::getParticleAtomEnergies() {
     return kernel.getAs<CalcGridForceKernel>().getParticleAtomEnergies();
 }
 
+std::vector<float> GridForceImpl::getParticleGroupAtomRawEnergies() {
+    return kernel.getAs<CalcGridForceKernel>().getParticleGroupAtomRawEnergies();
+}
+
 std::vector<int> GridForceImpl::getParticleOutOfBoundsFlags() {
     return kernel.getAs<CalcGridForceKernel>().getParticleOutOfBoundsFlags();
 }

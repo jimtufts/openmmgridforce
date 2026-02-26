@@ -35,6 +35,7 @@
 
 
 #include "GridForce.h"
+#include "GridForceKernels.h"
 #include "openmm/Kernel.h"
 #include "openmm/internal/ForceImpl.h"
 #include <string>
@@ -75,6 +76,8 @@ class OPENMM_EXPORT_GRIDFORCE GridForceImpl : public OpenMM::ForceImpl {
     std::vector<double> getParticleGroupUnscaledEnergies();
 
     std::vector<double> getParticleAtomEnergies();
+
+    std::vector<float> getParticleGroupAtomRawEnergies();
 
     std::vector<int> getParticleOutOfBoundsFlags();
 
@@ -145,6 +148,13 @@ class OPENMM_EXPORT_GRIDFORCE GridForceImpl : public OpenMM::ForceImpl {
      * Get total entropy computed by analyzeHessian().
      */
     double getTotalEntropy();
+
+    void setSkipGroupEnergyDownload(bool skip) {
+        kernel.getAs<CalcGridForceKernel>().setSkipGroupEnergyDownload(skip);
+    }
+    void* getGroupEnergyDevicePointer() {
+        return kernel.getAs<CalcGridForceKernel>().getGroupEnergyDevicePointer();
+    }
 
    private:
     const GridForce &owner;
