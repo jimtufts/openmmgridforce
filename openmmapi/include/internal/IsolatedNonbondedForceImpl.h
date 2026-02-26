@@ -33,6 +33,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "IsolatedNonbondedForce.h"
+#include "IsolatedNonbondedForceKernels.h"
 #include "openmm/Kernel.h"
 #include "openmm/internal/ForceImpl.h"
 #include <string>
@@ -69,6 +70,13 @@ public:
      * Compute the Hessian (second derivatives) for the isolated nonbonded force.
      */
     std::vector<double> computeHessian(OpenMM::ContextImpl& context);
+
+    void setSkipGroupEnergyDownload(bool skip) {
+        kernel.getAs<CalcIsolatedNonbondedForceKernel>().setSkipGroupEnergyDownload(skip);
+    }
+    void* getGroupEnergyDevicePointer() {
+        return kernel.getAs<CalcIsolatedNonbondedForceKernel>().getGroupEnergyDevicePointer();
+    }
 
 private:
     const IsolatedNonbondedForce& owner;

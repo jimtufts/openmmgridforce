@@ -329,6 +329,10 @@ double IsolatedGBSAForce::getGroupReceptorSurfaceAreaChange(int groupIndex) cons
     return saWithLigand - saVacuum;
 }
 
+vector<double> IsolatedGBSAForce::getParticleGroupUnscaledEnergies(Context& context) const {
+    return dynamic_cast<IsolatedGBSAForceImpl&>(getImplInContext(context)).getParticleGroupUnscaledEnergies();
+}
+
 void IsolatedGBSAForce::updateParametersInContext(Context& context) {
     dynamic_cast<IsolatedGBSAForceImpl&>(getImplInContext(context)).updateParametersInContext(getContextImpl(context));
 }

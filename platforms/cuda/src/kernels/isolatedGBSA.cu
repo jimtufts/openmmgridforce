@@ -891,7 +891,8 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     float* __restrict__ groupLigandSelfEnergies,
     int paddedNumAtoms,
     float globalScalingFactor,
-    const float* __restrict__ groupScalingFactors
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -980,6 +981,11 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     // Accumulate scaled energies
     atomicAdd(&groupEnergies[groupIdx], energy * scale);
     atomicAdd(&groupLigandSelfEnergies[groupIdx], energy * scale);
+    // Accumulate unscaled energies (no per-group alchemical scaling)
+    if (groupUnscaledEnergies != nullptr) {
+        float unscaledScale = globalScalingFactor;  // only global, no group scaling
+        atomicAdd(&groupUnscaledEnergies[groupIdx], energy * unscaledScale);
+    }
 }
 
 /**
@@ -995,7 +1001,8 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     float probeRadius,
     float* __restrict__ groupEnergies,
     float globalScalingFactor,
-    const float* __restrict__ groupScalingFactors
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -1029,6 +1036,11 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     float saEnergy = surfaceTension * area * scale;
 
     atomicAdd(&groupEnergies[groupIdx], saEnergy);
+    // Accumulate unscaled SA energy (no per-group alchemical scaling)
+    if (groupUnscaledEnergies != nullptr) {
+        float saEnergyUnscaled = surfaceTension * area * globalScalingFactor;
+        atomicAdd(&groupUnscaledEnergies[groupIdx], saEnergyUnscaled);
+    }
 }
 
 /**

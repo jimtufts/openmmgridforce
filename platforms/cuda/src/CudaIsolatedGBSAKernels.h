@@ -35,6 +35,7 @@ public:
     std::vector<double> getGroupBornRadii(int groupIndex) const override;
     std::vector<double> getGroupAtomEnergies(int groupIndex) const override;
     std::vector<double> getReceptorBornRadii(int groupIndex) const override;
+    std::vector<double> getParticleGroupUnscaledEnergies() const override;
 
     // Hessian computation
     std::vector<double> computeHessian(OpenMM::ContextImpl& context) override;
@@ -115,6 +116,7 @@ private:
     OpenMM::CudaArray groupReceptorContributions; // Receptor effect on ligand
     OpenMM::CudaArray groupReceptorDesolvations;  // Receptor desolvation (PAIRWISE only)
     OpenMM::CudaArray groupCrossTermEnergies;     // Cross-term energy (PAIRWISE only)
+    OpenMM::CudaArray groupUnscaledEnergies;      // Unscaled total (no per-group scaling)
 
     // Device arrays - per-atom energies
     OpenMM::CudaArray atomEnergies;
@@ -160,9 +162,18 @@ private:
     mutable std::vector<float> groupReceptorContributionsHost;
     mutable std::vector<float> groupReceptorDesolvationsHost;
     mutable std::vector<float> groupCrossTermEnergiesHost;
+    mutable std::vector<float> groupUnscaledEnergiesHost;
     mutable std::vector<std::vector<float>> groupBornRadiiHost;
     mutable std::vector<std::vector<float>> groupAtomEnergiesHost;
     mutable std::vector<std::vector<float>> groupReceptorBornRadiiHost;  // PAIRWISE mode only
+
+    bool skipGroupEnergyDownload_ = false;
+public:
+    void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
+    void* getGroupEnergyDevicePointer() override {
+        return groupEnergies.isInitialized()
+            ? (void*)groupEnergies.getDevicePointer() : nullptr;
+    }
 };
 
 } // namespace GridForcePlugin

@@ -97,6 +97,9 @@ public:
      * Get the energy for a specific particle group after the last execute() call.
      */
     virtual double getGroupEnergy(int groupIndex) const = 0;
+
+    virtual void setSkipGroupEnergyDownload(bool) {}
+    virtual void* getGroupEnergyDevicePointer() { return nullptr; }
 };
 
 }  // namespace GridForcePlugin

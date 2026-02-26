@@ -44,6 +44,7 @@ public:
     std::vector<double> getGroupBornRadii(int groupIndex) const override;
     std::vector<double> getGroupAtomEnergies(int groupIndex) const override;
     std::vector<double> getReceptorBornRadii(int groupIndex) const override;
+    std::vector<double> getParticleGroupUnscaledEnergies() const override;
 
 private:
     // Configuration

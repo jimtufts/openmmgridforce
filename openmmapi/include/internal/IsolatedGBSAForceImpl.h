@@ -6,6 +6,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "IsolatedGBSAForce.h"
+#include "IsolatedGBSAForceKernels.h"
 #include "openmm/Kernel.h"
 #include "openmm/internal/ForceImpl.h"
 #include <string>
@@ -45,9 +46,21 @@ public:
     void updateParametersInContext(OpenMM::ContextImpl& context);
 
     /**
+     * Get unscaled (no per-group scaling) GBSA energies for all particle groups.
+     */
+    std::vector<double> getParticleGroupUnscaledEnergies();
+
+    /**
      * Compute the Hessian (second derivatives) for the GBSA force.
      */
     std::vector<double> computeHessian(OpenMM::ContextImpl& context);
+
+    void setSkipGroupEnergyDownload(bool skip) {
+        kernel.getAs<CalcIsolatedGBSAForceKernel>().setSkipGroupEnergyDownload(skip);
+    }
+    void* getGroupEnergyDevicePointer() {
+        return kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupEnergyDevicePointer();
+    }
 
 private:
     const IsolatedGBSAForce& owner;

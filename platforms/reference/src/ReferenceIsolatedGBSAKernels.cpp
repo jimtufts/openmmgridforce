@@ -1005,4 +1005,10 @@ vector<double> ReferenceCalcIsolatedGBSAForceKernel::getReceptorBornRadii(int gr
     return groupReceptorBornRadii_[groupIndex];
 }
 
+vector<double> ReferenceCalcIsolatedGBSAForceKernel::getParticleGroupUnscaledEnergies() const {
+    // Reference platform: return empty vector (not implemented)
+    // The CUDA platform is the primary target for this optimization
+    return vector<double>(numParticleGroups, 0.0);
+}
+
 }  // namespace GridForcePlugin

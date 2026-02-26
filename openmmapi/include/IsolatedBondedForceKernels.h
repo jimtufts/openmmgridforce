@@ -51,6 +51,14 @@ public:
      * using a specific particle group's positions.
      */
     virtual std::vector<double> computeInternalForceConstants(OpenMM::ContextImpl& context, int groupIndex) = 0;
+
+    /**
+     * Control whether group energy downloads are skipped after execute().
+     * When true, energies are computed on GPU but not downloaded to host.
+     * Used by NUTS integrator to avoid CPU-GPU sync points in the inner loop.
+     */
+    virtual void setSkipGroupEnergyDownload(bool) {}
+    virtual void* getGroupEnergyDevicePointer() { return nullptr; }
 };
 
 }  // namespace GridForcePlugin

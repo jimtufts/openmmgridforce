@@ -96,6 +96,10 @@ void IsolatedGBSAForceImpl::updateParametersInContext(ContextImpl& context) {
     kernel.getAs<CalcIsolatedGBSAForceKernel>().updateParametersInContext(context, owner);
 }
 
+vector<double> IsolatedGBSAForceImpl::getParticleGroupUnscaledEnergies() {
+    return kernel.getAs<CalcIsolatedGBSAForceKernel>().getParticleGroupUnscaledEnergies();
+}
+
 vector<double> IsolatedGBSAForceImpl::computeHessian(ContextImpl& context) {
     return kernel.getAs<CalcIsolatedGBSAForceKernel>().computeHessian(context);
 }

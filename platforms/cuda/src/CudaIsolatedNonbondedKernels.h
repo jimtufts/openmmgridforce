@@ -89,6 +89,14 @@ private:
     // Hessian computation support
     CUfunction hessianKernel = nullptr;   // Kernel for Hessian computation
     OpenMM::CudaArray hessianBuffer;      // Full Hessian matrix (3N x 3N)
+
+    bool skipGroupEnergyDownload_ = false;
+public:
+    void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
+    void* getGroupEnergyDevicePointer() override {
+        return groupEnergiesBuffer.isInitialized()
+            ? (void*)groupEnergiesBuffer.getDevicePointer() : nullptr;
+    }
 };
 
 } // namespace GridForcePlugin

@@ -102,9 +102,17 @@ public:
     virtual std::vector<double> getReceptorBornRadii(int groupIndex) const = 0;
 
     /**
+     * Get unscaled (no per-group scaling) GBSA energies for all particle groups.
+     */
+    virtual std::vector<double> getParticleGroupUnscaledEnergies() const = 0;
+
+    /**
      * Compute the Hessian (second derivatives) for the GBSA force.
      */
     virtual std::vector<double> computeHessian(OpenMM::ContextImpl& context) = 0;
+
+    virtual void setSkipGroupEnergyDownload(bool) {}
+    virtual void* getGroupEnergyDevicePointer() { return nullptr; }
 };
 
 } // namespace GridForcePlugin

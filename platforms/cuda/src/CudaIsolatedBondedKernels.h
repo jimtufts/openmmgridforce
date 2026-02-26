@@ -65,6 +65,14 @@ private:
     std::vector<BondInfoH> h_bonds;
     std::vector<AngleInfoH> h_angles;
     std::vector<TorsionInfoH> h_torsions;
+
+    bool skipGroupEnergyDownload_ = false;
+public:
+    void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
+    void* getGroupEnergyDevicePointer() override {
+        return groupEnergiesBuffer.isInitialized()
+            ? (void*)groupEnergiesBuffer.getDevicePointer() : nullptr;
+    }
 };
 
 } // namespace GridForcePlugin

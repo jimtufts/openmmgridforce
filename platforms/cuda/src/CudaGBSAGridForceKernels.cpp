@@ -572,7 +572,7 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
     }
 
     // Download group energies only when energy is needed to avoid sync barriers
-    if (includeEnergy) {
+    if (includeEnergy && !skipGroupEnergyDownload_) {
         groupEnergies.download(groupEnergiesHost);
         groupLigandEnergies.download(groupLigandEnergiesHost);
 

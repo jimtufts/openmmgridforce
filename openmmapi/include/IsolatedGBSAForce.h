@@ -362,6 +362,16 @@ public:
      */
     double getGroupReceptorSurfaceAreaChange(int groupIndex) const;
 
+    /**
+     * Get the unscaled (no per-group alchemical scaling) total GBSA energies
+     * for all particle groups. Only global scaling is applied.
+     * This avoids the need for a separate force evaluation with scaling set to 1.0.
+     *
+     * @param context The Context to get energies from (must have been evaluated)
+     * @return Vector of unscaled energies, one per particle group
+     */
+    std::vector<double> getParticleGroupUnscaledEnergies(OpenMM::Context& context) const;
+
     // ========== Parameter Updates ==========
 
     /**

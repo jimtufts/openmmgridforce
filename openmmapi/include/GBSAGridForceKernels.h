@@ -89,6 +89,9 @@ public:
      * Only valid after computeHessian().
      */
     virtual std::vector<double> getFullHessian() const = 0;
+
+    virtual void setSkipGroupEnergyDownload(bool) {}
+    virtual void* getGroupEnergyDevicePointer() { return nullptr; }
 };
 
 } // namespace GridForcePlugin

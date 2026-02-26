@@ -6,6 +6,7 @@
 #define OPENMM_GBSAGRIDFORCE_IMPL_H_
 
 #include "GBSAGridForce.h"
+#include "GBSAGridForceKernels.h"
 #include "openmm/Kernel.h"
 #include "openmm/internal/ForceImpl.h"
 #include <string>
@@ -49,6 +50,13 @@ public:
     void computeHessian(OpenMM::ContextImpl& context);
     std::vector<double> getHessianBlocks();
     std::vector<double> getFullHessian();
+
+    void setSkipGroupEnergyDownload(bool skip) {
+        kernel.getAs<CalcGBSAGridForceKernel>().setSkipGroupEnergyDownload(skip);
+    }
+    void* getGroupEnergyDevicePointer() {
+        return kernel.getAs<CalcGBSAGridForceKernel>().getGroupEnergyDevicePointer();
+    }
 
 private:
     const GBSAGridForce& owner;

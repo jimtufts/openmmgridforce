@@ -226,7 +226,7 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
     cu.executeKernel(kernel, args, numBlocks * blockSize, blockSize);
 
     // Download per-group energies (only when energy is needed to avoid sync barriers)
-    if (includeEnergy)
+    if (includeEnergy && !skipGroupEnergyDownload_)
         groupEnergiesBuffer.download(groupEnergiesHost);
 
     return 0.0;  // Energy is accumulated in the energy buffer

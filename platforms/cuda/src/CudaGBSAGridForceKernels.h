@@ -186,6 +186,14 @@ private:
     CUfunction computeReceptorGridHessianKernel;
     CUfunction computeBornCouplingMatrixKernel;
     CUfunction assembleGBSAHessianKernel;
+
+    bool skipGroupEnergyDownload_ = false;
+public:
+    void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
+    void* getGroupEnergyDevicePointer() override {
+        return groupEnergies.isInitialized()
+            ? (void*)groupEnergies.getDevicePointer() : nullptr;
+    }
 };
 
 } // namespace GridForcePlugin

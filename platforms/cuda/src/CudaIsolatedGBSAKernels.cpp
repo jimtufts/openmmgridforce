@@ -258,12 +258,14 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     groupReceptorContributions.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorContributions");
     groupReceptorDesolvations.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorDesolvations");
     groupCrossTermEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupCrossTermEnergies");
+    groupUnscaledEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupUnscaledEnergies");
 
     groupEnergiesHost.resize(numParticleGroups);
     groupLigandSelfEnergiesHost.resize(numParticleGroups);
     groupReceptorContributionsHost.resize(numParticleGroups);
     groupReceptorDesolvationsHost.resize(numParticleGroups);
     groupCrossTermEnergiesHost.resize(numParticleGroups);
+    groupUnscaledEnergiesHost.resize(numParticleGroups);
     groupBornRadiiHost.resize(numParticleGroups);
     groupAtomEnergiesHost.resize(numParticleGroups);
 
@@ -400,6 +402,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     cu.clearBuffer(groupLigandSelfEnergies);
     cu.clearBuffer(groupReceptorContributions);
     cu.clearBuffer(groupReceptorDesolvations);
+    cu.clearBuffer(groupUnscaledEnergies);
     cu.clearBuffer(groupCrossTermEnergies);
     cu.clearBuffer(hctReceptor);
     cu.clearBuffer(hctLigand);
@@ -480,13 +483,14 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     // Get scaling factor device pointers
     CUdeviceptr groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
+    CUdeviceptr groupUnscaledEnergiesPtr = groupUnscaledEnergies.getDevicePointer();
 
     // Step 4: Compute GB energy and forces
     void* energyArgs[] = {
         &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
         &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor,
         &forcePtr, &groupEnergiesPtr, &groupLigandEnergiesPtr, &paddedNumAtoms,
-        &globalScalingFactor, &groupScalingFactorsPtr
+        &globalScalingFactor, &groupScalingFactorsPtr, &groupUnscaledEnergiesPtr
     };
     cu.executeKernel(computeGBEnergyKernel, energyArgs, numBlocks * blockSize, blockSize);
 
@@ -494,6 +498,9 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
         // Download ligand energies first so we can add to them
         groupEnergies.download(groupEnergiesHost);
+
+        // Download unscaled energies (ligand self-energy part from GPU kernel)
+        groupUnscaledEnergies.download(groupUnscaledEnergiesHost);
 
         // Download group scaling factors for host-side scaling of desolvation
         std::vector<float> groupScalings(numParticleGroups);
@@ -555,11 +562,17 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             receptorEnergy.download(recEnergy);
             float desolvation = recEnergy[0] - receptorReferenceEnergyValue;
 
+            // Store unscaled desolvation (only global scaling, no per-group)
+            float desolvationUnscaled = desolvation * globalScalingFactor;
+
             // Apply alchemical scaling to desolvation
             desolvation *= globalScalingFactor * groupScalings[g];
 
             // Store desolvation for this group
             groupReceptorDesolvationsHost[g] = desolvation;
+
+            // Accumulate unscaled desolvation
+            groupUnscaledEnergiesHost[g] += desolvationUnscaled;
 
             // Add desolvation to total group energy
             groupEnergiesHost[g] += desolvation;
@@ -581,9 +594,15 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         cu.executeKernel(computeCrossTermGBEnergyKernel, crossTermArgs, numBlocks * blockSize, blockSize);
 
         // Download cross-term energies and add to total
+        // Also accumulate unscaled cross-term (remove per-group scaling, keep global)
         groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
         for (int g = 0; g < numParticleGroups; g++) {
             groupEnergiesHost[g] += groupCrossTermEnergiesHost[g];
+            // Cross-term kernel applied globalScalingFactor * groupScalings[g],
+            // unscaled needs only globalScalingFactor, so divide out group scaling
+            if (groupScalings[g] != 0.0f) {
+                groupUnscaledEnergiesHost[g] += groupCrossTermEnergiesHost[g] / groupScalings[g];
+            }
         }
 
         // Re-upload updated group energies
@@ -597,7 +616,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &radiiPtr, &bornRadiiPtr, &groupStartPtr,
             &numParticleGroups, &numAtoms,
             &surfaceTension, &probe, &groupEnergiesPtr,
-            &globalScalingFactor, &groupScalingFactorsPtr
+            &globalScalingFactor, &groupScalingFactorsPtr, &groupUnscaledEnergiesPtr
         };
         cu.executeKernel(computeSAEnergyKernel, saArgs, numBlocks * blockSize, blockSize);
     }
@@ -712,9 +731,14 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     }
 
     // Download group energies only when energy is needed to avoid sync barriers
-    if (includeEnergy) {
+    if (includeEnergy && !skipGroupEnergyDownload_) {
         groupEnergies.download(groupEnergiesHost);
         groupLigandSelfEnergies.download(groupLigandSelfEnergiesHost);
+
+        // Download unscaled energies (for GRID mode; PAIRWISE already handled above)
+        if (receptorMode != IsolatedGBSAForce::PAIRWISE) {
+            groupUnscaledEnergies.download(groupUnscaledEnergiesHost);
+        }
 
         // For PAIRWISE mode, desolvation and cross-term were already added to groupEnergiesHost
         // and downloaded above. Just download them here for accessors.
@@ -860,6 +884,11 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::getReceptorBornRadii(int groupIn
     groupReceptorBornRadiiHost[groupIndex] = recBornRadii;
 
     vector<double> result(recBornRadii.begin(), recBornRadii.end());
+    return result;
+}
+
+vector<double> CudaCalcIsolatedGBSAForceKernel::getParticleGroupUnscaledEnergies() const {
+    vector<double> result(groupUnscaledEnergiesHost.begin(), groupUnscaledEnergiesHost.end());
     return result;
 }
 

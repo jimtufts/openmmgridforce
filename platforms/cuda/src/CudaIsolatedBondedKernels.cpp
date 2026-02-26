@@ -224,7 +224,7 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
     }
 
     // Download per-group energies (only when energy is needed to avoid sync barriers)
-    if (includeEnergy)
+    if (includeEnergy && !skipGroupEnergyDownload_)
         groupEnergiesBuffer.download(groupEnergiesHost);
 
     return 0.0;  // Energy accumulated in energy buffer

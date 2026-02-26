@@ -6,6 +6,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "IsolatedBondedForce.h"
+#include "IsolatedBondedForceKernels.h"
 #include "openmm/Kernel.h"
 #include "openmm/internal/ForceImpl.h"
 #include <string>
@@ -36,6 +37,13 @@ public:
 
     std::vector<double> computeHessian(OpenMM::ContextImpl& context, int groupIndex);
     std::vector<double> computeInternalForceConstants(OpenMM::ContextImpl& context, int groupIndex);
+
+    void setSkipGroupEnergyDownload(bool skip) {
+        kernel.getAs<CalcIsolatedBondedForceKernel>().setSkipGroupEnergyDownload(skip);
+    }
+    void* getGroupEnergyDevicePointer() {
+        return kernel.getAs<CalcIsolatedBondedForceKernel>().getGroupEnergyDevicePointer();
+    }
 
 private:
     const IsolatedBondedForce& owner;
