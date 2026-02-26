@@ -1,0 +1,452 @@
+/* -------------------------------------------------------------------------- *
+ *                              OpenMMGridForce                               *
+ * -------------------------------------------------------------------------- *
+ * Reference (CPU) implementation of MultiGroupHMCIntegrator kernel.         *
+ * -------------------------------------------------------------------------- */
+
+#include "ReferenceMultiGroupHMCKernels.h"
+#include "ReferenceGridInterpolation.h"
+#include "GridForce.h"
+#include "IsolatedBondedForce.h"
+#include "IsolatedNonbondedForce.h"
+#include "IsolatedGBSAForce.h"
+#include "IsolatedSiteForce.h"
+#include "GBSAGridForce.h"
+#include "openmm/internal/ContextImpl.h"
+#include "openmm/OpenMMException.h"
+#include "openmm/reference/ReferencePlatform.h"
+#include "openmm/reference/SimTKOpenMMRealType.h"
+#include <cmath>
+#include <algorithm>
+
+using namespace OpenMM;
+using namespace std;
+
+namespace GridForcePlugin {
+
+static vector<Vec3>& refExtractVelocities(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data =
+        reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    return *((vector<Vec3>*)data->velocities);
+}
+
+void ReferenceIntegrateMultiGroupHMCStepKernel::initialize(
+        const System& system, const MultiGroupHMCIntegrator& integrator) {
+
+    numGroups = integrator.getNumGroups();
+    atomsPerGroup = integrator.getAtomsPerGroup();
+    numParticles = system.getNumParticles();
+
+    masses.resize(numParticles);
+    for (int i = 0; i < numParticles; i++)
+        masses[i] = system.getParticleMass(i);
+
+    positionsBackup.resize(numParticles);
+    lastAccepted.resize(numGroups, 0);
+    lastDeltaH.resize(numGroups, 0.0);
+    acceptCounts.resize(numGroups, 0);
+    trialCounts.resize(numGroups, 0);
+    stabilityRejectCounts.resize(numGroups, 0);
+
+    int seed = integrator.getRandomNumberSeed();
+    if (seed == 0) {
+        random_device rd;
+        seed = rd();
+    }
+    rng.seed(seed);
+    normalDist = normal_distribution<double>(0.0, 1.0);
+    uniformDist = uniform_real_distribution<double>(0.0, 1.0);
+
+    // Scan system forces and register per-group energy extractors.
+    // Each plugin force type has getParticleGroupEnergies() that returns
+    // cached per-group energies from the last calcForcesAndEnergy() call.
+    int K = numGroups;
+    groupEnergyExtractors.clear();
+    for (int i = 0; i < system.getNumForces(); i++) {
+        const Force& force = system.getForce(i);
+
+        // Try each plugin force type
+        if (auto* f = dynamic_cast<const GridForce*>(&force)) {
+            if (f->getNumParticleGroups() > 0) {
+                // GridForce::getParticleGroupEnergies requires a Context, but the
+                // m_groupEnergies are populated by the ForceImpl after each
+                // calcForcesAndEnergy call. We use the kernel-level accessor instead.
+                // Since we can't call Force methods that need Context from here,
+                // we'll use the ForceImpl approach in computeGroupPE instead.
+            }
+        }
+        // The extractors will be wired up in the first execute() call instead,
+        // where we have access to the ContextImpl and its ForceImpls.
+    }
+}
+
+void ReferenceIntegrateMultiGroupHMCStepKernel::computeGroupPE(
+        vector<double>& groupPE) const {
+    // Sum per-group energies from all registered extractors
+    fill(groupPE.begin(), groupPE.end(), 0.0);
+    for (auto& extractor : groupEnergyExtractors) {
+        vector<double> energies = extractor();
+        for (int k = 0; k < numGroups && k < (int)energies.size(); k++)
+            groupPE[k] += energies[k];
+    }
+}
+
+void ReferenceIntegrateMultiGroupHMCStepKernel::execute(
+        ContextImpl& context, const MultiGroupHMCIntegrator& integrator,
+        bool forcesAreValid) {
+
+    vector<Vec3>& posData = refExtractPositions(context);
+    vector<Vec3>& velData = refExtractVelocities(context);
+    int K = numGroups;
+
+    // On first call, wire up the group energy extractors using ForceImpls.
+    // After calcForcesAndEnergy(), each ForceImpl populates its Force object's
+    // m_groupEnergies cache. We read those via getParticleGroupEnergies().
+    if (groupEnergyExtractors.empty()) {
+        const System& system = context.getSystem();
+        for (int i = 0; i < system.getNumForces(); i++) {
+            const Force& force = system.getForce(i);
+
+            if (auto* f = dynamic_cast<const IsolatedBondedForce*>(&force)) {
+                if (f->getNumParticleGroups() > 0)
+                    groupEnergyExtractors.push_back([f]() { return f->getParticleGroupEnergies(); });
+            }
+            else if (auto* f = dynamic_cast<const IsolatedNonbondedForce*>(&force)) {
+                if (f->getNumParticleGroups() > 0)
+                    groupEnergyExtractors.push_back([f]() { return f->getParticleGroupEnergies(); });
+            }
+            else if (auto* f = dynamic_cast<const IsolatedGBSAForce*>(&force)) {
+                if (f->getNumParticleGroups() > 0)
+                    groupEnergyExtractors.push_back([f]() { return f->getParticleGroupEnergies(); });
+            }
+            else if (auto* f = dynamic_cast<const IsolatedSiteForce*>(&force)) {
+                if (f->getNumParticleGroups() > 0)
+                    groupEnergyExtractors.push_back([f]() { return f->getParticleGroupEnergies(); });
+            }
+            else if (auto* f = dynamic_cast<const GBSAGridForce*>(&force)) {
+                if (f->getNumParticleGroups() > 0) {
+                    groupEnergyExtractors.push_back([f, K]() {
+                        vector<double> energies(K);
+                        for (int k = 0; k < K; k++)
+                            energies[k] = f->getGroupEnergy(k);
+                        return energies;
+                    });
+                }
+            }
+            else if (auto* f = dynamic_cast<const GridForce*>(&force)) {
+                // GridForce::getParticleGroupEnergies requires Context.
+                // The kernel populates per-group energies during execute().
+                // After calcForcesAndEnergy, we can read them from the kernel
+                // via the ForceImpl. Use a different approach: read from the
+                // Force object's cached energies.
+                // GridForce stores per-group energies in the kernel, accessible
+                // via GridForceImpl::getParticleGroupEnergies(). We need the
+                // context to call it. Store a reference to ContextImpl.
+                if (f->getNumParticleGroups() > 0) {
+                    // GridForce needs Context for getParticleGroupEnergies.
+                    // We capture a pointer to the ContextImpl's owner (Context)
+                    // and call the Force method that routes through the Impl.
+                    Context* ctx = &context.getOwner();
+                    const GridForce* gf = f;
+                    groupEnergyExtractors.push_back([gf, ctx]() {
+                        return gf->getParticleGroupEnergies(*ctx);
+                    });
+                }
+            }
+        }
+    }
+
+    // ===== 1. Backup positions =====
+    for (int i = 0; i < numParticles; i++)
+        positionsBackup[i] = posData[i];
+
+    // ===== 2. Draw Maxwell-Boltzmann velocities per group =====
+    for (int k = 0; k < K; k++) {
+        double T = integrator.getGroupTemperature(k);
+        double kT = BOLTZ * T;
+        int baseAtom = k * atomsPerGroup;
+
+        if (integrator.getMomentumRefreshMode() == MultiGroupHMCIntegrator::FULL) {
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = baseAtom + a;
+                double m = masses[idx];
+                if (m <= 0.0) continue;
+                double sigma = sqrt(kT / m);
+                velData[idx] = Vec3(sigma * normalDist(rng),
+                                    sigma * normalDist(rng),
+                                    sigma * normalDist(rng));
+            }
+        } else {
+            double theta = integrator.getPartialRefreshAngle();
+            double cosTheta = cos(theta);
+            double sinTheta = sin(theta);
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = baseAtom + a;
+                double m = masses[idx];
+                if (m <= 0.0) continue;
+                double sigma = sqrt(kT / m);
+                Vec3 vRand(sigma * normalDist(rng),
+                           sigma * normalDist(rng),
+                           sigma * normalDist(rng));
+                velData[idx] = velData[idx] * cosTheta + vRand * sinTheta;
+            }
+        }
+    }
+
+    // ===== 3. Compute initial KE and PE per group =====
+    vector<double> keOld(K);
+    computeGroupKE(context, keOld);
+
+    // Evaluate all forces to get initial PE
+    int allGroupsMask = 0xFFFFFFFF;
+    context.calcForcesAndEnergy(true, true, allGroupsMask);
+
+    vector<double> peOld(K, 0.0);
+    computeGroupPE(peOld);
+
+    // ===== 4. RESPA NVE trajectory =====
+    respaTrajectory(context, integrator);
+
+    // ===== 5. Compute final KE and PE per group =====
+    vector<double> keNew(K);
+    computeGroupKE(context, keNew);
+
+    context.calcForcesAndEnergy(true, true, allGroupsMask);
+
+    vector<double> peNew(K, 0.0);
+    computeGroupPE(peNew);
+
+    // ===== 6. Metropolis accept/reject per group =====
+    double stabilityThreshold = integrator.getStabilityThreshold();
+
+    for (int k = 0; k < K; k++) {
+        double T = integrator.getGroupTemperature(k);
+        double kT = BOLTZ * T;
+
+        double deltaPE = peNew[k] - peOld[k];
+        double deltaKE = keNew[k] - keOld[k];
+        double deltaH = deltaPE + deltaKE;
+
+        lastDeltaH[k] = deltaH;
+        trialCounts[k]++;
+
+        // Stability guard
+        bool stable = (fabs(deltaPE) / kT < stabilityThreshold) ||
+                      (fabs(deltaH) / kT < stabilityThreshold);
+        if (!stable) {
+            lastAccepted[k] = 0;
+            stabilityRejectCounts[k]++;
+            continue;
+        }
+
+        // Standard Metropolis
+        bool accept = (deltaH <= 0.0) || (uniformDist(rng) < exp(-deltaH / kT));
+        lastAccepted[k] = accept ? 1 : 0;
+        if (accept)
+            acceptCounts[k]++;
+    }
+
+    // ===== 7. Restore positions for rejected groups =====
+    for (int k = 0; k < K; k++) {
+        if (lastAccepted[k] == 0) {
+            int baseAtom = k * atomsPerGroup;
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = baseAtom + a;
+                posData[idx] = positionsBackup[idx];
+                velData[idx] = Vec3(0, 0, 0);
+            }
+        }
+    }
+}
+
+void ReferenceIntegrateMultiGroupHMCStepKernel::respaTrajectory(
+        ContextImpl& context, const MultiGroupHMCIntegrator& integrator) {
+
+    vector<Vec3>& posData = refExtractPositions(context);
+    vector<Vec3>& velData = refExtractVelocities(context);
+
+    int K = numGroups;
+    int numOuterSteps = integrator.getNumOuterSteps();
+    const vector<pair<int,int> >& schedule = integrator.getForceGroupSchedule();
+
+    if (schedule.empty()) {
+        // Simple Verlet (no RESPA) with per-group dt
+        int allGroupsMask = 0xFFFFFFFF;
+
+        for (int step = 0; step < numOuterSteps; step++) {
+            // Half-kick
+            vector<Vec3>& forceData = refExtractForces(context);
+            for (int k = 0; k < K; k++) {
+                double halfDt = 0.5 * integrator.getGroupStepSize(k);
+                int base = k * atomsPerGroup;
+                for (int a = 0; a < atomsPerGroup; a++) {
+                    int idx = base + a;
+                    if (masses[idx] > 0)
+                        velData[idx] += forceData[idx] * (halfDt / masses[idx]);
+                }
+            }
+
+            // Drift
+            for (int k = 0; k < K; k++) {
+                double dt = integrator.getGroupStepSize(k);
+                int base = k * atomsPerGroup;
+                for (int a = 0; a < atomsPerGroup; a++)
+                    posData[base + a] += velData[base + a] * dt;
+            }
+
+            // Forces
+            context.calcForcesAndEnergy(true, false, allGroupsMask);
+
+            // Half-kick
+            forceData = refExtractForces(context);
+            for (int k = 0; k < K; k++) {
+                double halfDt = 0.5 * integrator.getGroupStepSize(k);
+                int base = k * atomsPerGroup;
+                for (int a = 0; a < atomsPerGroup; a++) {
+                    int idx = base + a;
+                    if (masses[idx] > 0)
+                        velData[idx] += forceData[idx] * (halfDt / masses[idx]);
+                }
+            }
+        }
+        return;
+    }
+
+    // 2-level RESPA
+    if (schedule.size() != 2)
+        throw OpenMMException("MultiGroupHMCIntegrator: RESPA schedule must have exactly 2 entries");
+
+    int slowIdx = (schedule[0].second <= schedule[1].second) ? 0 : 1;
+    int fastIdx = 1 - slowIdx;
+    int slowForceGroup = schedule[slowIdx].first;
+    int fastForceGroup = schedule[fastIdx].first;
+    int innerStepsPerOuter = schedule[fastIdx].second;
+    if (innerStepsPerOuter < 1) innerStepsPerOuter = 1;
+
+    int slowMask = (1 << slowForceGroup);
+    int fastMask = (1 << fastForceGroup);
+
+    // We need separate slow and fast force arrays since the Reference platform
+    // overwrites a single force buffer on each calcForcesAndEnergy call.
+    vector<Vec3> slowForces(numParticles, Vec3(0, 0, 0));
+
+    // Compute initial slow forces
+    context.calcForcesAndEnergy(true, false, slowMask);
+    {
+        vector<Vec3>& f = refExtractForces(context);
+        for (int i = 0; i < numParticles; i++)
+            slowForces[i] = f[i];
+    }
+
+    // Compute initial fast forces (left in the context force buffer)
+    context.calcForcesAndEnergy(true, false, fastMask);
+
+    for (int outer = 0; outer < numOuterSteps; outer++) {
+        // Slow half-kick (outer dt)
+        for (int k = 0; k < K; k++) {
+            double halfOuterDt = 0.5 * integrator.getGroupStepSize(k);
+            int base = k * atomsPerGroup;
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = base + a;
+                if (masses[idx] > 0)
+                    velData[idx] += slowForces[idx] * (halfOuterDt / masses[idx]);
+            }
+        }
+
+        // Inner loop
+        for (int inner = 0; inner < innerStepsPerOuter; inner++) {
+            // Fast half-kick (inner dt)
+            vector<Vec3>& fastForces = refExtractForces(context);
+            for (int k = 0; k < K; k++) {
+                double halfInnerDt = 0.5 * integrator.getGroupStepSize(k) / innerStepsPerOuter;
+                int base = k * atomsPerGroup;
+                for (int a = 0; a < atomsPerGroup; a++) {
+                    int idx = base + a;
+                    if (masses[idx] > 0)
+                        velData[idx] += fastForces[idx] * (halfInnerDt / masses[idx]);
+                }
+            }
+
+            // Drift (inner dt)
+            for (int k = 0; k < K; k++) {
+                double innerDt = integrator.getGroupStepSize(k) / innerStepsPerOuter;
+                int base = k * atomsPerGroup;
+                for (int a = 0; a < atomsPerGroup; a++)
+                    posData[base + a] += velData[base + a] * innerDt;
+            }
+
+            // Recompute fast forces
+            context.calcForcesAndEnergy(true, false, fastMask);
+
+            // Fast half-kick (inner dt)
+            fastForces = refExtractForces(context);
+            for (int k = 0; k < K; k++) {
+                double halfInnerDt = 0.5 * integrator.getGroupStepSize(k) / innerStepsPerOuter;
+                int base = k * atomsPerGroup;
+                for (int a = 0; a < atomsPerGroup; a++) {
+                    int idx = base + a;
+                    if (masses[idx] > 0)
+                        velData[idx] += fastForces[idx] * (halfInnerDt / masses[idx]);
+                }
+            }
+        }
+
+        // Recompute slow forces
+        context.calcForcesAndEnergy(true, false, slowMask);
+        {
+            vector<Vec3>& f = refExtractForces(context);
+            for (int i = 0; i < numParticles; i++)
+                slowForces[i] = f[i];
+        }
+
+        // Slow half-kick (outer dt)
+        for (int k = 0; k < K; k++) {
+            double halfOuterDt = 0.5 * integrator.getGroupStepSize(k);
+            int base = k * atomsPerGroup;
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = base + a;
+                if (masses[idx] > 0)
+                    velData[idx] += slowForces[idx] * (halfOuterDt / masses[idx]);
+            }
+        }
+    }
+}
+
+void ReferenceIntegrateMultiGroupHMCStepKernel::computeGroupKE(
+        ContextImpl& context, vector<double>& groupKE) const {
+
+    vector<Vec3>& velData = refExtractVelocities(context);
+    groupKE.resize(numGroups);
+
+    for (int k = 0; k < numGroups; k++) {
+        double ke = 0.0;
+        int base = k * atomsPerGroup;
+        for (int a = 0; a < atomsPerGroup; a++) {
+            int idx = base + a;
+            double m = masses[idx];
+            if (m <= 0.0) continue;
+            const Vec3& v = velData[idx];
+            ke += 0.5 * m * (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+        }
+        groupKE[k] = ke;
+    }
+}
+
+double ReferenceIntegrateMultiGroupHMCStepKernel::computeKineticEnergy(
+        ContextImpl& context, const MultiGroupHMCIntegrator& integrator) {
+
+    vector<double> groupKE;
+    computeGroupKE(context, groupKE);
+    double total = 0.0;
+    for (int k = 0; k < numGroups; k++)
+        total += groupKE[k];
+    return total;
+}
+
+void ReferenceIntegrateMultiGroupHMCStepKernel::resetCounters() {
+    fill(acceptCounts.begin(), acceptCounts.end(), 0);
+    fill(trialCounts.begin(), trialCounts.end(), 0);
+    fill(stabilityRejectCounts.begin(), stabilityRejectCounts.end(), 0);
+}
+
+}  // namespace GridForcePlugin
