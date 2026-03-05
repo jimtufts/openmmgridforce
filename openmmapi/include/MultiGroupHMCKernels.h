@@ -124,6 +124,16 @@ public:
      * Reset MC counters.
      */
     virtual void resetMCCounters() = 0;
+
+    // ========== Riemannian Metric ==========
+
+    /**
+     * Get per-group metric condition numbers from the last metric assembly.
+     * @return vector of condition numbers, one per group (default: all 1.0)
+     */
+    virtual std::vector<double> getGroupMetricConditionNumbers() const {
+        return std::vector<double>();
+    }
 };
 
 }  // namespace GridForcePlugin

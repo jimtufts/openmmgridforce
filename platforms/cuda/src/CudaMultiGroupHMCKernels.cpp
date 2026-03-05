@@ -59,6 +59,12 @@ void CudaIntegrateMultiGroupHMCStepKernel::initialize(
     mcAcceptedTotal = 0;
     lastMCAcceptedPerGroup.resize(numGroups, 0);
 
+    // Metric state
+    metricInitialized = false;
+    conditionNumbersHost.resize(numGroups, 1.0f);
+    gridForceImpls.clear();
+    bondedForceImpl = nullptr;
+
     // MC host vectors
     groupCOMHost.resize(4 * numGroups, 0.0);
     mcEnabledHost.resize(numGroups, 0);
@@ -93,11 +99,22 @@ void CudaIntegrateMultiGroupHMCStepKernel::computeGroupKE(
     int numBlocks = min((totalAtoms + blockSize - 1) / blockSize,
                         cu.getNumThreadBlocks());
 
-    void* args[] = {
-        &velmPtr, &kePtr,
-        &atomsPerGroup, &numGroups
-    };
-    cu.executeKernel(computeGroupKEKernel, args, numBlocks * blockSize, blockSize);
+    if (metricInitialized && metricBuffer.isInitialized()) {
+        // Metric-aware KE: 0.5 * v^T * G * v
+        CUdeviceptr mPtr = metricBuffer.getDevicePointer();
+        void* args[] = {
+            &velmPtr, &mPtr, &kePtr,
+            &atomsPerGroup, &numGroups
+        };
+        cu.executeKernel(rmComputeGroupKEKernel, args, numBlocks * blockSize, blockSize);
+    } else {
+        // Standard KE: 0.5 * v^2 / invMass
+        void* args[] = {
+            &velmPtr, &kePtr,
+            &atomsPerGroup, &numGroups
+        };
+        cu.executeKernel(computeGroupKEKernel, args, numBlocks * blockSize, blockSize);
+    }
 
     groupKEBuffer.download(groupKEHost);
     groupKE = groupKEHost;
@@ -124,13 +141,27 @@ void CudaIntegrateMultiGroupHMCStepKernel::launchKick(
     else
         scalePtr = &scaleF;
 
-    void* args[] = {
-        &velmPtr, &forcePtr, &dtPtr,
-        &atomsPerGroup, &numGroups,
-        scalePtr,
-        &paddedNumAtoms
-    };
-    cu.executeKernel(velocityKickKernel, args, numBlocks * blockSize, blockSize);
+    if (metricInitialized && metricInvBuffer.isInitialized()) {
+        // Metric-aware kick: v += scale * dt * G^{-1} * F
+        CUdeviceptr miPtr = metricInvBuffer.getDevicePointer();
+        CUdeviceptr activePtr = activeBuffer.getDevicePointer();
+        void* args[] = {
+            &velmPtr, &forcePtr, &miPtr, &dtPtr, &activePtr,
+            &atomsPerGroup, &numGroups,
+            scalePtr,
+            &paddedNumAtoms
+        };
+        cu.executeKernel(rmVelocityKickKernel, args, numBlocks * blockSize, blockSize);
+    } else {
+        // Standard kick: v += scale * dt * F * invMass
+        void* args[] = {
+            &velmPtr, &forcePtr, &dtPtr,
+            &atomsPerGroup, &numGroups,
+            scalePtr,
+            &paddedNumAtoms
+        };
+        cu.executeKernel(velocityKickKernel, args, numBlocks * blockSize, blockSize);
+    }
 }
 
 void CudaIntegrateMultiGroupHMCStepKernel::launchDrift() {
@@ -182,6 +213,21 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
         positionDriftKernel = cu.getKernel(module, "hmcPositionDrift");
         copyForcesKernel = cu.getKernel(module, "hmcCopyForces");
         restoreRejectedKernel = cu.getKernel(module, "hmcRestoreRejected");
+
+        // Metric kernels (always loaded; buffers allocated on first use in assembleMetric)
+        assembleMetricKernel = cu.getKernel(module, "assembleMetricTensor");
+        rmVelocityKickKernel = cu.getKernel(module, "rmVelocityKick");
+        rmComputeGroupKEKernel = cu.getKernel(module, "rmComputeGroupKE");
+        rmDrawMBVelocitiesFullKernel = cu.getKernel(module, "rmDrawMBVelocitiesFull");
+        rmDrawMBVelocitiesPartialKernel = cu.getKernel(module, "rmDrawMBVelocitiesPartial");
+        setIdentityMetricKernel = cu.getKernel(module, "setIdentityMetric");
+        accumulateHessianKernel = cu.getKernel(module, "accumulateHessian");
+        accumulateHessianWeightedKernel = cu.getKernel(module, "accumulateHessianWeighted");
+
+        // Active buffer: all-ones for HMC (rmVelocityKick requires active mask)
+        activeBuffer.initialize<int>(cu, K, "hmcActive");
+        vector<int> allActive(K, 1);
+        activeBuffer.upload(allActive);
 
         // MC kernels
         mcComputeCOMKernel = cu.getKernel(module, "hmcComputeGroupCOM");
@@ -259,6 +305,19 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
     int numGroupAtoms = K * atomsPerGroup;
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     int blockSize = 128;
+    int allGroupsMask = 0xFFFFFFFF;
+
+    // ===== 1a. Assemble metric tensor (if Riemannian) =====
+    bool useMetric = (integrator.getMetricType() != MultiGroupHMCIntegrator::METRIC_IDENTITY &&
+                      integrator.getMetricUpdateMode() == MultiGroupHMCIntegrator::METRIC_UPDATE_EVERY_TRAJECTORY);
+    if (useMetric) {
+        // Need forces computed at current positions for Hessian
+        if (!forcesAreValid) {
+            context.calcForcesAndEnergy(true, true, allGroupsMask);
+            forcesAreValid = true;
+        }
+        assembleMetric(context, integrator);
+    }
 
     // ===== 1. Backup positions =====
     {
@@ -283,35 +342,71 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
         int numBlocks = min((numGroupAtoms + blockSize - 1) / blockSize,
                             cu.getNumThreadBlocks());
 
-        if (integrator.getMomentumRefreshMode() == MultiGroupHMCIntegrator::FULL) {
-            void* args[] = {
-                &velmPtr, &randomPtr, &randIdx,
-                &ktPtr, &atomsPerGroup, &numGroups
-            };
-            cu.executeKernel(drawMBVelocitiesFullKernel, args,
-                             numBlocks * blockSize, blockSize);
-        } else {
-            double theta = integrator.getPartialRefreshAngle();
-            float cosThetaF = (float)cos(theta);
-            float sinThetaF = (float)sin(theta);
-            double cosThetaD = cos(theta);
-            double sinThetaD = sin(theta);
-            void* cosThetaPtr;
-            void* sinThetaPtr;
-            if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
-                cosThetaPtr = &cosThetaD;
-                sinThetaPtr = &sinThetaD;
+        if (useMetric && choleskyBuffer.isInitialized()) {
+            // Metric-aware draw: v ~ N(0, kT * G^{-1}) via Cholesky
+            CUdeviceptr chPtr = choleskyBuffer.getDevicePointer();
+            if (integrator.getMomentumRefreshMode() == MultiGroupHMCIntegrator::FULL) {
+                void* args[] = {
+                    &velmPtr, &randomPtr, &randIdx,
+                    &chPtr, &ktPtr, &atomsPerGroup, &numGroups
+                };
+                cu.executeKernel(rmDrawMBVelocitiesFullKernel, args,
+                                 numBlocks * blockSize, blockSize);
             } else {
-                cosThetaPtr = &cosThetaF;
-                sinThetaPtr = &sinThetaF;
+                double theta = integrator.getPartialRefreshAngle();
+                float cosThetaF = (float)cos(theta);
+                float sinThetaF = (float)sin(theta);
+                double cosThetaD = cos(theta);
+                double sinThetaD = sin(theta);
+                void* cosThetaPtr;
+                void* sinThetaPtr;
+                if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
+                    cosThetaPtr = &cosThetaD;
+                    sinThetaPtr = &sinThetaD;
+                } else {
+                    cosThetaPtr = &cosThetaF;
+                    sinThetaPtr = &sinThetaF;
+                }
+                void* args[] = {
+                    &velmPtr, &randomPtr, &randIdx,
+                    &chPtr, &ktPtr, &atomsPerGroup, &numGroups,
+                    cosThetaPtr, sinThetaPtr
+                };
+                cu.executeKernel(rmDrawMBVelocitiesPartialKernel, args,
+                                 numBlocks * blockSize, blockSize);
             }
-            void* args[] = {
-                &velmPtr, &randomPtr, &randIdx,
-                &ktPtr, &atomsPerGroup, &numGroups,
-                cosThetaPtr, sinThetaPtr
-            };
-            cu.executeKernel(drawMBVelocitiesPartialKernel, args,
-                             numBlocks * blockSize, blockSize);
+        } else {
+            // Standard draw: v ~ N(0, kT / mass)
+            if (integrator.getMomentumRefreshMode() == MultiGroupHMCIntegrator::FULL) {
+                void* args[] = {
+                    &velmPtr, &randomPtr, &randIdx,
+                    &ktPtr, &atomsPerGroup, &numGroups
+                };
+                cu.executeKernel(drawMBVelocitiesFullKernel, args,
+                                 numBlocks * blockSize, blockSize);
+            } else {
+                double theta = integrator.getPartialRefreshAngle();
+                float cosThetaF = (float)cos(theta);
+                float sinThetaF = (float)sin(theta);
+                double cosThetaD = cos(theta);
+                double sinThetaD = sin(theta);
+                void* cosThetaPtr;
+                void* sinThetaPtr;
+                if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
+                    cosThetaPtr = &cosThetaD;
+                    sinThetaPtr = &sinThetaD;
+                } else {
+                    cosThetaPtr = &cosThetaF;
+                    sinThetaPtr = &sinThetaF;
+                }
+                void* args[] = {
+                    &velmPtr, &randomPtr, &randIdx,
+                    &ktPtr, &atomsPerGroup, &numGroups,
+                    cosThetaPtr, sinThetaPtr
+                };
+                cu.executeKernel(drawMBVelocitiesPartialKernel, args,
+                                 numBlocks * blockSize, blockSize);
+            }
         }
     }
 
@@ -320,7 +415,6 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
     computeGroupKE(context, keOld);
 
     // ===== 4. Compute PE_old =====
-    int allGroupsMask = 0xFFFFFFFF;
     context.calcForcesAndEnergy(true, true, allGroupsMask);
 
     vector<double> peOld(K, 0.0);
@@ -386,6 +480,187 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
         };
         cu.executeKernel(restoreRejectedKernel, args, numBlocks * blockSize, blockSize);
     }
+}
+
+// ========== Riemannian Metric ==========
+
+void CudaIntegrateMultiGroupHMCStepKernel::assembleMetric(
+        ContextImpl& context, const MultiGroupHMCIntegrator& integrator) {
+
+    int K = numGroups;
+    int totalAtoms = K * atomsPerGroup;
+    int numElements = 6 * totalAtoms;
+    int blockSize = 128;
+
+    // Lazy initialization of metric buffers
+    if (!metricInitialized) {
+        metricBuffer.initialize<float>(cu, numElements, "hmcMetric");
+        metricInvBuffer.initialize<float>(cu, numElements, "hmcMetricInv");
+        choleskyBuffer.initialize<float>(cu, numElements, "hmcCholesky");
+        logDetBuffer.initialize<double>(cu, K, "hmcLogDet");
+        conditionBuffer.initialize<float>(cu, K, "hmcCondition");
+        combinedHessianBuffer.initialize<float>(cu, numElements, "hmcCombinedHessian");
+
+        // Discover ALL GridForceImpls for Hessian computation
+        gridForceImpls.clear();
+        for (ForceImpl* impl : context.getForceImpls()) {
+            if (auto* p = dynamic_cast<GridForceImpl*>(impl)) {
+                gridForceImpls.push_back(p);
+            }
+        }
+
+        // Discover IsolatedBondedForceImpl for bonded Hessian
+        bondedForceImpl = nullptr;
+        for (ForceImpl* impl : context.getForceImpls()) {
+            if (auto* p = dynamic_cast<IsolatedBondedForceImpl*>(impl)) {
+                bondedForceImpl = p;
+                break;
+            }
+        }
+
+        // Discover IsolatedNonbondedForceImpl for LJ+Coulomb Hessian
+        nonbondedForceImpl = nullptr;
+        for (ForceImpl* impl : context.getForceImpls()) {
+            if (auto* p = dynamic_cast<IsolatedNonbondedForceImpl*>(impl)) {
+                nonbondedForceImpl = p;
+                break;
+            }
+        }
+
+        metricInitialized = true;
+    }
+
+    auto metricType = integrator.getMetricType();
+
+    if (metricType == MultiGroupHMCIntegrator::METRIC_IDENTITY) {
+        // Set identity metric from mass matrix
+        CUdeviceptr velmPtr = cu.getVelm().getDevicePointer();
+        CUdeviceptr mPtr = metricBuffer.getDevicePointer();
+        CUdeviceptr miPtr = metricInvBuffer.getDevicePointer();
+        CUdeviceptr chPtr = choleskyBuffer.getDevicePointer();
+
+        int numBlocks = min((totalAtoms + blockSize - 1) / blockSize,
+                            cu.getNumThreadBlocks());
+        void* args[] = { &velmPtr, &mPtr, &miPtr, &chPtr, &totalAtoms };
+        cu.executeKernel(setIdentityMetricKernel, args, numBlocks * blockSize, blockSize);
+        return;
+    }
+
+    // Accumulate Hessians from all forces into combined buffer
+
+    // Zero the combined Hessian buffer
+    cu.clearBuffer(combinedHessianBuffer);
+
+    int numBlocksAccum = min((numElements + blockSize - 1) / blockSize,
+                              cu.getNumThreadBlocks());
+
+    int numHessiansAccumulated = 0;
+
+    // Grid force Hessians (weighted by gridHessianWeight)
+    float gridWeight = (float)integrator.getGridHessianWeight();
+    if (gridWeight > 0.0f) {
+        for (GridForceImpl* impl : gridForceImpls) {
+            void* hessianPtr = impl->getHessianDevicePointer();
+            if (hessianPtr == nullptr)
+                continue;
+
+            impl->computeHessianGPU();
+            hessianPtr = impl->getHessianDevicePointer();
+
+            CUdeviceptr destPtr = combinedHessianBuffer.getDevicePointer();
+            CUdeviceptr srcPtr = (CUdeviceptr)hessianPtr;
+            void* accumArgs[] = { &destPtr, &srcPtr, &gridWeight, &numElements };
+            cu.executeKernel(accumulateHessianWeightedKernel, accumArgs,
+                             numBlocksAccum * blockSize, blockSize);
+            numHessiansAccumulated++;
+        }
+    }
+
+    // Bonded Hessian (always at full strength, not alpha-scaled)
+    if (bondedForceImpl != nullptr) {
+        bondedForceImpl->computeDiagonalHessianGPU();
+        void* bHessPtr = bondedForceImpl->getDiagonalHessianDevicePointer();
+
+        if (bHessPtr != nullptr) {
+            CUdeviceptr destPtr = combinedHessianBuffer.getDevicePointer();
+            CUdeviceptr srcPtr = (CUdeviceptr)bHessPtr;
+            void* accumArgs[] = { &destPtr, &srcPtr, &numElements };
+            cu.executeKernel(accumulateHessianKernel, accumArgs,
+                             numBlocksAccum * blockSize, blockSize);
+            numHessiansAccumulated++;
+        }
+    }
+
+    // Nonbonded Hessian (LJ + Coulomb, always at full strength)
+    if (nonbondedForceImpl != nullptr) {
+        nonbondedForceImpl->computeDiagonalHessianGPU();
+        void* nbHessPtr = nonbondedForceImpl->getDiagonalHessianDevicePointer();
+
+        if (nbHessPtr != nullptr) {
+            CUdeviceptr destPtr = combinedHessianBuffer.getDevicePointer();
+            CUdeviceptr srcPtr = (CUdeviceptr)nbHessPtr;
+            void* accumArgs[] = { &destPtr, &srcPtr, &numElements };
+            cu.executeKernel(accumulateHessianKernel, accumArgs,
+                             numBlocksAccum * blockSize, blockSize);
+            numHessiansAccumulated++;
+        }
+    }
+
+    // External Hessian (e.g., OBC solvation computed via JAX on host)
+    if (integrator.hasExternalHessian()) {
+        const auto& extHess = integrator.getExternalDiagonalHessian();
+        if (!externalHessianBuffer.isInitialized()) {
+            externalHessianBuffer.initialize<float>(cu, numElements, "hmcExternalHessian");
+        }
+        externalHessianBuffer.upload(extHess);
+
+        CUdeviceptr destPtr = combinedHessianBuffer.getDevicePointer();
+        CUdeviceptr srcPtr = externalHessianBuffer.getDevicePointer();
+        void* accumArgs[] = { &destPtr, &srcPtr, &numElements };
+        cu.executeKernel(accumulateHessianKernel, accumArgs,
+                         numBlocksAccum * blockSize, blockSize);
+        numHessiansAccumulated++;
+    }
+
+    if (numHessiansAccumulated == 0)
+        throw OpenMMException("MultiGroupHMCIntegrator: No Hessian source found for metric computation");
+
+    // Zero logDet and condition buffers before atomic accumulation
+    cu.clearBuffer(logDetBuffer);
+    cu.clearBuffer(conditionBuffer);
+
+    // Launch metric assembly kernel with combined Hessian
+    CUdeviceptr hPtr = combinedHessianBuffer.getDevicePointer();
+    CUdeviceptr velmPtr = cu.getVelm().getDevicePointer();
+    CUdeviceptr mPtr = metricBuffer.getDevicePointer();
+    CUdeviceptr miPtr = metricInvBuffer.getDevicePointer();
+    CUdeviceptr chPtr = choleskyBuffer.getDevicePointer();
+    CUdeviceptr ldPtr = logDetBuffer.getDevicePointer();
+    CUdeviceptr condPtr = conditionBuffer.getDevicePointer();
+
+    int metricTypeInt = (int)metricType;
+    float alpha = (float)integrator.getSoftAbsAlpha();
+    float beta = (float)integrator.getMetricBlendFactor();
+
+    int numBlocks = min((totalAtoms + blockSize - 1) / blockSize,
+                        cu.getNumThreadBlocks());
+    void* args[] = {
+        &hPtr, &velmPtr,
+        &mPtr, &miPtr, &chPtr, &ldPtr, &condPtr,
+        &metricTypeInt, &alpha, &beta,
+        &atomsPerGroup, &numGroups
+    };
+    cu.executeKernel(assembleMetricKernel, args, numBlocks * blockSize, blockSize);
+
+    // Download condition numbers for diagnostics
+    conditionBuffer.download(conditionNumbersHost);
+}
+
+vector<double> CudaIntegrateMultiGroupHMCStepKernel::getGroupMetricConditionNumbers() const {
+    vector<double> result(numGroups, 1.0);
+    for (int k = 0; k < numGroups; k++)
+        result[k] = (double)conditionNumbersHost[k];
+    return result;
 }
 
 static void generateRandomQuaternionRotation(std::mt19937& rng, std::uniform_real_distribution<double>& uDist,

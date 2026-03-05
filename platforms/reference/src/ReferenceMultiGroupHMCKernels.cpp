@@ -156,6 +156,11 @@ void ReferenceIntegrateMultiGroupHMCStepKernel::execute(
         }
     }
 
+    // Check metric type — Reference platform only supports IDENTITY
+    if (integrator.getMetricType() != MultiGroupHMCIntegrator::METRIC_IDENTITY)
+        throw OpenMMException("ReferenceMultiGroupHMCKernel: Riemannian metric (non-IDENTITY) "
+                              "is only supported on the CUDA platform.");
+
     // ===== 1. Backup positions =====
     for (int i = 0; i < numParticles; i++)
         positionsBackup[i] = posData[i];

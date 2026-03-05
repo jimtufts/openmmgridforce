@@ -8,6 +8,9 @@
  * -------------------------------------------------------------------------- */
 
 #include "MultiGroupNUTSKernels.h"
+#include "internal/GridForceImpl.h"
+#include "internal/IsolatedBondedForceImpl.h"
+#include "internal/IsolatedNonbondedForceImpl.h"
 #include "openmm/Platform.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
@@ -44,6 +47,11 @@ public:
     std::vector<int> getDivergenceCounts() const override { return divergenceCounts; }
     std::vector<long long> getCumulativeTreeDepths() const override { return cumulativeTreeDepths; }
     void resetCounters() override;
+
+    // Riemannian metric interface
+    void assembleMetric(OpenMM::ContextImpl& context,
+                       const MultiGroupNUTSIntegrator& integrator) override;
+    std::vector<double> getGroupMetricConditionNumbers() const override;
 
     // MC interface
     void executeMC(OpenMM::ContextImpl& context,
@@ -177,6 +185,40 @@ private:
     int mcAttemptedTotal;
     int mcAcceptedTotal;
     std::vector<int> lastMCAcceptedPerGroup;
+
+    // Riemannian metric buffers
+    OpenMM::CudaArray metricBuffer;          // float[totalAtoms * 6] — G
+    OpenMM::CudaArray metricInvBuffer;       // float[totalAtoms * 6] — G^{-1}
+    OpenMM::CudaArray choleskyBuffer;        // float[totalAtoms * 6] — Cholesky(G^{-1})
+    OpenMM::CudaArray logDetBuffer;          // double[numGroups]
+    OpenMM::CudaArray conditionBuffer;       // float[numGroups]
+    OpenMM::CudaArray combinedHessianBuffer; // float[totalAtoms * 6] — accumulated Hessian
+
+    // Metric CUDA kernel handles
+    CUfunction assembleMetricKernel;
+    CUfunction rmVelocityKickKernel;
+    CUfunction rmComputeGroupKEKernel;
+    CUfunction rmDrawMBVelocitiesFullKernel;
+    CUfunction rmDrawMBVelocitiesPartialKernel;
+    CUfunction setIdentityMetricKernel;
+    CUfunction accumulateHessianKernel;
+    CUfunction accumulateHessianWeightedKernel;
+
+    // Metric state
+    bool metricInitialized;
+    std::vector<float> conditionNumbersHost;
+
+    // GridForceImpl pointers for Hessian computation (all grid forces)
+    std::vector<GridForceImpl*> gridForceImpls;
+
+    // IsolatedBondedForceImpl pointer for bonded Hessian
+    IsolatedBondedForceImpl* bondedForceImpl = nullptr;
+
+    // IsolatedNonbondedForceImpl pointer for LJ+Coulomb Hessian
+    IsolatedNonbondedForceImpl* nonbondedForceImpl = nullptr;
+
+    // External Hessian buffer (uploaded from host, e.g. OBC solvation from JAX)
+    OpenMM::CudaArray externalHessianBuffer;  // float[totalAtoms * 6]
 
     // Helper methods
     void computeGroupPE(std::vector<double>& groupPE) const;

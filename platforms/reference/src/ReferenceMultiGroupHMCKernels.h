@@ -48,6 +48,11 @@ public:
     std::vector<int> getLastMCAccepted() const override { return std::vector<int>(numGroups, 0); }
     void resetMCCounters() override {}
 
+    // Riemannian metric (Reference platform — identity only, non-identity throws)
+    std::vector<double> getGroupMetricConditionNumbers() const override {
+        return std::vector<double>(numGroups, 1.0);
+    }
+
 private:
     int numGroups;
     int atomsPerGroup;

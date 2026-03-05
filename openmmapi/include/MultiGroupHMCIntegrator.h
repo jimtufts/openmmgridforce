@@ -45,6 +45,28 @@ public:
     };
 
     /**
+     * Metric tensor type for Riemannian HMC.
+     */
+    enum MetricType {
+        /** Standard diagonal mass matrix (current behavior). */
+        METRIC_IDENTITY = 0,
+        /** SoftAbs-regularized Hessian (Betancourt 2013). */
+        METRIC_SOFTABS  = 1,
+        /** Blended: (1-beta)*M + beta*softabs(H). */
+        METRIC_BLENDED  = 2
+    };
+
+    /**
+     * When to recompute the metric tensor.
+     */
+    enum MetricUpdateMode {
+        /** No metric computation (IDENTITY only). */
+        METRIC_UPDATE_NONE             = 0,
+        /** Recompute G once per HMC trial (explicit leapfrog with fixed G). */
+        METRIC_UPDATE_EVERY_TRAJECTORY = 1
+    };
+
+    /**
      * Create a MultiGroupHMCIntegrator.
      *
      * @param numGroups     number of independent particle groups (replicas)
@@ -306,6 +328,85 @@ public:
      */
     std::vector<double> getAllGroupDeltaH() const;
 
+    // ========== Riemannian Metric Configuration ==========
+
+    /**
+     * Set the metric tensor type. Default: METRIC_IDENTITY (standard HMC).
+     * METRIC_SOFTABS uses SoftAbs-regularized Hessian as position-dependent mass.
+     * METRIC_BLENDED interpolates between mass matrix and SoftAbs Hessian.
+     */
+    void setMetricType(MetricType type) { metricType = type; }
+    MetricType getMetricType() const { return metricType; }
+
+    /**
+     * Set the metric update mode. Default: METRIC_UPDATE_NONE.
+     * METRIC_UPDATE_EVERY_TRAJECTORY recomputes G once per HMC trial.
+     */
+    void setMetricUpdateMode(MetricUpdateMode mode) { metricUpdateMode = mode; }
+    MetricUpdateMode getMetricUpdateMode() const { return metricUpdateMode; }
+
+    /**
+     * Set the SoftAbs sharpness parameter alpha. Default: 1e6.
+     * Larger alpha -> softabs(lambda) approaches |lambda| (sharper).
+     * Smaller alpha -> softabs(lambda) approaches 1/alpha (more uniform).
+     */
+    void setSoftAbsAlpha(double alpha);
+    double getSoftAbsAlpha() const { return softAbsAlpha; }
+
+    /**
+     * Set the metric blend factor beta in [0, 1]. Default: 1.0.
+     * G = (1-beta)*m*I + beta*softabs(H).
+     * beta=0 recovers standard HMC; beta=1 gives full Riemannian.
+     * Only used when MetricType is METRIC_BLENDED.
+     */
+    void setMetricBlendFactor(double beta);
+    double getMetricBlendFactor() const { return metricBlendFactor; }
+
+    /**
+     * Set the weight of the grid force Hessian in the metric. Default: 0.0.
+     * H_combined = H_bonded + w * H_grid.
+     * w=0 uses bonded-only preconditioning (grid forces confine normally).
+     * w=1 includes full grid Hessian (neutralizes grid confinement).
+     */
+    void setGridHessianWeight(double w) { gridHessianWeight = w; }
+    double getGridHessianWeight() const { return gridHessianWeight; }
+
+    /**
+     * Get per-group metric condition numbers from the last metric assembly.
+     * @return vector of condition numbers (max_eig/min_eig), one per group
+     */
+    std::vector<double> getGroupMetricConditionNumbers() const;
+
+    // ========== External Diagonal Hessian ==========
+
+    /**
+     * Set an external diagonal Hessian to be accumulated into the metric.
+     * This allows injecting Hessian contributions from forces not directly
+     * discoverable by the CUDA kernel (e.g., OBC solvation computed via JAX).
+     *
+     * The buffer layout is 6 floats per atom (Hxx, Hyy, Hzz, Hxy, Hxz, Hyz),
+     * with atoms ordered as [group0_atom0, group0_atom1, ..., groupK_atomN].
+     * Total size must be 6 * numGroups * atomsPerGroup.
+     *
+     * @param hessian flat vector of diagonal Hessian blocks
+     */
+    void setExternalDiagonalHessian(const std::vector<float>& hessian);
+
+    /**
+     * Check whether an external Hessian has been set.
+     */
+    bool hasExternalHessian() const { return !externalHessian.empty(); }
+
+    /**
+     * Clear the external Hessian (disable external accumulation).
+     */
+    void clearExternalHessian() { externalHessian.clear(); }
+
+    /**
+     * Get the external diagonal Hessian buffer.
+     */
+    const std::vector<float>& getExternalDiagonalHessian() const { return externalHessian; }
+
     // ========== Random Number Seed ==========
 
     /**
@@ -367,6 +468,16 @@ private:
     int mcAttempted;                  // cumulative MC attempted count
     int mcAccepted;                   // cumulative MC accepted count
     std::vector<int> lastMCAccepted;  // per-group accepted from last step
+
+    // Riemannian metric configuration
+    MetricType metricType;
+    MetricUpdateMode metricUpdateMode;
+    double softAbsAlpha;
+    double metricBlendFactor;
+    double gridHessianWeight;
+
+    // External diagonal Hessian (e.g., OBC solvation from JAX)
+    std::vector<float> externalHessian;
 
     // Random seed
     int randomNumberSeed;

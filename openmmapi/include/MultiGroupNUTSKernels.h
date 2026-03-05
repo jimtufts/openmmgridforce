@@ -79,6 +79,22 @@ public:
     virtual int getMCAccepted() const = 0;
     virtual std::vector<int> getLastMCAccepted() const = 0;
     virtual void resetMCCounters() = 0;
+
+    // ========== Riemannian Metric ==========
+
+    /**
+     * Assemble metric tensor from Hessian blocks at current positions.
+     * Populates internal G, G^{-1}, Cholesky, and logDet buffers.
+     */
+    virtual void assembleMetric(OpenMM::ContextImpl& context,
+                               const MultiGroupNUTSIntegrator& integrator) {}
+
+    /**
+     * Get per-group metric condition numbers from the last assembleMetric() call.
+     */
+    virtual std::vector<double> getGroupMetricConditionNumbers() const {
+        return std::vector<double>();
+    }
 };
 
 }  // namespace GridForcePlugin

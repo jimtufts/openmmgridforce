@@ -19,6 +19,11 @@ MultiGroupHMCIntegrator::MultiGroupHMCIntegrator(int numGroups, int atomsPerGrou
       numOuterSteps(25),
       momentumRefreshMode(FULL), partialRefreshAngle(M_PI / 2.0),
       stabilityThreshold(250.0),
+      metricType(METRIC_IDENTITY),
+      metricUpdateMode(METRIC_UPDATE_NONE),
+      softAbsAlpha(1e6),
+      metricBlendFactor(1.0),
+      gridHessianWeight(0.0),
       randomNumberSeed(0),
       forcesAreValid(false) {
 
@@ -207,6 +212,36 @@ void MultiGroupHMCIntegrator::resetMCCounts() {
     if (context != NULL) {
         kernel.getAs<IntegrateMultiGroupHMCStepKernel>().resetMCCounters();
     }
+}
+
+// ========== Riemannian Metric ==========
+
+void MultiGroupHMCIntegrator::setSoftAbsAlpha(double alpha) {
+    if (alpha <= 0)
+        throw OpenMMException("MultiGroupHMCIntegrator: softAbsAlpha must be positive");
+    softAbsAlpha = alpha;
+}
+
+void MultiGroupHMCIntegrator::setMetricBlendFactor(double beta) {
+    if (beta < 0.0 || beta > 1.0)
+        throw OpenMMException("MultiGroupHMCIntegrator: metricBlendFactor must be in [0, 1]");
+    metricBlendFactor = beta;
+}
+
+vector<double> MultiGroupHMCIntegrator::getGroupMetricConditionNumbers() const {
+    if (context == NULL)
+        return vector<double>(numGroups, 1.0);
+    return kernel.getAs<IntegrateMultiGroupHMCStepKernel>().getGroupMetricConditionNumbers();
+}
+
+// ========== External Diagonal Hessian ==========
+
+void MultiGroupHMCIntegrator::setExternalDiagonalHessian(const vector<float>& hessian) {
+    int expected = 6 * numGroups * atomsPerGroup;
+    if (static_cast<int>(hessian.size()) != expected)
+        throw OpenMMException("MultiGroupHMCIntegrator: externalHessian size must be 6*numGroups*atomsPerGroup ("
+                              + to_string(expected) + "), got " + to_string(hessian.size()));
+    externalHessian = hessian;
 }
 
 // ========== Diagnostics ==========
