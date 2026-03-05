@@ -271,45 +271,9 @@ extern "C" __global__ void computeGridHessian(
                 }
             }
 
-            // Back-convert from smoothed space (S) to actual potential (G) for RUNTIME mode
-            // After interpolation we have S, dS/dx, d²S/dx² in smoothed space
-            // Convert to G = sign(S)*|S|^n where n = invPower (e.g., -6)
-            //   dG/dx = n*|S|^(n-1) * dS/dx
-            //   d²G/dx² = n*(n-1)*|S|^(n-2)*(dS/dx)² + n*|S|^(n-1)*d²S/dx²
-            if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
-                float absU = fabsf(interpolated);
-                if (absU > 1e-10f) {
-                    float n = invPower;  // The power to convert U back to V
-
-                    // Precompute powers
-                    float absU_nm1 = powf(absU, n - 1.0f);
-                    float absU_nm2 = powf(absU, n - 2.0f);
-
-                    // Chain rule coefficients
-                    float f2_1 = n * (n - 1.0f) * absU_nm2;  // For (dU/dx)² terms
-                    float f2_2 = n * absU_nm1;               // For d²U/dx² terms
-
-                    // Convert second derivatives (Hessian) using unit cell gradients
-                    float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
-                    float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
-                    float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
-                    float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
-                    float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
-                    float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
-
-                    // Note: first derivatives are NOT used in output, but update for completeness
-                    dx *= f2_2;
-                    dy *= f2_2;
-                    dz *= f2_2;
-
-                    d2xx = new_d2xx;
-                    d2yy = new_d2yy;
-                    d2zz = new_d2zz;
-                    d2xy = new_d2xy;
-                    d2xz = new_d2xz;
-                    d2yz = new_d2yz;
-                }
-            }
+            // Undo transforms in reverse order of application during generation.
+            // Generation order: inv_power → arcsinh → blur → prefilter.
+            // Evaluation undo order: arcsinh first, then inv_power.
 
             // Arcsinh chain rule: V = scale*sinh(g), d²V/dxi dxj = scale*[sinh(g)*dg_i*dg_j + cosh(g)*d²g_ij]
             if (arcsinhScale > 0.0f) {
@@ -324,12 +288,48 @@ extern "C" __global__ void computeGridHessian(
                 float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
                 float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
+                interpolated = arcsinhScale * sinhG;
                 dx = arcsinhScale * coshG * dx;
                 dy = arcsinhScale * coshG * dy;
                 dz = arcsinhScale * coshG * dz;
 
                 d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
                 d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+            }
+
+            // Back-convert from smoothed space (S) to actual potential (G)
+            // S = V^(1/n), G = sign(S)*|S|^n
+            //   dG/dx = n*|S|^(n-1) * dS/dx
+            //   d²G/dx² = n*(n-1)*|S|^(n-2)*(dS/dx)² + n*|S|^(n-1)*d²S/dx²
+            if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
+                float absU = fabsf(interpolated);
+                if (absU > 1e-10f) {
+                    float n = invPower;
+
+                    float absU_nm1 = powf(absU, n - 1.0f);
+                    float absU_nm2 = powf(absU, n - 2.0f);
+
+                    float f2_1 = n * (n - 1.0f) * absU_nm2;
+                    float f2_2 = n * absU_nm1;
+
+                    float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
+                    float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
+                    float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
+                    float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
+                    float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
+                    float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
+
+                    dx *= f2_2;
+                    dy *= f2_2;
+                    dz *= f2_2;
+
+                    d2xx = new_d2xx;
+                    d2yy = new_d2yy;
+                    d2zz = new_d2zz;
+                    d2xy = new_d2xy;
+                    d2xz = new_d2xz;
+                    d2yz = new_d2yz;
+                }
             }
 
             // NOW convert from unit cell to physical coordinates
@@ -412,8 +412,29 @@ extern "C" __global__ void computeGridHessian(
                 }
             }
 
-            // Back-convert from transformed space BEFORE converting to physical coords
-            if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
+            // Undo transforms in reverse order: arcsinh first, then inv_power.
+            if (arcsinhScale > 0.0f) {
+                float g = interpolated;
+                float sinhG = sinhf(g);
+                float coshG = coshf(g);
+
+                float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+
+                interpolated = arcsinhScale * sinhG;
+                dx = arcsinhScale * coshG * dx;
+                dy = arcsinhScale * coshG * dy;
+                dz = arcsinhScale * coshG * dz;
+
+                d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+            }
+
+            if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
                 float absU = fabsf(interpolated);
                 if (absU > 1e-10f) {
                     float n = invPower;
@@ -440,27 +461,6 @@ extern "C" __global__ void computeGridHessian(
                     d2xz = new_d2xz;
                     d2yz = new_d2yz;
                 }
-            }
-
-            // Arcsinh chain rule: V = scale*sinh(g), d²V/dxi dxj = scale*[sinh(g)*dg_i*dg_j + cosh(g)*d²g_ij]
-            if (arcsinhScale > 0.0f) {
-                float g = interpolated;
-                float sinhG = sinhf(g);
-                float coshG = coshf(g);
-
-                float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
-
-                dx = arcsinhScale * coshG * dx;
-                dy = arcsinhScale * coshG * dy;
-                dz = arcsinhScale * coshG * dz;
-
-                d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
-                d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
             }
 
             // Convert to physical coordinates
@@ -543,13 +543,7 @@ extern "C" __global__ void computeGridHessian(
                 }
             }
 
-            // Back-convert from transformed space
-            if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
-                applyHessianChainRule(interpolated, dx, dy, dz,
-                                     d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, invPower);
-            }
-
-            // Arcsinh chain rule
+            // Undo transforms in reverse order: arcsinh first, then inv_power.
             if (arcsinhScale > 0.0f) {
                 float g = interpolated;
                 float sinhG = sinhf(g);
@@ -562,12 +556,18 @@ extern "C" __global__ void computeGridHessian(
                 float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
                 float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
+                interpolated = arcsinhScale * sinhG;
                 dx = arcsinhScale * coshG * dx;
                 dy = arcsinhScale * coshG * dy;
                 dz = arcsinhScale * coshG * dz;
 
                 d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
                 d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+            }
+
+            if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
+                applyHessianChainRule(interpolated, dx, dy, dz,
+                                     d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, invPower);
             }
 
             // Convert to physical coordinates
@@ -805,8 +805,50 @@ extern "C" __global__ void computeGridThirdDerivatives(
         // Each transformation is applied to all derivative levels simultaneously,
         // using the PRE-transform values at each level.
 
-        // 1. InvPower: V = sign(U)|U|^p, convert from smoothed to actual space
-        if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
+        // Undo transforms in reverse order: arcsinh first, then inv_power.
+
+        // 1. Arcsinh: V = scale * sinh(g)
+        if (arcsinhScale > 0.0f) {
+            float g = interpolated;
+            float sinhG = sinhf(g);
+            float coshG = coshf(g);
+            float s = arcsinhScale;
+
+            // Third derivatives (Faà di Bruno for sinh(g)):
+            //   d³V/dxi dxj dxk = s * [cosh(g)*gi*gj*gk + sinh(g)*(gi*gjk + gj*gik + gk*gij) + cosh(g)*gijk]
+            float new_d3xxx = s*(coshG*dx*dx*dx + 3.0f*sinhG*dx*d2xx + coshG*d3xxx);
+            float new_d3yyy = s*(coshG*dy*dy*dy + 3.0f*sinhG*dy*d2yy + coshG*d3yyy);
+            float new_d3zzz = s*(coshG*dz*dz*dz + 3.0f*sinhG*dz*d2zz + coshG*d3zzz);
+            float new_d3xxy = s*(coshG*dx*dx*dy + sinhG*(2.0f*dx*d2xy + dy*d2xx) + coshG*d3xxy);
+            float new_d3xxz = s*(coshG*dx*dx*dz + sinhG*(2.0f*dx*d2xz + dz*d2xx) + coshG*d3xxz);
+            float new_d3xyy = s*(coshG*dx*dy*dy + sinhG*(dx*d2yy + 2.0f*dy*d2xy) + coshG*d3xyy);
+            float new_d3xzz = s*(coshG*dx*dz*dz + sinhG*(dx*d2zz + 2.0f*dz*d2xz) + coshG*d3xzz);
+            float new_d3yyz = s*(coshG*dy*dy*dz + sinhG*(2.0f*dy*d2yz + dz*d2yy) + coshG*d3yyz);
+            float new_d3yzz = s*(coshG*dy*dz*dz + sinhG*(dy*d2zz + 2.0f*dz*d2yz) + coshG*d3yzz);
+            float new_d3xyz = s*(coshG*dx*dy*dz + sinhG*(dx*d2yz + dy*d2xz + dz*d2xy) + coshG*d3xyz);
+
+            // Second derivatives
+            float new_d2xx = s*(sinhG*dx*dx + coshG*d2xx);
+            float new_d2yy = s*(sinhG*dy*dy + coshG*d2yy);
+            float new_d2zz = s*(sinhG*dz*dz + coshG*d2zz);
+            float new_d2xy = s*(sinhG*dx*dy + coshG*d2xy);
+            float new_d2xz = s*(sinhG*dx*dz + coshG*d2xz);
+            float new_d2yz = s*(sinhG*dy*dz + coshG*d2yz);
+
+            // First derivatives and value
+            interpolated = s*sinhG;
+            dx = s*coshG*dx; dy = s*coshG*dy; dz = s*coshG*dz;
+
+            d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+            d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+            d3xxx = new_d3xxx; d3yyy = new_d3yyy; d3zzz = new_d3zzz;
+            d3xxy = new_d3xxy; d3xxz = new_d3xxz; d3xyy = new_d3xyy;
+            d3xzz = new_d3xzz; d3yyz = new_d3yyz; d3yzz = new_d3yzz;
+            d3xyz = new_d3xyz;
+        }
+
+        // 2. InvPower: V = sign(U)|U|^p, convert from smoothed to actual space
+        if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
             float p = invPower;
             float absU = fabsf(interpolated);
             if (absU < 1e-10f) absU = 1e-10f;
@@ -837,45 +879,6 @@ extern "C" __global__ void computeGridThirdDerivatives(
 
             d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
             d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
-        }
-
-        // 2. Arcsinh: V = scale * sinh(g)
-        if (arcsinhScale > 0.0f) {
-            float g = interpolated;
-            float sinhG = sinhf(g);
-            float coshG = coshf(g);
-            float s = arcsinhScale;
-
-            // Third derivatives (Faà di Bruno for sinh(g)):
-            //   d³V/dxi dxj dxk = s * [cosh(g)*gi*gj*gk + sinh(g)*(gi*gjk + gj*gik + gk*gij) + cosh(g)*gijk]
-            float new_d3xxx = s*(coshG*dx*dx*dx + 3.0f*sinhG*dx*d2xx + coshG*d3xxx);
-            float new_d3yyy = s*(coshG*dy*dy*dy + 3.0f*sinhG*dy*d2yy + coshG*d3yyy);
-            float new_d3zzz = s*(coshG*dz*dz*dz + 3.0f*sinhG*dz*d2zz + coshG*d3zzz);
-            float new_d3xxy = s*(coshG*dx*dx*dy + sinhG*(2.0f*dx*d2xy + dy*d2xx) + coshG*d3xxy);
-            float new_d3xxz = s*(coshG*dx*dx*dz + sinhG*(2.0f*dx*d2xz + dz*d2xx) + coshG*d3xxz);
-            float new_d3xyy = s*(coshG*dx*dy*dy + sinhG*(dx*d2yy + 2.0f*dy*d2xy) + coshG*d3xyy);
-            float new_d3xzz = s*(coshG*dx*dz*dz + sinhG*(dx*d2zz + 2.0f*dz*d2xz) + coshG*d3xzz);
-            float new_d3yyz = s*(coshG*dy*dy*dz + sinhG*(2.0f*dy*d2yz + dz*d2yy) + coshG*d3yyz);
-            float new_d3yzz = s*(coshG*dy*dz*dz + sinhG*(dy*d2zz + 2.0f*dz*d2yz) + coshG*d3yzz);
-            float new_d3xyz = s*(coshG*dx*dy*dz + sinhG*(dx*d2yz + dy*d2xz + dz*d2xy) + coshG*d3xyz);
-
-            // Second derivatives
-            float new_d2xx = s*(sinhG*dx*dx + coshG*d2xx);
-            float new_d2yy = s*(sinhG*dy*dy + coshG*d2yy);
-            float new_d2zz = s*(sinhG*dz*dz + coshG*d2zz);
-            float new_d2xy = s*(sinhG*dx*dy + coshG*d2xy);
-            float new_d2xz = s*(sinhG*dx*dz + coshG*d2xz);
-            float new_d2yz = s*(sinhG*dy*dz + coshG*d2yz);
-
-            // First derivatives
-            dx = s*coshG*dx; dy = s*coshG*dy; dz = s*coshG*dz;
-
-            d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
-            d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
-            d3xxx = new_d3xxx; d3yyy = new_d3yyy; d3zzz = new_d3zzz;
-            d3xxy = new_d3xxy; d3xxz = new_d3xxz; d3xyy = new_d3xyy;
-            d3xzz = new_d3xzz; d3yyz = new_d3yyz; d3yzz = new_d3yzz;
-            d3xyz = new_d3xyz;
         }
 
         // 3. Convert from grid-cell coordinates to physical coordinates

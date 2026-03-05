@@ -544,6 +544,18 @@ extern "C" __global__ void computeGridForce(
                    fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm)));
         }
 
+        // Undo arcsinh for stacked STORED + arcsinh mode.
+        // Grid stores arcsinh(V^(1/n) / scale); undo arcsinh first → V^(1/n) space.
+        if (arcsinhScale > 0.0f && invPowerMode == 2) {
+            float sinhG = sinhf(interpolated);
+            float coshG = coshf(interpolated);
+            interpolated = arcsinhScale * sinhG;
+            float chainFactor = arcsinhScale * coshG;
+            dx *= chainFactor;
+            dy *= chainFactor;
+            dz *= chainFactor;
+        }
+
         // Back-convert from transformed space to get final energy
         // Both RUNTIME and STORED modes need this: val^(1/n) -> (val^(1/n))^n = val
         if (invPowerMode == 1 || invPowerMode == 2) {

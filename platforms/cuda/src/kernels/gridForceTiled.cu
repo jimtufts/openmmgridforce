@@ -591,6 +591,17 @@ extern "C" __global__ void computeGridForceTiled(
                     invPower, invPowerMode
                 );
 
+                // Undo arcsinh for stacked STORED + arcsinh mode
+                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                    float sinhG = sinhf(interpolated);
+                    float coshG = coshf(interpolated);
+                    interpolated = arcsinhScale * sinhG;
+                    float chainFactor = arcsinhScale * coshG;
+                    dx *= chainFactor;
+                    dy *= chainFactor;
+                    dz *= chainFactor;
+                }
+
                 // Back-transform from transformed space if RUNTIME or STORED mode
                 // val^(1/n) -> val^(1/n)^n = val
                 if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
@@ -617,6 +628,17 @@ extern "C" __global__ void computeGridForceTiled(
                     invPower, invPowerMode
                 );
 
+                // Undo arcsinh for stacked STORED + arcsinh mode
+                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                    float sinhG = sinhf(interpolated);
+                    float coshG = coshf(interpolated);
+                    interpolated = arcsinhScale * sinhG;
+                    float chainFactor = arcsinhScale * coshG;
+                    dx *= chainFactor;
+                    dy *= chainFactor;
+                    dz *= chainFactor;
+                }
+
                 // Back-transform from transformed space if RUNTIME or STORED mode
                 // (bspline already divided by spacing, so just apply power factor to gradients)
                 if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
@@ -641,6 +663,17 @@ extern "C" __global__ void computeGridForceTiled(
                     invPower, invPowerMode
                 );
 
+                // Undo arcsinh for stacked STORED + arcsinh mode
+                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                    float sinhG = sinhf(interpolated);
+                    float coshG = coshf(interpolated);
+                    interpolated = arcsinhScale * sinhG;
+                    float chainFactor = arcsinhScale * coshG;
+                    dx *= chainFactor;
+                    dy *= chainFactor;
+                    dz *= chainFactor;
+                }
+
                 // Back-transform from transformed space if RUNTIME or STORED mode
                 if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
                     float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
@@ -663,6 +696,17 @@ extern "C" __global__ void computeGridForceTiled(
                     tileWithOverlap,
                     invPower, invPowerMode
                 );
+
+                // Undo arcsinh for stacked STORED + arcsinh mode
+                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                    float sinhG = sinhf(interpolated);
+                    float coshG = coshf(interpolated);
+                    interpolated = arcsinhScale * sinhG;
+                    float chainFactor = arcsinhScale * coshG;
+                    dx *= chainFactor;
+                    dy *= chainFactor;
+                    dz *= chainFactor;
+                }
 
                 // Back-transform from transformed space if RUNTIME or STORED mode
                 if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
@@ -687,6 +731,17 @@ extern "C" __global__ void computeGridForceTiled(
                     invPower, invPowerMode
                 );
 
+                // Undo arcsinh for stacked STORED + arcsinh mode
+                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                    float sinhG = sinhf(interpolated);
+                    float coshG = coshf(interpolated);
+                    interpolated = arcsinhScale * sinhG;
+                    float chainFactor = arcsinhScale * coshG;
+                    dx *= chainFactor;
+                    dy *= chainFactor;
+                    dz *= chainFactor;
+                }
+
                 // Back-transform from transformed space if RUNTIME or STORED mode
                 if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
                     float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
@@ -709,6 +764,17 @@ extern "C" __global__ void computeGridForceTiled(
                     tileWithOverlap,
                     invPower, invPowerMode
                 );
+
+                // Undo arcsinh for stacked STORED + arcsinh mode
+                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                    float sinhG = sinhf(interpolated);
+                    float coshG = coshf(interpolated);
+                    interpolated = arcsinhScale * sinhG;
+                    float chainFactor = arcsinhScale * coshG;
+                    dx *= chainFactor;
+                    dy *= chainFactor;
+                    dz *= chainFactor;
+                }
 
                 // Back-transform from transformed space if RUNTIME or STORED mode
                 if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {

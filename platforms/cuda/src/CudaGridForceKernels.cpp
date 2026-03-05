@@ -437,7 +437,8 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             // Apply arcsinh transform to compress dynamic range before prefiltering.
             // This prevents Gibbs-like ringing in the prefilter for steep potentials (e.g., LJR).
             // The inverse sinh transform is applied in the CUDA evaluation kernel.
-            // Note: arcsinh and stored inv_power serve similar purposes; typically only one is used.
+            // Note: arcsinh and stored inv_power can be stacked. Arcsinh is applied after
+            // inv_power during generation and undone first during evaluation.
             if (arcsinhScale > 0.0f) {
                 for (size_t i = 0; i < vals.size(); i++) {
                     vals[i] = std::asinh(vals[i] / (double)arcsinhScale);

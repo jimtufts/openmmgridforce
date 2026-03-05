@@ -491,8 +491,29 @@ extern "C" __global__ void computeGridHessianTiled(
                     }
                 }
 
-                // Back-convert from transformed space
-                if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
+                // Undo transforms in reverse order: arcsinh first, then inv_power.
+                if (arcsinhScale > 0.0f) {
+                    float g = interpolated;
+                    float sinhG = sinhf(g);
+                    float coshG = coshf(g);
+
+                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+
+                    interpolated = arcsinhScale * sinhG;
+                    dx = arcsinhScale * coshG * dx;
+                    dy = arcsinhScale * coshG * dy;
+                    dz = arcsinhScale * coshG * dz;
+
+                    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+                }
+
+                if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
                     float absU = fabsf(interpolated);
                     if (absU > 1e-10f) {
                         float n = invPower;
@@ -511,27 +532,6 @@ extern "C" __global__ void computeGridHessianTiled(
                         d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
                         d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
                     }
-                }
-
-                // Arcsinh chain rule
-                if (arcsinhScale > 0.0f) {
-                    float g = interpolated;
-                    float sinhG = sinhf(g);
-                    float coshG = coshf(g);
-
-                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
-
-                    dx = arcsinhScale * coshG * dx;
-                    dy = arcsinhScale * coshG * dy;
-                    dz = arcsinhScale * coshG * dz;
-
-                    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
-                    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
                 }
 
                 // Convert to physical coordinates
