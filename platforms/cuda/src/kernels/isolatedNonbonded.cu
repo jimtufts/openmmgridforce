@@ -343,3 +343,141 @@ extern "C" __global__ void computeIsolatedNonbondedHessians(
     atomicAdd(&hessianBlocks[blockJI + 7], static_cast<unsigned long long>((long long)(-Hyz * HESSIAN_SCALE)));
     atomicAdd(&hessianBlocks[blockJI + 8], static_cast<unsigned long long>((long long)(-Hzz * HESSIAN_SCALE)));
 }
+
+
+// ==================== Diagonal Hessian for Riemannian Metric ====================
+// Computes only the diagonal 3x3 blocks (H[i,i] and H[j,j]) for all groups.
+// Same math as computeIsolatedNonbondedHessians but skips off-diagonal blocks
+// and operates over all particle groups simultaneously.
+//
+// Output layout: diagHessian[groupIdx * numAtoms * 6 + atomIdx * 6 + {0..5}]
+//   = [Hxx, Hyy, Hzz, Hxy, Hxz, Hyz] per atom per group.
+
+__device__ void addNBDiagBlock(float* diagHessian, int groupIdx, int localAtomIdx,
+                               int numAtoms, float Hxx, float Hyy, float Hzz,
+                               float Hxy, float Hxz, float Hyz) {
+    int base = (groupIdx * numAtoms + localAtomIdx) * 6;
+    atomicAdd(&diagHessian[base + 0], Hxx);
+    atomicAdd(&diagHessian[base + 1], Hyy);
+    atomicAdd(&diagHessian[base + 2], Hzz);
+    atomicAdd(&diagHessian[base + 3], Hxy);
+    atomicAdd(&diagHessian[base + 4], Hxz);
+    atomicAdd(&diagHessian[base + 5], Hyz);
+}
+
+extern "C" __global__ void computeIsolatedNonbondedDiagHessian(
+    const real4* __restrict__ posq,
+    const int* __restrict__ groupParticleIndices,
+    const real* __restrict__ charges,
+    const real* __restrict__ sigmas,
+    const real* __restrict__ epsilons,
+    const int2* __restrict__ exclusions,
+    const int2* __restrict__ exceptions,
+    const float3* __restrict__ exceptionParams,
+    float* __restrict__ diagHessian,
+    const int numAtoms,
+    const int numPairs,
+    const int numGroups) {
+
+    const real COULOMB_CONST = 138.935456f;
+
+    int totalWork = numGroups * numPairs;
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
+
+        int groupIdx = globalIdx / numPairs;
+        int pairIdx = globalIdx % numPairs;
+
+        // Decode pair index to local atom indices
+        int i, j;
+        decodePairIndex(pairIdx, &i, &j, numAtoms);
+
+        // Check exclusions
+        bool excluded = false;
+#if NUM_EXCLUSIONS > 0
+        for (int k = 0; k < NUM_EXCLUSIONS; k++) {
+            int2 excl = exclusions[k];
+            if ((excl.x == i && excl.y == j) || (excl.x == j && excl.y == i)) {
+                excluded = true;
+                break;
+            }
+        }
+#endif
+        if (excluded) continue;
+
+        // Check exceptions
+        bool isException = false;
+        real qq, sigma, epsilon;
+#if NUM_EXCEPTIONS > 0
+        for (int k = 0; k < NUM_EXCEPTIONS; k++) {
+            int2 exc = exceptions[k];
+            if ((exc.x == i && exc.y == j) || (exc.x == j && exc.y == i)) {
+                isException = true;
+                float3 params = exceptionParams[k];
+                qq = params.x;
+                sigma = params.y;
+                epsilon = params.z;
+                break;
+            }
+        }
+#endif
+        if (!isException) {
+            qq = charges[i] * charges[j];
+            sigma = (sigmas[i] + sigmas[j]) * 0.5f;
+            epsilon = SQRT(epsilons[i] * epsilons[j]);
+        }
+
+        // Get actual particle positions for this group
+        int particleI = groupParticleIndices[groupIdx * numAtoms + i];
+        int particleJ = groupParticleIndices[groupIdx * numAtoms + j];
+
+        real4 posqI = posq[particleI];
+        real4 posqJ = posq[particleJ];
+
+        float dx = (float)(posqI.x - posqJ.x);
+        float dy = (float)(posqI.y - posqJ.y);
+        float dz = (float)(posqI.z - posqJ.z);
+        float r2 = dx*dx + dy*dy + dz*dz;
+        float invR2 = 1.0f / fmaxf(r2, 1e-20f);
+        float invR = sqrtf(invR2);
+        float r = r2 * invR;
+
+        // LJ derivatives
+        float sig_r = sigma * invR;
+        float sig_r2 = sig_r * sig_r;
+        float sig_r6 = sig_r2 * sig_r2 * sig_r2;
+        float sig_r12 = sig_r6 * sig_r6;
+
+        float dE_dr_LJ = 4.0f * epsilon * (-12.0f * sig_r12 + 6.0f * sig_r6) * invR;
+        float d2E_dr2_LJ = 4.0f * epsilon * (156.0f * sig_r12 - 42.0f * sig_r6) * invR2;
+
+        // Coulomb derivatives
+        float dE_dr_C = -COULOMB_CONST * qq * invR2;
+        float d2E_dr2_C = 2.0f * COULOMB_CONST * qq * invR2 * invR;
+
+        float dE_dr = dE_dr_LJ + dE_dr_C;
+        float d2E_dr2 = d2E_dr2_LJ + d2E_dr2_C;
+
+        // Hessian: H_ab = term1 * n_a*n_b + term2 * delta_ab
+        float term1 = d2E_dr2 - dE_dr * invR;
+        float term2 = dE_dr * invR;
+
+        float nx = dx * invR;
+        float ny = dy * invR;
+        float nz = dz * invR;
+
+        float Hxx = term1 * nx * nx + term2;
+        float Hyy = term1 * ny * ny + term2;
+        float Hzz = term1 * nz * nz + term2;
+        float Hxy = term1 * nx * ny;
+        float Hxz = term1 * nx * nz;
+        float Hyz = term1 * ny * nz;
+
+        // Both atoms get the same diagonal block (H[i,i] = H[j,j] for pairwise)
+        addNBDiagBlock(diagHessian, groupIdx, i, numAtoms,
+                       Hxx, Hyy, Hzz, Hxy, Hxz, Hyz);
+        addNBDiagBlock(diagHessian, groupIdx, j, numAtoms,
+                       Hxx, Hyy, Hzz, Hxy, Hxz, Hyz);
+    }
+}

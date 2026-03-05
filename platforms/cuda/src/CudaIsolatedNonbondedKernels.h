@@ -90,6 +90,11 @@ private:
     CUfunction hessianKernel = nullptr;   // Kernel for Hessian computation
     OpenMM::CudaArray hessianBuffer;      // Full Hessian matrix (3N x 3N)
 
+    // Diagonal Hessian for Riemannian metric
+    OpenMM::CudaArray diagHessianBuffer;  // float[6 * numGroups * numAtoms]
+    CUfunction diagHessianKernel = nullptr;
+    bool diagHessianInitialized = false;
+
     bool skipGroupEnergyDownload_ = false;
 public:
     void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
@@ -97,6 +102,8 @@ public:
         return groupEnergiesBuffer.isInitialized()
             ? (void*)groupEnergiesBuffer.getDevicePointer() : nullptr;
     }
+    void computeDiagonalHessianGPU() override;
+    void* getDiagonalHessianDevicePointer() override;
 };
 
 } // namespace GridForcePlugin

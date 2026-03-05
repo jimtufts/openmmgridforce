@@ -403,3 +403,76 @@ vector<double> CudaCalcIsolatedBondedForceKernel::computeInternalForceConstants(
 
     return constants;
 }
+
+void* CudaCalcIsolatedBondedForceKernel::getDiagonalHessianDevicePointer() {
+    return diagHessianBuffer.isInitialized()
+        ? (void*)diagHessianBuffer.getDevicePointer() : nullptr;
+}
+
+void CudaCalcIsolatedBondedForceKernel::computeDiagonalHessianGPU() {
+    cu.setAsCurrent();
+
+    // Lazy initialization of diagonal Hessian buffers and kernels
+    if (!diagHessianInitialized) {
+        int totalElements = 6 * numParticleGroups * numAtoms;
+        diagHessianBuffer.initialize<float>(cu, totalElements, "bondedDiagHessian");
+
+        // Load kernels from the already-compiled module
+        map<string, string> defines;
+        defines["NUM_ATOMS"] = cu.intToString(numAtoms);
+        defines["NUM_BONDS"] = cu.intToString(numBonds);
+        defines["NUM_ANGLES"] = cu.intToString(numAngles);
+        defines["NUM_TORSIONS"] = cu.intToString(numTorsions);
+        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+
+        if (numBonds > 0)
+            bondDiagHessianKernel = cu.getKernel(module, "computeIsolatedBondDiagHessian");
+        if (numAngles > 0)
+            angleDiagHessianKernel = cu.getKernel(module, "computeIsolatedAngleDiagHessian");
+        if (numTorsions > 0)
+            torsionDiagHessianKernel = cu.getKernel(module, "computeIsolatedTorsionDiagHessian");
+
+        diagHessianInitialized = true;
+    }
+
+    // Zero the buffer before accumulation
+    cu.clearBuffer(diagHessianBuffer);
+
+    int blockSize = 128;
+    CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    CUdeviceptr groupIndicesPtr = groupParticleIndices.getDevicePointer();
+    CUdeviceptr diagPtr = diagHessianBuffer.getDevicePointer();
+
+    // Launch bond diagonal Hessian kernel
+    if (numBonds > 0) {
+        int totalWork = numParticleGroups * numBonds;
+        int numBlocks = min((totalWork + blockSize - 1) / blockSize, cu.getNumThreadBlocks());
+        CUdeviceptr bAtomsPtr = bondAtoms.getDevicePointer();
+        CUdeviceptr bParamsPtr = bondParams.getDevicePointer();
+        void* args[] = { &posqPtr, &groupIndicesPtr, &bAtomsPtr, &bParamsPtr,
+                         &diagPtr, &numAtoms, &numBonds, &numParticleGroups };
+        cu.executeKernel(bondDiagHessianKernel, args, numBlocks * blockSize, blockSize);
+    }
+
+    // Launch angle diagonal Hessian kernel
+    if (numAngles > 0) {
+        int totalWork = numParticleGroups * numAngles;
+        int numBlocks = min((totalWork + blockSize - 1) / blockSize, cu.getNumThreadBlocks());
+        CUdeviceptr aAtomsPtr = angleAtoms.getDevicePointer();
+        CUdeviceptr aParamsPtr = angleParams.getDevicePointer();
+        void* args[] = { &posqPtr, &groupIndicesPtr, &aAtomsPtr, &aParamsPtr,
+                         &diagPtr, &numAtoms, &numAngles, &numParticleGroups };
+        cu.executeKernel(angleDiagHessianKernel, args, numBlocks * blockSize, blockSize);
+    }
+
+    // Launch torsion diagonal Hessian kernel
+    if (numTorsions > 0) {
+        int totalWork = numParticleGroups * numTorsions;
+        int numBlocks = min((totalWork + blockSize - 1) / blockSize, cu.getNumThreadBlocks());
+        CUdeviceptr tAtomsPtr = torsionAtoms.getDevicePointer();
+        CUdeviceptr tParamsPtr = torsionParams.getDevicePointer();
+        void* args[] = { &posqPtr, &groupIndicesPtr, &tAtomsPtr, &tParamsPtr,
+                         &diagPtr, &numAtoms, &numTorsions, &numParticleGroups };
+        cu.executeKernel(torsionDiagHessianKernel, args, numBlocks * blockSize, blockSize);
+    }
+}

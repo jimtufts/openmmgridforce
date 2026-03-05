@@ -367,3 +367,70 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
 
     return result;
 }
+
+void* CudaCalcIsolatedNonbondedForceKernel::getDiagonalHessianDevicePointer() {
+    return diagHessianBuffer.isInitialized()
+        ? (void*)diagHessianBuffer.getDevicePointer() : nullptr;
+}
+
+void CudaCalcIsolatedNonbondedForceKernel::computeDiagonalHessianGPU() {
+    if (!hasInitializedKernel) {
+        throw OpenMMException("IsolatedNonbondedForce: must call execute() before computeDiagonalHessianGPU()");
+    }
+
+    cu.setAsCurrent();
+
+    int numPairs = (numAtoms * (numAtoms - 1)) / 2;
+    if (numPairs == 0) return;
+
+    // Lazy initialization of diagonal Hessian buffer and kernel
+    if (!diagHessianInitialized) {
+        int totalElements = 6 * numParticleGroups * numAtoms;
+        diagHessianBuffer.initialize<float>(cu, totalElements, "nbDiagHessian");
+
+        map<string, string> defines;
+        defines["NUM_ATOMS"] = cu.intToString(numAtoms);
+        defines["NUM_EXCLUSIONS"] = cu.intToString(exclusions.getSize() > 1 ? exclusions.getSize() : 0);
+        defines["NUM_EXCEPTIONS"] = cu.intToString(exceptions.getSize() > 1 ? exceptions.getSize() : 0);
+
+        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+        diagHessianKernel = cu.getKernel(module, "computeIsolatedNonbondedDiagHessian");
+
+        diagHessianInitialized = true;
+    }
+
+    // Zero the buffer before accumulation
+    cu.clearBuffer(diagHessianBuffer);
+
+    // Launch kernel: one thread per (group, pair)
+    int totalWork = numParticleGroups * numPairs;
+    int blockSize = 128;
+    int numBlocks = min((totalWork + blockSize - 1) / blockSize, cu.getNumThreadBlocks());
+
+    CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    CUdeviceptr groupIndicesPtr = groupParticleIndices.getDevicePointer();
+    CUdeviceptr chargesPtr = charges.getDevicePointer();
+    CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
+    CUdeviceptr epsilonsPtr = epsilons.getDevicePointer();
+    CUdeviceptr exclusionsPtr = exclusions.getDevicePointer();
+    CUdeviceptr exceptionsPtr = exceptions.getDevicePointer();
+    CUdeviceptr exceptionParamsPtr = exceptionParams.getDevicePointer();
+    CUdeviceptr diagPtr = diagHessianBuffer.getDevicePointer();
+
+    void* args[] = {
+        &posqPtr,
+        &groupIndicesPtr,
+        &chargesPtr,
+        &sigmasPtr,
+        &epsilonsPtr,
+        &exclusionsPtr,
+        &exceptionsPtr,
+        &exceptionParamsPtr,
+        &diagPtr,
+        &numAtoms,
+        &numPairs,
+        &numParticleGroups
+    };
+
+    cu.executeKernel(diagHessianKernel, args, numBlocks * blockSize, blockSize);
+}

@@ -67,12 +67,22 @@ private:
     std::vector<TorsionInfoH> h_torsions;
 
     bool skipGroupEnergyDownload_ = false;
+
+    // Diagonal Hessian for Riemannian metric
+    OpenMM::CudaArray diagHessianBuffer;  // float[6 * numGroups * numAtoms]
+    CUfunction bondDiagHessianKernel;
+    CUfunction angleDiagHessianKernel;
+    CUfunction torsionDiagHessianKernel;
+    bool diagHessianInitialized = false;
+
 public:
     void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
     void* getGroupEnergyDevicePointer() override {
         return groupEnergiesBuffer.isInitialized()
             ? (void*)groupEnergiesBuffer.getDevicePointer() : nullptr;
     }
+    void computeDiagonalHessianGPU() override;
+    void* getDiagonalHessianDevicePointer() override;
 };
 
 } // namespace GridForcePlugin

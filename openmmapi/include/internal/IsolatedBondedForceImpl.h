@@ -45,6 +45,13 @@ public:
         return kernel.getAs<CalcIsolatedBondedForceKernel>().getGroupEnergyDevicePointer();
     }
 
+    void computeDiagonalHessianGPU() {
+        kernel.getAs<CalcIsolatedBondedForceKernel>().computeDiagonalHessianGPU();
+    }
+    void* getDiagonalHessianDevicePointer() {
+        return kernel.getAs<CalcIsolatedBondedForceKernel>().getDiagonalHessianDevicePointer();
+    }
+
 private:
     const IsolatedBondedForce& owner;
     OpenMM::Kernel kernel;

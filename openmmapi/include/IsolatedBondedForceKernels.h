@@ -59,6 +59,19 @@ public:
      */
     virtual void setSkipGroupEnergyDownload(bool) {}
     virtual void* getGroupEnergyDevicePointer() { return nullptr; }
+
+    /**
+     * Compute diagonal 3x3 Hessian blocks for ALL groups on GPU.
+     * Output: 6 floats per atom (xx,yy,zz,xy,xz,yz) × numGroups × numAtoms.
+     * Same format as GridForce Hessian blocks.
+     */
+    virtual void computeDiagonalHessianGPU() {}
+
+    /**
+     * Get device pointer to diagonal Hessian buffer.
+     * Returns nullptr if not available. Buffer has 6 * numGroups * numAtoms floats.
+     */
+    virtual void* getDiagonalHessianDevicePointer() { return nullptr; }
 };
 
 }  // namespace GridForcePlugin
