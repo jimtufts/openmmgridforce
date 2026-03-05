@@ -640,6 +640,8 @@ public:
     int getPrefilterMaxIterations() const;
     void setArcsinhScale(double scale);
     double getArcsinhScale() const;
+    void setGaussianBlurSigma(double sigma);
+    double getGaussianBlurSigma() const;
 
     void setAutoGenerateGrid(bool enable);
     bool getAutoGenerateGrid() const;
@@ -715,6 +717,10 @@ public:
     // Hessian (second derivative) computation for normal modes analysis
     void computeHessian(OpenMM::Context& context) const;
     std::vector<double> getHessianBlocks(OpenMM::Context& context) const;
+
+    // Third derivative computation (quintic B-spline method 4 only)
+    void computeThirdDerivatives(OpenMM::Context& context) const;
+    std::vector<double> getThirdDerivativeBlocks(OpenMM::Context& context) const;
 
     // Hessian analysis for eigenvalues, curvature metrics, and entropy
     HessianAnalysis analyzeHessian(OpenMM::Context& context, float temperature = 300.0f) const;
@@ -817,6 +823,29 @@ public:
         H[:, 1, 2] = H[:, 2, 1] = blocks[:, 5]  # dyz
 
         return H
+
+    def getThirdDerivativeTensors(self, context):
+        """
+        Compute and return third derivative blocks as (N, 10) numpy array.
+
+        Only supported for quintic B-spline (method 4) interpolation.
+
+        Components per atom:
+            [d3xxx, d3yyy, d3zzz, d3xxy, d3xxz, d3xyy, d3xzz, d3yyz, d3yzz, d3xyz]
+
+        Args:
+            context: OpenMM Context that has been evaluated (getState with forces)
+
+        Returns:
+            numpy.ndarray: Shape (N, 10) array. Units: kJ/(mol*nm^3).
+        """
+        import numpy as np
+        self.computeThirdDerivatives(context)
+        flat = np.array(self.getThirdDerivativeBlocks(context))
+        if len(flat) == 0:
+            return np.zeros((0, 10))
+        n_atoms = len(flat) // 10
+        return flat.reshape(n_atoms, 10)
 
     def getHessianAnalysis(self, context, temperature=300.0):
         """
@@ -1609,6 +1638,8 @@ public:
 class MultiGroupHMCIntegrator : public OpenMM::Integrator {
 public:
     enum MomentumRefreshMode { FULL = 0, PARTIAL = 1 };
+    enum MetricType { METRIC_IDENTITY = 0, METRIC_SOFTABS = 1, METRIC_BLENDED = 2 };
+    enum MetricUpdateMode { METRIC_UPDATE_NONE = 0, METRIC_UPDATE_EVERY_TRAJECTORY = 1 };
 
     MultiGroupHMCIntegrator(int numGroups, int atomsPerGroup, double stepSize);
 
@@ -1674,6 +1705,25 @@ public:
     std::vector<int> getAllGroupMCAccepted() const;
     void resetMCCounts();
 
+    // Riemannian metric configuration
+    void setMetricType(MetricType type);
+    MetricType getMetricType() const;
+    void setMetricUpdateMode(MetricUpdateMode mode);
+    MetricUpdateMode getMetricUpdateMode() const;
+    void setSoftAbsAlpha(double alpha);
+    double getSoftAbsAlpha() const;
+    void setMetricBlendFactor(double beta);
+    double getMetricBlendFactor() const;
+    void setGridHessianWeight(double w);
+    double getGridHessianWeight() const;
+    std::vector<double> getGroupMetricConditionNumbers() const;
+
+    // External diagonal Hessian injection (e.g., OBC solvation from JAX)
+    void setExternalDiagonalHessian(const std::vector<float>& hessian);
+    bool hasExternalHessian() const;
+    void clearExternalHessian();
+    const std::vector<float>& getExternalDiagonalHessian() const;
+
     // Random number seed
     int getRandomNumberSeed() const;
     void setRandomNumberSeed(int seed);
@@ -1698,6 +1748,8 @@ public:
 class MultiGroupNUTSIntegrator : public OpenMM::Integrator {
 public:
     enum MomentumRefreshMode { FULL = 0, PARTIAL = 1 };
+    enum MetricType { METRIC_IDENTITY = 0, METRIC_SOFTABS = 1, METRIC_BLENDED = 2 };
+    enum MetricUpdateMode { METRIC_UPDATE_NONE = 0, METRIC_UPDATE_EVERY_TRAJECTORY = 1 };
 
     MultiGroupNUTSIntegrator(int numGroups, int atomsPerGroup, double stepSize);
 
@@ -1771,6 +1823,25 @@ public:
     // GPU tree building toggle
     void setGpuTreeBuilding(bool enabled);
     bool getGpuTreeBuilding() const;
+
+    // Riemannian metric configuration
+    void setMetricType(MetricType type);
+    MetricType getMetricType() const;
+    void setMetricUpdateMode(MetricUpdateMode mode);
+    MetricUpdateMode getMetricUpdateMode() const;
+    void setSoftAbsAlpha(double alpha);
+    double getSoftAbsAlpha() const;
+    void setMetricBlendFactor(double beta);
+    double getMetricBlendFactor() const;
+    void setGridHessianWeight(double w);
+    double getGridHessianWeight() const;
+    std::vector<double> getGroupMetricConditionNumbers() const;
+
+    // External diagonal Hessian injection (e.g., OBC solvation from JAX)
+    void setExternalDiagonalHessian(const std::vector<float>& hessian);
+    bool hasExternalHessian() const;
+    void clearExternalHessian();
+    const std::vector<float>& getExternalDiagonalHessian() const;
 
     // Random number seed
     int getRandomNumberSeed() const;

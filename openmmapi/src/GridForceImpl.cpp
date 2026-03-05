@@ -105,6 +105,14 @@ std::vector<double> GridForceImpl::getHessianBlocks() {
     return kernel.getAs<CalcGridForceKernel>().getHessianBlocks();
 }
 
+void GridForceImpl::computeThirdDerivatives() {
+    kernel.getAs<CalcGridForceKernel>().computeThirdDerivatives();
+}
+
+std::vector<double> GridForceImpl::getThirdDerivativeBlocks() {
+    return kernel.getAs<CalcGridForceKernel>().getThirdDerivativeBlocks();
+}
+
 void GridForceImpl::analyzeHessian(float temperature) {
     kernel.getAs<CalcGridForceKernel>().analyzeHessian(temperature);
 }

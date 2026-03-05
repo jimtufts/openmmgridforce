@@ -444,6 +444,13 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 }
             }
 
+            // Apply Gaussian blur in (possibly arcsinh-compressed) space to smooth
+            // cap boundary discontinuities before prefiltering.
+            double blurSigma = force.getGaussianBlurSigma();
+            if (blurSigma > 0.0) {
+                gaussianBlur3D(vals, counts[0], counts[1], counts[2], blurSigma);
+            }
+
             // Apply B-spline prefilter so B-spline interpolation is interpolating
             // (passes through original function values at grid nodes).
             // Applied at generation time so prefiltered coefficients are stored in the file.
@@ -546,6 +553,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             for (size_t i = 0; i < vals.size(); i++) {
                 vals[i] = std::asinh(vals[i] / (double)arcsinhScale);
             }
+        }
+        double blurSigma = force.getGaussianBlurSigma();
+        if (blurSigma > 0.0) {
+            gaussianBlur3D(vals, counts[0], counts[1], counts[2], blurSigma);
         }
         int bsplineOrder = force.getBSplinePrefilterOrder();
         if (bsplineOrder > 0) {
@@ -883,6 +894,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         // Initialize analysis kernels for eigendecomposition and metrics
         analysisKernel = cu.getKernel(module, "analyzeHessianKernel");
         sumEntropyKernel = cu.getKernel(module, "sumEntropyKernel");
+
+        // Third derivative kernel (quintic B-spline only)
+        if (interpolationMethod == 4) {
+            thirdDerivKernel = cu.getKernel(module, "computeGridThirdDerivatives");
+            if (hessianNumAtoms > 0) {
+                thirdDerivBuffer.initialize<float>(cu, 10 * hessianNumAtoms, "thirdDerivBuffer");
+            }
+        }
     }
     analysisBuffersInitialized = false;
 
@@ -1579,6 +1598,77 @@ vector<double> CudaCalcGridForceKernel::getHessianBlocks() {
     }
 
     return hessianBlocks;
+}
+
+void CudaCalcGridForceKernel::computeThirdDerivatives() {
+    if (interpolationMethod != 4) {
+        throw OpenMMException("Third derivative computation only supported for quintic B-spline (method 4) interpolation");
+    }
+
+    if (!thirdDerivBuffer.isInitialized()) {
+        throw OpenMMException("Third derivative buffer not initialized - ensure quintic B-spline interpolation is being used");
+    }
+
+    cu.setAsCurrent();
+
+    CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    CUdeviceptr thirdDerivPtr = thirdDerivBuffer.getDevicePointer();
+    CUdeviceptr countsPtr = g_counts.getDevicePointer();
+    CUdeviceptr spacingPtr = g_spacing.getDevicePointer();
+
+    CUdeviceptr scalingPtr;
+    CUdeviceptr particleIndicesPtr;
+    int kernelNumAtoms;
+
+    if (totalGroupParticles > 0) {
+        scalingPtr = allGroupScalingFactors.getDevicePointer();
+        particleIndicesPtr = allGroupParticleIndices.getDevicePointer();
+        kernelNumAtoms = totalGroupParticles;
+    } else {
+        scalingPtr = g_scaling_factors.getDevicePointer();
+        particleIndicesPtr = (particleIndices.isInitialized()) ? particleIndices.getDevicePointer() : 0;
+        kernelNumAtoms = numAtoms;
+    }
+
+    // Standard (non-tiled) path — tiled third derivatives not yet implemented
+    CUdeviceptr valsPtr = (g_vals_shared != nullptr) ? g_vals_shared->getDevicePointer() : g_vals.getDevicePointer();
+    CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
+                            (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
+
+    void* args[] = {
+        &posqPtr,
+        &thirdDerivPtr,
+        &countsPtr,
+        &spacingPtr,
+        &valsPtr,
+        &scalingPtr,
+        &invPower,
+        &invPowerMode,
+        &interpolationMethod,
+        &originX,
+        &originY,
+        &originZ,
+        &derivsPtr,
+        &kernelNumAtoms,
+        &particleIndicesPtr,
+        &arcsinhScale
+    };
+
+    cu.executeKernel(thirdDerivKernel, args, kernelNumAtoms, 256);
+
+    lastThirdDerivBlocks.resize(10 * kernelNumAtoms);
+    thirdDerivBuffer.download(lastThirdDerivBlocks);
+}
+
+vector<double> CudaCalcGridForceKernel::getThirdDerivativeBlocks() {
+    vector<double> result;
+    if (!lastThirdDerivBlocks.empty()) {
+        result.resize(lastThirdDerivBlocks.size());
+        for (size_t i = 0; i < lastThirdDerivBlocks.size(); i++) {
+            result[i] = (double)lastThirdDerivBlocks[i];
+        }
+    }
+    return result;
 }
 
 void CudaCalcGridForceKernel::analyzeHessian(float temperature) {

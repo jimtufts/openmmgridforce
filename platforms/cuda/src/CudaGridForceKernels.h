@@ -84,6 +84,14 @@ public:
      */
     std::vector<double> getHessianBlocks();
     /**
+     * Compute third derivative blocks. Only method 4 (quintic B-spline).
+     */
+    void computeThirdDerivatives();
+    /**
+     * Get third derivative blocks (10 components per atom).
+     */
+    std::vector<double> getThirdDerivativeBlocks();
+    /**
      * Analyze Hessian blocks to compute per-atom metrics: eigenvalues, curvature,
      * anisotropy, and entropy estimates. Must call computeHessian() first.
      *
@@ -234,6 +242,11 @@ private:
     OpenMM::CudaArray hessianBuffer;            // Per-atom Hessian storage (6 floats per atom)
     std::vector<float> lastHessianBlocks;        // Persistent copy of last Hessian computation
 
+    // Third derivative computation support (method 4 only)
+    CUfunction thirdDerivKernel;                 // Kernel for third derivative computation
+    OpenMM::CudaArray thirdDerivBuffer;         // Per-atom storage (10 floats per atom)
+    std::vector<float> lastThirdDerivBlocks;     // Persistent copy of last computation
+
     // Hessian analysis support (eigendecomposition, curvature, entropy)
     CUfunction analysisKernel;                   // Kernel for per-atom Hessian analysis
     CUfunction sumEntropyKernel;                 // Kernel for entropy reduction
@@ -265,6 +278,10 @@ public:
     void* getGroupEnergyDevicePointer() override {
         return groupEnergyBuffer.isInitialized()
             ? (void*)groupEnergyBuffer.getDevicePointer() : nullptr;
+    }
+    void* getHessianDevicePointer() override {
+        return hessianBuffer.isInitialized()
+            ? (void*)hessianBuffer.getDevicePointer() : nullptr;
     }
 };
 

@@ -389,6 +389,23 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double getArcsinhScale() const;
 
     /**
+     * Set Gaussian blur sigma for smoothing grid values before B-spline prefiltering.
+     *
+     * Applied after arcsinh transform (if any) and before the B-spline prefilter.
+     * Smooths derivative discontinuities at cap boundaries to prevent Gibbs ringing
+     * in the prefilter. Sigma is in grid-cell units (e.g. 1.5 = 1.5 grid spacings).
+     *
+     * @param sigma  blur sigma (0.0 = disabled, > 0.0 = enabled)
+     */
+    void setGaussianBlurSigma(double sigma);
+
+    /**
+     * Get the Gaussian blur sigma.
+     * @return  the blur sigma (0.0 if disabled)
+     */
+    double getGaussianBlurSigma() const;
+
+    /**
      * Set the B-spline prefilter order for grid generation.
      *
      * When set to a non-zero value, the B-spline prefilter is applied to grid
@@ -957,6 +974,26 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     std::vector<double> getHessianBlocks(OpenMM::Context& context) const;
 
     /**
+     * Compute third derivative blocks for each atom from grid potential.
+     *
+     * Stores 10 unique third-order partial derivative components per atom.
+     * Only supported for quintic B-spline (method 4) interpolation (C4 continuity).
+     *
+     * @param context    the Context for which to compute third derivatives
+     */
+    void computeThirdDerivatives(OpenMM::Context& context) const;
+
+    /**
+     * Get the third derivative blocks computed by computeThirdDerivatives().
+     *
+     * @param context    the Context from which to retrieve data
+     * @return           vector of 10 components per atom:
+     *                   [d3xxx, d3yyy, d3zzz, d3xxy, d3xxz, d3xyy, d3xzz, d3yyz, d3yzz, d3xyz]
+     *                   Total size is 10 * numAtoms. Units are kJ/(mol*nm^3).
+     */
+    std::vector<double> getThirdDerivativeBlocks(OpenMM::Context& context) const;
+
+    /**
      * Analyze Hessian to compute per-atom eigenvalues, curvature metrics, and entropy.
      *
      * This performs eigendecomposition of each 3x3 Hessian block using Cardano's
@@ -1151,6 +1188,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     int m_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     int m_bsplinePrefilterOrder;  // 0=none, 3=cubic, 5=quintic
     double m_arcsinhScale;  // 0.0=disabled, >0.0=arcsinh(V/scale) transform
+    double m_blurSigma;    // 0.0=disabled, >0.0=Gaussian blur sigma in grid cells
     double m_adaptiveRegularization;   // 0.0=disabled, >0.0=adaptive reg strength
     double m_regularizationThreshold;  // gradient threshold for adaptive reg
     double m_prefilterPCGTolerance;    // PCG solver tolerance

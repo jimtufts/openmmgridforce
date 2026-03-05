@@ -131,6 +131,24 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
         return std::vector<double>();
     }
     /**
+     * Compute third derivative blocks for each atom from grid potential.
+     * Only supported for quintic B-spline (method 4) interpolation.
+     * Default implementation throws - override in platform-specific implementations.
+     */
+    virtual void computeThirdDerivatives() {
+        throw OpenMM::OpenMMException("Third derivative computation not supported on this platform");
+    }
+    /**
+     * Get the third derivative blocks computed by computeThirdDerivatives().
+     *
+     * @return vector of 10 components per atom:
+     *         [d3xxx, d3yyy, d3zzz, d3xxy, d3xxz, d3xyy, d3xzz, d3yyz, d3yzz, d3xyz]
+     *         Total size is 10 * numAtoms. Units are kJ/(mol·nm³).
+     */
+    virtual std::vector<double> getThirdDerivativeBlocks() {
+        return std::vector<double>();
+    }
+    /**
      * Analyze Hessian blocks to compute per-atom metrics: eigenvalues, curvature,
      * anisotropy, and entropy estimates. Must call computeHessian() first.
      * Default implementation throws - override in platform-specific implementations.
@@ -213,6 +231,11 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
 
     virtual void setSkipGroupEnergyDownload(bool) {}
     virtual void* getGroupEnergyDevicePointer() { return nullptr; }
+    /**
+     * Get the device pointer to the Hessian buffer (6 floats per atom).
+     * Must call computeHessian() first. Returns nullptr if not available.
+     */
+    virtual void* getHessianDevicePointer() { return nullptr; }
 };
 
 /**

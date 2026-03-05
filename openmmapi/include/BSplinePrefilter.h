@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 /**
@@ -309,6 +310,91 @@ void bsplinePrefilter3DByOrder(std::vector<T>& values, int nx, int ny, int nz, i
         bsplinePrefilter3D(values, nx, ny, nz);
     else if (order == 5)
         quinticBsplinePrefilter3D(values, nx, ny, nz);
+}
+
+// ============================================================================
+// Gaussian blur (separable 1D convolution, applied before prefilter)
+// ============================================================================
+
+/**
+ * Apply 1D Gaussian blur along a strided array.
+ *
+ * Uses clamped boundary conditions (same as B-spline prefilter):
+ *     idx = min(max(idx, 0), N-1)
+ *
+ * @param data   Pointer to the data array (overwritten in-place)
+ * @param N      Number of elements along this axis
+ * @param sigma  Gaussian standard deviation in grid-cell units
+ * @param stride Stride between consecutive elements (default 1)
+ */
+template <typename T>
+void gaussianBlur1D(T* data, int N, double sigma, int stride = 1) {
+    if (N < 2 || sigma <= 0.0) return;
+
+    // Build discrete Gaussian kernel, truncated at ceil(4*sigma)
+    int radius = static_cast<int>(std::ceil(4.0 * sigma));
+    if (radius < 1) radius = 1;
+    int ksize = 2 * radius + 1;
+
+    std::vector<T> kernel(ksize);
+    T sum = static_cast<T>(0);
+    for (int k = -radius; k <= radius; k++) {
+        T w = static_cast<T>(std::exp(-0.5 * k * k / (sigma * sigma)));
+        kernel[k + radius] = w;
+        sum += w;
+    }
+    // Normalize
+    for (int k = 0; k < ksize; k++) {
+        kernel[k] /= sum;
+    }
+
+    // Convolve into temporary buffer
+    std::vector<T> tmp(N);
+    for (int i = 0; i < N; i++) {
+        T acc = static_cast<T>(0);
+        for (int k = -radius; k <= radius; k++) {
+            int j = i + k;
+            if (j < 0) j = 0;
+            if (j >= N) j = N - 1;
+            acc += kernel[k + radius] * data[j * stride];
+        }
+        tmp[i] = acc;
+    }
+
+    // Copy back
+    for (int i = 0; i < N; i++) {
+        data[i * stride] = tmp[i];
+    }
+}
+
+/**
+ * Apply separable 3D Gaussian blur to a grid in-place.
+ * Grid layout is row-major: values[ix * ny*nz + iy * nz + iz]
+ *
+ * @param values  Grid values (overwritten in-place)
+ * @param nx, ny, nz  Grid dimensions
+ * @param sigma   Gaussian standard deviation in grid-cell units
+ */
+template <typename T>
+void gaussianBlur3D(std::vector<T>& values, int nx, int ny, int nz, double sigma) {
+    if (values.size() != static_cast<size_t>(nx) * ny * nz) return;
+    if (sigma <= 0.0) return;
+    int nyz = ny * nz;
+
+    // Along x
+    for (int iy = 0; iy < ny; iy++)
+        for (int iz = 0; iz < nz; iz++)
+            gaussianBlur1D(&values[iy * nz + iz], nx, sigma, nyz);
+
+    // Along y
+    for (int ix = 0; ix < nx; ix++)
+        for (int iz = 0; iz < nz; iz++)
+            gaussianBlur1D(&values[ix * nyz + iz], ny, sigma, nz);
+
+    // Along z
+    for (int ix = 0; ix < nx; ix++)
+        for (int iy = 0; iy < ny; iy++)
+            gaussianBlur1D(&values[ix * nyz + iy * nz], nz, sigma, 1);
 }
 
 } // namespace GridForcePlugin

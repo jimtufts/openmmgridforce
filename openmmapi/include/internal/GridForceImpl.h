@@ -94,6 +94,17 @@ class OPENMM_EXPORT_GRIDFORCE GridForceImpl : public OpenMM::ForceImpl {
     std::vector<double> getHessianBlocks();
 
     /**
+     * Compute third derivative blocks for each atom. Method 4 (quintic B-spline) only.
+     */
+    void computeThirdDerivatives();
+
+    /**
+     * Get the third derivative blocks computed by computeThirdDerivatives().
+     * @return vector of 10 components per atom
+     */
+    std::vector<double> getThirdDerivativeBlocks();
+
+    /**
      * Analyze Hessian blocks to compute per-atom metrics.
      * @param temperature  Temperature in Kelvin for entropy calculation
      */
@@ -154,6 +165,12 @@ class OPENMM_EXPORT_GRIDFORCE GridForceImpl : public OpenMM::ForceImpl {
     }
     void* getGroupEnergyDevicePointer() {
         return kernel.getAs<CalcGridForceKernel>().getGroupEnergyDevicePointer();
+    }
+    void computeHessianGPU() {
+        kernel.getAs<CalcGridForceKernel>().computeHessian();
+    }
+    void* getHessianDevicePointer() {
+        return kernel.getAs<CalcGridForceKernel>().getHessianDevicePointer();
     }
 
    private:

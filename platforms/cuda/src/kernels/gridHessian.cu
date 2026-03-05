@@ -1,21 +1,15 @@
 /**
- * CUDA implementation of grid Hessian (second derivative) calculation.
+ * CUDA implementation of grid Hessian (second derivative) and third derivative calculation.
  *
- * This kernel computes the 3x3 Hessian block for each atom from the grid potential.
- * The Hessian is the matrix of second partial derivatives:
- *   H = [d²V/dx², d²V/dxdy, d²V/dxdz]
- *       [d²V/dydx, d²V/dy², d²V/dydz]
- *       [d²V/dzdx, d²V/dzdy, d²V/dz²]
+ * computeGridHessian: 3x3 Hessian block for each atom from the grid potential.
+ *   Output: 6 unique components per atom: dxx, dyy, dzz, dxy, dxz, dyz
+ *   Supports methods 1 (cubic B-spline), 3 (triquintic Hermite), 4 (quintic B-spline).
  *
- * Since mixed partials are equal (d²V/dxdy = d²V/dydx), we store only 6 unique components
- * per atom: dxx, dyy, dzz, dxy, dxz, dyz
+ * computeGridThirdDerivatives: 10 unique third derivative components per atom.
+ *   Output: d3xxx, d3yyy, d3zzz, d3xxy, d3xxz, d3xyy, d3xzz, d3yyz, d3yzz, d3xyz
+ *   Only supports method 4 (quintic B-spline, C4 continuity).
  *
- * Supports inv_power transformation: when enabled, applies chain rule to convert
- * stored (transformed) derivatives to actual derivatives.
- *
- * Supported interpolation methods:
- *   - Triquintic (method 3): Analytical second derivatives from 5th order polynomial
- *   - B-spline (method 1): Analytical second derivatives from cubic B-spline basis
+ * Both support inv_power and arcsinh chain rule transformations.
  */
 
 #include "include/InterpolationBasis.cuh"
@@ -611,4 +605,312 @@ extern "C" __global__ void computeGridHessian(
     hessianBuffer[offset + 3] = d2xy;
     hessianBuffer[offset + 4] = d2xz;
     hessianBuffer[offset + 5] = d2yz;
+}
+
+
+/**
+ * Apply inv_power chain rule to third derivatives.
+ *
+ * For V = sign(U)*|U|^p, the third derivative d³V/dxi dxj dxk uses Faà di Bruno:
+ *   f3_1 * product_of_first_derivs  +  f3_2 * (first * second_deriv combinations)  +  f3_3 * third_deriv
+ *
+ * All input derivatives (dU*, d2U*, d3*) must be in the ORIGINAL (pre-transform) space.
+ * The output d3* values are overwritten with the transformed derivatives.
+ */
+__device__ inline void applyThirdDerivChainRule(
+    float U,
+    float dUdx, float dUdy, float dUdz,
+    float d2Uxx, float d2Uyy, float d2Uzz,
+    float d2Uxy, float d2Uxz, float d2Uyz,
+    float& d3xxx, float& d3yyy, float& d3zzz,
+    float& d3xxy, float& d3xxz, float& d3xyy,
+    float& d3xzz, float& d3yyz, float& d3yzz,
+    float& d3xyz,
+    float p
+) {
+    float absU = fabsf(U);
+    if (absU < 1e-10f) absU = 1e-10f;
+
+    float absU_pm1 = powf(absU, p - 1.0f);
+    float absU_pm2 = powf(absU, p - 2.0f);
+    float absU_pm3 = powf(absU, p - 3.0f);
+
+    float f3_1 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    float f3_2 = p * (p - 1.0f) * absU_pm2;
+    float f3_3 = p * absU_pm1;
+
+    d3xxx = f3_1*dUdx*dUdx*dUdx + 3.0f*f3_2*dUdx*d2Uxx                            + f3_3*d3xxx;
+    d3yyy = f3_1*dUdy*dUdy*dUdy + 3.0f*f3_2*dUdy*d2Uyy                            + f3_3*d3yyy;
+    d3zzz = f3_1*dUdz*dUdz*dUdz + 3.0f*f3_2*dUdz*d2Uzz                            + f3_3*d3zzz;
+    d3xxy = f3_1*dUdx*dUdx*dUdy + f3_2*(2.0f*dUdx*d2Uxy + dUdy*d2Uxx)             + f3_3*d3xxy;
+    d3xxz = f3_1*dUdx*dUdx*dUdz + f3_2*(2.0f*dUdx*d2Uxz + dUdz*d2Uxx)             + f3_3*d3xxz;
+    d3xyy = f3_1*dUdx*dUdy*dUdy + f3_2*(dUdx*d2Uyy + 2.0f*dUdy*d2Uxy)             + f3_3*d3xyy;
+    d3xzz = f3_1*dUdx*dUdz*dUdz + f3_2*(dUdx*d2Uzz + 2.0f*dUdz*d2Uxz)             + f3_3*d3xzz;
+    d3yyz = f3_1*dUdy*dUdy*dUdz + f3_2*(2.0f*dUdy*d2Uyz + dUdz*d2Uyy)             + f3_3*d3yyz;
+    d3yzz = f3_1*dUdy*dUdz*dUdz + f3_2*(dUdy*d2Uzz + 2.0f*dUdz*d2Uyz)             + f3_3*d3yzz;
+    d3xyz = f3_1*dUdx*dUdy*dUdz + f3_2*(dUdx*d2Uyz + dUdy*d2Uxz + dUdz*d2Uxy)     + f3_3*d3xyz;
+}
+
+
+/**
+ * Compute third derivative blocks for all atoms using quintic B-spline grid interpolation.
+ *
+ * Only supports interpolation method 4 (quintic B-spline, C4 continuity).
+ * Output: 10 unique components per atom:
+ *   [d3xxx, d3yyy, d3zzz, d3xxy, d3xxz, d3xyy, d3xzz, d3yyz, d3yzz, d3xyz]
+ *
+ * Parameters match computeGridHessian exactly, except output buffer has 10 components per atom.
+ */
+extern "C" __global__ void computeGridThirdDerivatives(
+    const float4* __restrict__ posq,
+    float* __restrict__ thirdDerivBuffer,  // 10 components per atom
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridSpacing,
+    const float* __restrict__ gridValues,
+    const float* __restrict__ scalingFactors,
+    const float invPower,
+    const int invPowerMode,
+    const int interpolationMethod,
+    const float originX,
+    const float originY,
+    const float originZ,
+    const float* __restrict__ gridDerivatives,
+    const int numAtoms,
+    const int* __restrict__ particleIndices,
+    const float arcsinhScale)
+{
+    const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (index >= numAtoms)
+        return;
+
+    const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
+
+    float4 posOrig = posq[particleIndex];
+    float scalingFactor = scalingFactors[particleIndex];
+
+    float3 pos;
+    pos.x = posOrig.x - originX;
+    pos.y = posOrig.y - originY;
+    pos.z = posOrig.z - originZ;
+
+    // All derivatives initialized to zero
+    float interpolated = 0.0f;
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
+    float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
+    float d3xxx = 0.0f, d3yyy = 0.0f, d3zzz = 0.0f;
+    float d3xxy = 0.0f, d3xxz = 0.0f, d3xyy = 0.0f;
+    float d3xzz = 0.0f, d3yyz = 0.0f, d3yzz = 0.0f;
+    float d3xyz = 0.0f;
+
+    float3 gridCorner;
+    gridCorner.x = gridSpacing[0] * (gridCounts[0] - 1);
+    gridCorner.y = gridSpacing[1] * (gridCounts[1] - 1);
+    gridCorner.z = gridSpacing[2] * (gridCounts[2] - 1);
+
+    bool isInside = (pos.x >= 0.0f && pos.x <= gridCorner.x &&
+                     pos.y >= 0.0f && pos.y <= gridCorner.y &&
+                     pos.z >= 0.0f && pos.z <= gridCorner.z);
+
+    if (isInside && scalingFactor != 0.0f && interpolationMethod == 4) {
+        int ix = min(max((int)(pos.x / gridSpacing[0]), 0), gridCounts[0] - 2);
+        int iy = min(max((int)(pos.y / gridSpacing[1]), 0), gridCounts[1] - 2);
+        int iz = min(max((int)(pos.z / gridSpacing[2]), 0), gridCounts[2] - 2);
+
+        float fx = (pos.x / gridSpacing[0]) - ix;
+        float fy = (pos.y / gridSpacing[1]) - iy;
+        float fz = (pos.z / gridSpacing[2]) - iz;
+
+        fx = min(max(fx, 0.0f), 1.0f);
+        fy = min(max(fy, 0.0f), 1.0f);
+        fz = min(max(fz, 0.0f), 1.0f);
+
+        int nyz = gridCounts[1] * gridCounts[2];
+
+        // Basis functions: value, 1st, 2nd, and 3rd derivatives
+        float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+                       qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
+        float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+                       qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
+        float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+                       qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
+
+        float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+                        qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
+        float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+                        qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
+        float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+                        qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
+
+        float d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
+                         qbspline_deriv2_3(fx), qbspline_deriv2_4(fx), qbspline_deriv2_5(fx)};
+        float d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
+                         qbspline_deriv2_3(fy), qbspline_deriv2_4(fy), qbspline_deriv2_5(fy)};
+        float d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
+                         qbspline_deriv2_3(fz), qbspline_deriv2_4(fz), qbspline_deriv2_5(fz)};
+
+        float d3bx[6] = {qbspline_deriv3_0(fx), qbspline_deriv3_1(fx), qbspline_deriv3_2(fx),
+                         qbspline_deriv3_3(fx), qbspline_deriv3_4(fx), qbspline_deriv3_5(fx)};
+        float d3by[6] = {qbspline_deriv3_0(fy), qbspline_deriv3_1(fy), qbspline_deriv3_2(fy),
+                         qbspline_deriv3_3(fy), qbspline_deriv3_4(fy), qbspline_deriv3_5(fy)};
+        float d3bz[6] = {qbspline_deriv3_0(fz), qbspline_deriv3_1(fz), qbspline_deriv3_2(fz),
+                         qbspline_deriv3_3(fz), qbspline_deriv3_4(fz), qbspline_deriv3_5(fz)};
+
+        for (int i = 0; i < 6; i++) {
+            int gx = min(max(ix - 2 + i, 0), gridCounts[0] - 1);
+            for (int j = 0; j < 6; j++) {
+                int gy = min(max(iy - 2 + j, 0), gridCounts[1] - 1);
+                for (int k = 0; k < 6; k++) {
+                    int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
+                    int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
+                    float val = gridValues[gridIdx];
+
+                    if (invPowerMode == 1) {
+                        float invN = 1.0f / invPower;
+                        if (fabsf(val) >= 1e-10f) {
+                            val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                        } else {
+                            val = 0.0f;
+                        }
+                    }
+
+                    interpolated += bx[i] * by[j] * bz[k] * val;
+                    dx  += dbx[i] *  by[j] *  bz[k] * val;
+                    dy  +=  bx[i] * dby[j] *  bz[k] * val;
+                    dz  +=  bx[i] *  by[j] * dbz[k] * val;
+
+                    d2xx += d2bx[i] *   by[j] *   bz[k] * val;
+                    d2yy +=   bx[i] * d2by[j] *   bz[k] * val;
+                    d2zz +=   bx[i] *   by[j] * d2bz[k] * val;
+                    d2xy +=  dbx[i] *  dby[j] *   bz[k] * val;
+                    d2xz +=  dbx[i] *   by[j] *  dbz[k] * val;
+                    d2yz +=   bx[i] *  dby[j] *  dbz[k] * val;
+
+                    d3xxx += d3bx[i] *   by[j] *   bz[k] * val;
+                    d3yyy +=   bx[i] * d3by[j] *   bz[k] * val;
+                    d3zzz +=   bx[i] *   by[j] * d3bz[k] * val;
+                    d3xxy += d2bx[i] *  dby[j] *   bz[k] * val;
+                    d3xxz += d2bx[i] *   by[j] *  dbz[k] * val;
+                    d3xyy +=  dbx[i] * d2by[j] *   bz[k] * val;
+                    d3xzz +=  dbx[i] *   by[j] * d2bz[k] * val;
+                    d3yyz +=   bx[i] * d2by[j] *  dbz[k] * val;
+                    d3yzz +=   bx[i] *  dby[j] * d2bz[k] * val;
+                    d3xyz +=  dbx[i] *  dby[j] *  dbz[k] * val;
+                }
+            }
+        }
+
+        // Chain rule transformations operate on the raw interpolated derivatives.
+        // Each transformation is applied to all derivative levels simultaneously,
+        // using the PRE-transform values at each level.
+
+        // 1. InvPower: V = sign(U)|U|^p, convert from smoothed to actual space
+        if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
+            float p = invPower;
+            float absU = fabsf(interpolated);
+            if (absU < 1e-10f) absU = 1e-10f;
+            float absU_pm1 = powf(absU, p - 1.0f);
+            float absU_pm2 = powf(absU, p - 2.0f);
+
+            // Third derivatives (uses original 1st, 2nd, 3rd)
+            applyThirdDerivChainRule(interpolated, dx, dy, dz,
+                                    d2xx, d2yy, d2zz, d2xy, d2xz, d2yz,
+                                    d3xxx, d3yyy, d3zzz, d3xxy, d3xxz,
+                                    d3xyy, d3xzz, d3yyz, d3yzz, d3xyz, p);
+
+            // Second derivatives (uses original 1st, overwrites 2nd)
+            float f2_1 = p * (p - 1.0f) * absU_pm2;
+            float f2_2 = p * absU_pm1;
+            float new_d2xx = f2_1*dx*dx + f2_2*d2xx;
+            float new_d2yy = f2_1*dy*dy + f2_2*d2yy;
+            float new_d2zz = f2_1*dz*dz + f2_2*d2zz;
+            float new_d2xy = f2_1*dx*dy + f2_2*d2xy;
+            float new_d2xz = f2_1*dx*dz + f2_2*d2xz;
+            float new_d2yz = f2_1*dy*dz + f2_2*d2yz;
+
+            // First derivatives
+            float f1 = p * absU_pm1;
+            dx = f1 * dx;
+            dy = f1 * dy;
+            dz = f1 * dz;
+
+            d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+            d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+        }
+
+        // 2. Arcsinh: V = scale * sinh(g)
+        if (arcsinhScale > 0.0f) {
+            float g = interpolated;
+            float sinhG = sinhf(g);
+            float coshG = coshf(g);
+            float s = arcsinhScale;
+
+            // Third derivatives (Faà di Bruno for sinh(g)):
+            //   d³V/dxi dxj dxk = s * [cosh(g)*gi*gj*gk + sinh(g)*(gi*gjk + gj*gik + gk*gij) + cosh(g)*gijk]
+            float new_d3xxx = s*(coshG*dx*dx*dx + 3.0f*sinhG*dx*d2xx + coshG*d3xxx);
+            float new_d3yyy = s*(coshG*dy*dy*dy + 3.0f*sinhG*dy*d2yy + coshG*d3yyy);
+            float new_d3zzz = s*(coshG*dz*dz*dz + 3.0f*sinhG*dz*d2zz + coshG*d3zzz);
+            float new_d3xxy = s*(coshG*dx*dx*dy + sinhG*(2.0f*dx*d2xy + dy*d2xx) + coshG*d3xxy);
+            float new_d3xxz = s*(coshG*dx*dx*dz + sinhG*(2.0f*dx*d2xz + dz*d2xx) + coshG*d3xxz);
+            float new_d3xyy = s*(coshG*dx*dy*dy + sinhG*(dx*d2yy + 2.0f*dy*d2xy) + coshG*d3xyy);
+            float new_d3xzz = s*(coshG*dx*dz*dz + sinhG*(dx*d2zz + 2.0f*dz*d2xz) + coshG*d3xzz);
+            float new_d3yyz = s*(coshG*dy*dy*dz + sinhG*(2.0f*dy*d2yz + dz*d2yy) + coshG*d3yyz);
+            float new_d3yzz = s*(coshG*dy*dz*dz + sinhG*(dy*d2zz + 2.0f*dz*d2yz) + coshG*d3yzz);
+            float new_d3xyz = s*(coshG*dx*dy*dz + sinhG*(dx*d2yz + dy*d2xz + dz*d2xy) + coshG*d3xyz);
+
+            // Second derivatives
+            float new_d2xx = s*(sinhG*dx*dx + coshG*d2xx);
+            float new_d2yy = s*(sinhG*dy*dy + coshG*d2yy);
+            float new_d2zz = s*(sinhG*dz*dz + coshG*d2zz);
+            float new_d2xy = s*(sinhG*dx*dy + coshG*d2xy);
+            float new_d2xz = s*(sinhG*dx*dz + coshG*d2xz);
+            float new_d2yz = s*(sinhG*dy*dz + coshG*d2yz);
+
+            // First derivatives
+            dx = s*coshG*dx; dy = s*coshG*dy; dz = s*coshG*dz;
+
+            d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+            d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+            d3xxx = new_d3xxx; d3yyy = new_d3yyy; d3zzz = new_d3zzz;
+            d3xxy = new_d3xxy; d3xxz = new_d3xxz; d3xyy = new_d3xyy;
+            d3xzz = new_d3xzz; d3yyz = new_d3yyz; d3yzz = new_d3yzz;
+            d3xyz = new_d3xyz;
+        }
+
+        // 3. Convert from grid-cell coordinates to physical coordinates
+        float inv_dx = 1.0f / gridSpacing[0];
+        float inv_dy = 1.0f / gridSpacing[1];
+        float inv_dz = 1.0f / gridSpacing[2];
+
+        d3xxx *= inv_dx * inv_dx * inv_dx;
+        d3yyy *= inv_dy * inv_dy * inv_dy;
+        d3zzz *= inv_dz * inv_dz * inv_dz;
+        d3xxy *= inv_dx * inv_dx * inv_dy;
+        d3xxz *= inv_dx * inv_dx * inv_dz;
+        d3xyy *= inv_dx * inv_dy * inv_dy;
+        d3xzz *= inv_dx * inv_dz * inv_dz;
+        d3yyz *= inv_dy * inv_dy * inv_dz;
+        d3yzz *= inv_dy * inv_dz * inv_dz;
+        d3xyz *= inv_dx * inv_dy * inv_dz;
+
+        // Apply per-atom scaling factor
+        d3xxx *= scalingFactor; d3yyy *= scalingFactor; d3zzz *= scalingFactor;
+        d3xxy *= scalingFactor; d3xxz *= scalingFactor; d3xyy *= scalingFactor;
+        d3xzz *= scalingFactor; d3yyz *= scalingFactor; d3yzz *= scalingFactor;
+        d3xyz *= scalingFactor;
+    }
+
+    // Store third derivative components (10 per atom)
+    int offset = index * 10;
+    thirdDerivBuffer[offset + 0] = d3xxx;
+    thirdDerivBuffer[offset + 1] = d3yyy;
+    thirdDerivBuffer[offset + 2] = d3zzz;
+    thirdDerivBuffer[offset + 3] = d3xxy;
+    thirdDerivBuffer[offset + 4] = d3xxz;
+    thirdDerivBuffer[offset + 5] = d3xyy;
+    thirdDerivBuffer[offset + 6] = d3xzz;
+    thirdDerivBuffer[offset + 7] = d3yyz;
+    thirdDerivBuffer[offset + 8] = d3yzz;
+    thirdDerivBuffer[offset + 9] = d3xyz;
 }

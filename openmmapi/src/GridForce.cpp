@@ -51,7 +51,7 @@ using namespace std;
 namespace GridForcePlugin {
 
 GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
-                         m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
+                         m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0), m_blurSigma(0.0),
                          m_adaptiveRegularization(0.0), m_regularizationThreshold(0.0),
                          m_prefilterPCGTolerance(1e-6), m_prefilterMaxIterations(200),
                          m_globalScalingFactor(1.0),
@@ -70,7 +70,7 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
 GridForce::GridForce(std::shared_ptr<GridData> gridData)
     : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0),
       m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
-      m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0),
+      m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0), m_blurSigma(0.0),
       m_adaptiveRegularization(0.0), m_regularizationThreshold(0.0),
       m_prefilterPCGTolerance(1e-6), m_prefilterMaxIterations(200),
       m_globalScalingFactor(1.0),
@@ -364,6 +364,17 @@ void GridForce::setArcsinhScale(double scale) {
 
 double GridForce::getArcsinhScale() const {
     return m_arcsinhScale;
+}
+
+void GridForce::setGaussianBlurSigma(double sigma) {
+    if (sigma < 0.0) {
+        throw OpenMMException("GridForce: Gaussian blur sigma must be >= 0.0 (0.0 = disabled)");
+    }
+    m_blurSigma = sigma;
+}
+
+double GridForce::getGaussianBlurSigma() const {
+    return m_blurSigma;
 }
 
 void GridForce::setAdaptiveRegularization(double cReg) {
@@ -1337,6 +1348,14 @@ void GridForce::computeHessian(Context& context) const {
 
 vector<double> GridForce::getHessianBlocks(Context& context) const {
     return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getHessianBlocks();
+}
+
+void GridForce::computeThirdDerivatives(Context& context) const {
+    dynamic_cast<GridForceImpl&>(getImplInContext(context)).computeThirdDerivatives();
+}
+
+vector<double> GridForce::getThirdDerivativeBlocks(Context& context) const {
+    return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getThirdDerivativeBlocks();
 }
 
 HessianAnalysis GridForce::analyzeHessian(Context& context, float temperature) const {
