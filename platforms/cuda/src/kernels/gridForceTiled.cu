@@ -494,7 +494,9 @@ extern "C" __global__ void computeGridForceTiled(
     const unsigned long long* __restrict__ tileDerivPtrs,   // Device pointers to tile derivatives
     const int numTiles,
     const int tileSize,                             // Core tile size (excluding overlap)
-    const int tileOverlap                           // Overlap for interpolation stencil
+    const int tileOverlap,                          // Overlap for interpolation stencil
+    const float effectiveMinX, const float effectiveMinY, const float effectiveMinZ,  // Effective evaluation bounds
+    const float effectiveMaxX, const float effectiveMaxY, const float effectiveMaxZ
 ) {
     // Compute tile dimensions
     const int tileWithOverlap = tileSize + 2 * tileOverlap;
@@ -533,15 +535,10 @@ extern "C" __global__ void computeGridForceTiled(
     float threadEnergy = 0.0f;
     float threadUnscaledEnergy = 0.0f;
 
-    // Calculate grid boundaries
-    float3 gridCorner;
-    gridCorner.x = gridSpacing[0] * (gridCounts[0] - 1);
-    gridCorner.y = gridSpacing[1] * (gridCounts[1] - 1);
-    gridCorner.z = gridSpacing[2] * (gridCounts[2] - 1);
-
-    bool isInside = (pos.x >= 0.0f && pos.x <= gridCorner.x &&
-                     pos.y >= 0.0f && pos.y <= gridCorner.y &&
-                     pos.z >= 0.0f && pos.z <= gridCorner.z);
+    // Check if the atom is inside the effective evaluation bounds
+    bool isInside = (pos.x >= effectiveMinX && pos.x <= effectiveMaxX &&
+                     pos.y >= effectiveMinY && pos.y <= effectiveMaxY &&
+                     pos.z >= effectiveMinZ && pos.z <= effectiveMaxZ);
 
     // Enter interpolation if scaled OR unscaled energy is needed
     bool needUnscaled = (groupUnscaledEnergyBuffer != nullptr && unscaledScaling != 0.0f);
@@ -806,12 +803,12 @@ extern "C" __global__ void computeGridForceTiled(
                 atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
             }
 
-            // Apply runtime algebraic cap: f(v) = v*C/(|v|+C), bounded by C
+            // Apply runtime tanh cap: f(v) = C * tanh(v/C), bounded by ±C
+            // Gradient factor: sech²(v/C) = 1 - tanh²(v/C)
             if (effectiveCap > 0.0f) {
-                float absVal = fabsf(interpolated);
-                float denom = absVal + effectiveCap;
-                float gradFactor = (effectiveCap * effectiveCap) / (denom * denom);
-                interpolated = interpolated * effectiveCap / denom;
+                float t = tanhf(interpolated / effectiveCap);
+                float gradFactor = 1.0f - t * t;
+                interpolated = effectiveCap * t;
                 dx *= gradFactor;
                 dy *= gradFactor;
                 dz *= gradFactor;
@@ -825,32 +822,25 @@ extern "C" __global__ void computeGridForceTiled(
             atomForce.z = -scalingFactor * dz;
         }
     } else if (!isInside && outOfBoundsK > 0.0f) {
-        // Out-of-bounds restraint (same as non-tiled kernel)
+        // Out-of-bounds restraint using effective bounds
         float restraintEnergy = 0.0f;
-        if (pos.x < 0.0f) {
-            restraintEnergy += outOfBoundsK * pos.x * pos.x;
-            atomForce.x = 2.0f * outOfBoundsK * pos.x;
-        } else if (pos.x > gridCorner.x) {
-            float dx = pos.x - gridCorner.x;
-            restraintEnergy += outOfBoundsK * dx * dx;
-            atomForce.x = -2.0f * outOfBoundsK * dx;
-        }
-        if (pos.y < 0.0f) {
-            restraintEnergy += outOfBoundsK * pos.y * pos.y;
-            atomForce.y = 2.0f * outOfBoundsK * pos.y;
-        } else if (pos.y > gridCorner.y) {
-            float dy = pos.y - gridCorner.y;
-            restraintEnergy += outOfBoundsK * dy * dy;
-            atomForce.y = -2.0f * outOfBoundsK * dy;
-        }
-        if (pos.z < 0.0f) {
-            restraintEnergy += outOfBoundsK * pos.z * pos.z;
-            atomForce.z = 2.0f * outOfBoundsK * pos.z;
-        } else if (pos.z > gridCorner.z) {
-            float dz = pos.z - gridCorner.z;
-            restraintEnergy += outOfBoundsK * dz * dz;
-            atomForce.z = -2.0f * outOfBoundsK * dz;
-        }
+        float3 dev = make_float3(0.0f, 0.0f, 0.0f);
+        if (pos.x < effectiveMinX)
+            dev.x = pos.x - effectiveMinX;
+        else if (pos.x > effectiveMaxX)
+            dev.x = pos.x - effectiveMaxX;
+        if (pos.y < effectiveMinY)
+            dev.y = pos.y - effectiveMinY;
+        else if (pos.y > effectiveMaxY)
+            dev.y = pos.y - effectiveMaxY;
+        if (pos.z < effectiveMinZ)
+            dev.z = pos.z - effectiveMinZ;
+        else if (pos.z > effectiveMaxZ)
+            dev.z = pos.z - effectiveMaxZ;
+        restraintEnergy = 0.5f * outOfBoundsK * (dev.x * dev.x + dev.y * dev.y + dev.z * dev.z);
+        atomForce.x = -outOfBoundsK * dev.x;
+        atomForce.y = -outOfBoundsK * dev.y;
+        atomForce.z = -outOfBoundsK * dev.z;
         threadEnergy = restraintEnergy;
         threadUnscaledEnergy = restraintEnergy;  // OOB restraint is not group-scaled
     }

@@ -182,6 +182,25 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     g_outOfBoundsRestraint = grid_force.getOutOfBoundsRestraint();
     g_interpolationMethod = grid_force.getInterpolationMethod();
     grid_force.getGridOrigin(g_origin_x, g_origin_y, g_origin_z);
+
+    // Compute effective bounds in grid-local coordinates
+    if (grid_force.hasEffectiveBounds()) {
+        double ebMinX, ebMinY, ebMinZ, ebMaxX, ebMaxY, ebMaxZ;
+        grid_force.getEffectiveBounds(ebMinX, ebMinY, ebMinZ, ebMaxX, ebMaxY, ebMaxZ);
+        g_effectiveMinX = ebMinX - g_origin_x;
+        g_effectiveMinY = ebMinY - g_origin_y;
+        g_effectiveMinZ = ebMinZ - g_origin_z;
+        g_effectiveMaxX = ebMaxX - g_origin_x;
+        g_effectiveMaxY = ebMaxY - g_origin_y;
+        g_effectiveMaxZ = ebMaxZ - g_origin_z;
+    } else {
+        g_effectiveMinX = 0.0;
+        g_effectiveMinY = 0.0;
+        g_effectiveMinZ = 0.0;
+        g_effectiveMaxX = g_spacing[0] * (g_counts[0] - 1);
+        g_effectiveMaxY = g_spacing[1] * (g_counts[1] - 1);
+        g_effectiveMaxZ = g_spacing[2] * (g_counts[2] - 1);
+    }
     g_computeDerivatives = grid_force.getComputeDerivatives();
     g_derivatives = grid_force.getDerivatives();
 
@@ -696,13 +715,12 @@ void ReferenceCalcGridForceKernel::generateGrid(
 
 static inline void applyRuntimeCap(double cap, double& interpolated, Vec3& grd) {
     if (cap > 0.0) {
-        // Algebraic cap: f(v) = v*C/(|v|+C), bounded by C
-        // Gradient factor: C^2 / (|v|+C)^2 (decays as 1/v^2, not exponentially)
-        double absVal = std::abs(interpolated);
-        double denom = absVal + cap;
-        double gradFactor = (cap * cap) / (denom * denom);
-        interpolated = interpolated * cap / denom;
-        grd = grd * gradFactor;
+        // Tanh cap: f(v) = C * tanh(v/C), bounded by ±C
+        // Gradient factor: sech²(v/C) = 1 - tanh²(v/C)
+        double t = std::tanh(interpolated / cap);
+        double sech2 = 1.0 - t * t;
+        interpolated = cap * t;
+        grd = grd * sech2;
     }
 }
 
@@ -739,9 +757,12 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
         Vec3 pi_orig = posData[particle_idx];
         Vec3 pi(pi_orig[0] - g_origin_x, pi_orig[1] - g_origin_y, pi_orig[2] - g_origin_z);
 
+        // Check against effective bounds (defaults to full grid extent)
+        double effMin[3] = {g_effectiveMinX, g_effectiveMinY, g_effectiveMinZ};
+        double effMax[3] = {g_effectiveMaxX, g_effectiveMaxY, g_effectiveMaxZ};
         bool is_inside = true;
         for (int k = 0; k < 3; ++k) {
-            if (pi[k] >= 0.0 && pi[k] <= hCorner[k])
+            if (pi[k] >= effMin[k] && pi[k] <= effMax[k])
                 continue;
             else
                 is_inside = false;
@@ -1145,11 +1166,11 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
             Vec3 grd(0.0, 0.0, 0.0);
             for (int k = 0; k < 3; k++) {
                 double dev = 0.0;
-                // Check distance from grid boundaries (in grid coordinates)
-                if (pi[k] < 0.0) {
-                    dev = pi[k];  // Negative distance from lower bound
-                } else if (pi[k] > hCorner[k]) {
-                    dev = pi[k] - hCorner[k];  // Positive distance from upper bound
+                // Check distance from effective bounds
+                if (pi[k] < effMin[k]) {
+                    dev = pi[k] - effMin[k];  // Negative distance from lower bound
+                } else if (pi[k] > effMax[k]) {
+                    dev = pi[k] - effMax[k];  // Positive distance from upper bound
                 }
                 double oobTerm = 0.5 * g_outOfBoundsRestraint * dev * dev;
                 energy += oobTerm;

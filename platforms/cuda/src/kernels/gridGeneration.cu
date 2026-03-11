@@ -263,13 +263,17 @@ extern "C" __global__ void generateGridKernel(
         const float dx = gx - atomPos.x;
         const float dy = gy - atomPos.y;
         const float dz = gz - atomPos.z;
-        const float r2 = dx*dx + dy*dy + dz*dz;
-        float r = sqrtf(r2);
+        float r2 = dx*dx + dy*dy + dz*dz;
 
-        // Avoid singularities at very small distances
-        if (r < 1e-6f) {
-            r = 1e-6f;
+        // Avoid singularities at very small distances.
+        // Clamp r2 (not just r) to prevent underflow in r2^6 which
+        // causes 0*Inf=NaN when eps=0 atoms land near a grid point.
+        // Matches the r2_min clamp in the derivative code path (line 90).
+        const float r2_min = 0.0004f;  // (0.02 nm)^2
+        if (r2 < r2_min) {
+            r2 = r2_min;
         }
+        float r = sqrtf(r2);
 
         // Calculate contribution based on grid type
         float contrib = 0.0f;

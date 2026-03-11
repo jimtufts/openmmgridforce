@@ -43,7 +43,9 @@ extern "C" __global__ void computeGridForce(
     const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling factors (null = no per-group scaling)
     const float runtimeCap,   // Global runtime cap (0=disabled)
     const float* __restrict__ groupRuntimeCaps,    // Per-group runtime caps (null = use global, 0 = use global)
-    float* __restrict__ atomRawEnergyBuffer) {     // Per-atom raw (pre-cap) energy storage (null = don't store)
+    float* __restrict__ atomRawEnergyBuffer,         // Per-atom raw (pre-cap) energy storage (null = don't store)
+    const float effectiveMinX, const float effectiveMinY, const float effectiveMinZ,  // Effective evaluation bounds (grid-local coords)
+    const float effectiveMaxX, const float effectiveMaxY, const float effectiveMaxZ) {
 
     // Get thread index
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -86,16 +88,13 @@ extern "C" __global__ void computeGridForce(
     float threadEnergy = 0.0f;
     float threadUnscaledEnergy = 0.0f;
 
-    // Calculate grid boundaries
-    float3 gridCorner;
-    gridCorner.x = gridSpacing[0] * (gridCounts[0] - 1);
-    gridCorner.y = gridSpacing[1] * (gridCounts[1] - 1);
-    gridCorner.z = gridSpacing[2] * (gridCounts[2] - 1);
-
-    // Check if the atom is inside the grid
-    bool isInside = (pos.x >= 0.0f && pos.x <= gridCorner.x &&
-                    pos.y >= 0.0f && pos.y <= gridCorner.y &&
-                    pos.z >= 0.0f && pos.z <= gridCorner.z);
+    // Check if the atom is inside the effective evaluation bounds.
+    // Effective bounds default to the full grid extent but can be set smaller
+    // via setEffectiveBounds() to clip evaluation at a tighter region (e.g.,
+    // when the ELE grid is larger than the LJr grid).
+    bool isInside = (pos.x >= effectiveMinX && pos.x <= effectiveMaxX &&
+                    pos.y >= effectiveMinY && pos.y <= effectiveMaxY &&
+                    pos.z >= effectiveMinZ && pos.z <= effectiveMaxZ);
 
     // Enter interpolation if scaled OR unscaled energy is needed
     bool needUnscaled = (groupUnscaledEnergyBuffer != nullptr && unscaledScaling != 0.0f);
@@ -135,12 +134,11 @@ extern "C" __global__ void computeGridForce(
                 }
 
                 if (effectiveCap > 0.0f) {
-                    // Algebraic cap: f(v) = v*C/(|v|+C), bounded by C
-                    // Gradient factor: C^2 / (|v|+C)^2 (decays as 1/v^2, not exp)
-                    float absVal = fabsf(val);
-                    float denom = absVal + effectiveCap;
-                    float gradFactor = (effectiveCap * effectiveCap) / (denom * denom);
-                    val = val * effectiveCap / denom;
+                    // Tanh cap: f(v) = C * tanh(v/C), bounded by ±C
+                    // Gradient factor: sech²(v/C) = 1 - tanh²(v/C)
+                    float t = tanhf(val / effectiveCap);
+                    float gradFactor = 1.0f - t * t;
+                    val = effectiveCap * t;
                     gx *= gradFactor;
                     gy *= gradFactor;
                     gz *= gradFactor;
@@ -579,13 +577,12 @@ extern "C" __global__ void computeGridForce(
             atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
         }
 
-        // Apply runtime algebraic cap: f(v) = v*C/(|v|+C), bounded by C
-        // Gradient factor: C^2 / (|v|+C)^2 (decays as 1/v^2, not exponentially)
+        // Apply runtime tanh cap: f(v) = C * tanh(v/C), bounded by ±C
+        // Gradient factor: sech²(v/C) = 1 - tanh²(v/C)
         if (effectiveCap > 0.0f) {
-            float absVal = fabsf(interpolated);
-            float denom = absVal + effectiveCap;
-            float gradFactor = (effectiveCap * effectiveCap) / (denom * denom);
-            interpolated = interpolated * effectiveCap / denom;
+            float t = tanhf(interpolated / effectiveCap);
+            float gradFactor = 1.0f - t * t;
+            interpolated = effectiveCap * t;
             dx *= gradFactor;
             dy *= gradFactor;
             dz *= gradFactor;
@@ -615,25 +612,25 @@ extern "C" __global__ void computeGridForce(
         } // End of invPowerMode != 0 branch
     }
     else {
-        // Apply harmonic restraint outside grid (if enabled)
+        // Apply harmonic restraint outside effective bounds (if enabled)
         // NOTE: This restraint is NOT scaled by scalingFactor - it applies uniformly
-        // to all particles to keep them within the grid boundaries
+        // to all particles to keep them within the evaluation boundaries
         float3 dev = make_float3(0.0f, 0.0f, 0.0f);
 
-        if (pos.x < 0.0f)
-            dev.x = pos.x;
-        else if (pos.x > gridCorner.x)
-            dev.x = pos.x - gridCorner.x;
+        if (pos.x < effectiveMinX)
+            dev.x = pos.x - effectiveMinX;
+        else if (pos.x > effectiveMaxX)
+            dev.x = pos.x - effectiveMaxX;
 
-        if (pos.y < 0.0f)
-            dev.y = pos.y;
-        else if (pos.y > gridCorner.y)
-            dev.y = pos.y - gridCorner.y;
+        if (pos.y < effectiveMinY)
+            dev.y = pos.y - effectiveMinY;
+        else if (pos.y > effectiveMaxY)
+            dev.y = pos.y - effectiveMaxY;
 
-        if (pos.z < 0.0f)
-            dev.z = pos.z;
-        else if (pos.z > gridCorner.z)
-            dev.z = pos.z - gridCorner.z;
+        if (pos.z < effectiveMinZ)
+            dev.z = pos.z - effectiveMinZ;
+        else if (pos.z > effectiveMaxZ)
+            dev.z = pos.z - effectiveMaxZ;
 
         threadEnergy = 0.5f * outOfBoundsK * (dev.x * dev.x + dev.y * dev.y + dev.z * dev.z);
         threadUnscaledEnergy = threadEnergy;  // OOB restraint is not group-scaled

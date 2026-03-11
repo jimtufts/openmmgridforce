@@ -186,6 +186,8 @@ private:
     float gridCap;
     float runtimeCap;
     float outOfBoundsRestraint;
+    float effectiveMinX, effectiveMinY, effectiveMinZ;  // Effective bounds in grid-local coordinates
+    float effectiveMaxX, effectiveMaxY, effectiveMaxZ;
     int interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     float originX, originY, originZ;
     OpenMM::CudaContext& cu;

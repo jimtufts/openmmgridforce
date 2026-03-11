@@ -11,6 +11,33 @@
 #include "include/InvPowerChainRule.cuh"
 
 /**
+ * Apply runtime tanh cap chain rule to Hessian.
+ * f(v) = C*tanh(v/C), f'(v) = sech²(v/C), f''(v) = -2*tanh(v/C)*sech²(v/C)/C
+ * d^2f/dxi dxj = f'(v)*d^2v/dxi dxj + f''(v)*dv/dxi*dv/dxj
+ */
+__device__ inline void applyRuntimeCapHessianChainRuleTiled(
+    float v, float dvdx, float dvdy, float dvdz,
+    float& d2xx, float& d2yy, float& d2zz,
+    float& d2xy, float& d2xz, float& d2yz,
+    float cap
+) {
+    float t = tanhf(v / cap);
+    float sech2 = 1.0f - t * t;
+    float fPrime = sech2;
+    float fDoublePrime = -2.0f * t * sech2 / cap;
+
+    float new_d2xx = fPrime * d2xx + fDoublePrime * dvdx * dvdx;
+    float new_d2yy = fPrime * d2yy + fDoublePrime * dvdy * dvdy;
+    float new_d2zz = fPrime * d2zz + fDoublePrime * dvdz * dvdz;
+    float new_d2xy = fPrime * d2xy + fDoublePrime * dvdx * dvdy;
+    float new_d2xz = fPrime * d2xz + fDoublePrime * dvdx * dvdz;
+    float new_d2yz = fPrime * d2yz + fDoublePrime * dvdy * dvdz;
+
+    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+}
+
+/**
  * Find which tile contains a grid position.
  * Returns tile index or -1 if not found.
  */
@@ -85,7 +112,14 @@ extern "C" __global__ void computeGridHessianTiled(
     const int numTiles,
     const int tileSize,
     const int tileOverlap,
-    const float arcsinhScale)
+    const float arcsinhScale,
+    const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling (null = no per-group scaling)
+    const int* __restrict__ particleToGroupMap,      // Maps particle index to group index (null = no mapping)
+    const int numGroups,                             // Number of particle groups
+    const float runtimeCap,                          // Global runtime cap (0=disabled)
+    const float* __restrict__ groupRuntimeCaps,      // Per-group runtime caps (null = use global, 0 = use global)
+    const float effectiveMinX, const float effectiveMinY, const float effectiveMinZ,
+    const float effectiveMaxX, const float effectiveMaxY, const float effectiveMaxZ)
 {
     const int tileWithOverlap = tileSize + 2 * tileOverlap;
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -96,9 +130,25 @@ extern "C" __global__ void computeGridHessianTiled(
     // Get actual particle index
     const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
 
-    // Load position and scaling factor
+    // Load position and scaling factor (with per-group alchemical scaling)
     float4 posOrig = posq[particleIndex];
-    float scalingFactor = scalingFactors[particleIndex];
+    float groupScale = 1.0f;
+    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+        int groupIdx = particleToGroupMap[particleIndex];
+        if (groupIdx >= 0 && groupIdx < numGroups) {
+            groupScale = groupScalingFactors[groupIdx];
+        }
+    }
+    float scalingFactor = groupScale * scalingFactors[particleIndex];
+
+    // Resolve effective runtime cap: per-group if available, else global
+    float effectiveCap = runtimeCap;
+    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+        int gIdx = particleToGroupMap[particleIndex];
+        if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
+            effectiveCap = groupRuntimeCaps[gIdx];
+        }
+    }
 
     // Transform to grid coordinates
     float3 pos;
@@ -110,15 +160,10 @@ extern "C" __global__ void computeGridHessianTiled(
     float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
     float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
 
-    // Grid boundaries
-    float3 gridCorner;
-    gridCorner.x = gridSpacing[0] * (gridCounts[0] - 1);
-    gridCorner.y = gridSpacing[1] * (gridCounts[1] - 1);
-    gridCorner.z = gridSpacing[2] * (gridCounts[2] - 1);
-
-    bool isInside = (pos.x >= 0.0f && pos.x <= gridCorner.x &&
-                     pos.y >= 0.0f && pos.y <= gridCorner.y &&
-                     pos.z >= 0.0f && pos.z <= gridCorner.z);
+    // Check against effective evaluation bounds
+    bool isInside = (pos.x >= effectiveMinX && pos.x <= effectiveMaxX &&
+                     pos.y >= effectiveMinY && pos.y <= effectiveMaxY &&
+                     pos.z >= effectiveMinZ && pos.z <= effectiveMaxZ);
 
     if (isInside && scalingFactor != 0.0f) {
         // Grid indices
@@ -365,8 +410,30 @@ extern "C" __global__ void computeGridHessianTiled(
                     }
                 }
 
-                // Back-convert from transformed space
-                if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
+                // Undo transforms in reverse order: arcsinh first, then inv_power.
+                // (Matches gridHessian.cu and gridForce.cu ordering)
+                if (arcsinhScale > 0.0f) {
+                    float g = interpolated;
+                    float sinhG = sinhf(g);
+                    float coshG = coshf(g);
+
+                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+
+                    interpolated = arcsinhScale * sinhG;
+                    dx = arcsinhScale * coshG * dx;
+                    dy = arcsinhScale * coshG * dy;
+                    dz = arcsinhScale * coshG * dz;
+
+                    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+                }
+
+                if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
                     float absU = fabsf(interpolated);
                     if (absU > 1e-10f) {
                         float n = invPower;
@@ -382,34 +449,28 @@ extern "C" __global__ void computeGridHessianTiled(
                         float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
                         float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
 
-                        d2xx = new_d2xx;
-                        d2yy = new_d2yy;
-                        d2zz = new_d2zz;
-                        d2xy = new_d2xy;
-                        d2xz = new_d2xz;
-                        d2yz = new_d2yz;
+                        dx *= f2_2;
+                        dy *= f2_2;
+                        dz *= f2_2;
+
+                        float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                        interpolated = sign * powf(absU, n);
+
+                        d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
+                        d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
                     }
                 }
 
-                // Arcsinh chain rule: V = scale*sinh(g), d²V/dxi dxj = scale*[sinh(g)*dg_i*dg_j + cosh(g)*d²g_ij]
-                if (arcsinhScale > 0.0f) {
-                    float g = interpolated;
-                    float sinhG = sinhf(g);
-                    float coshG = coshf(g);
-
-                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
-
-                    dx = arcsinhScale * coshG * dx;
-                    dy = arcsinhScale * coshG * dy;
-                    dz = arcsinhScale * coshG * dz;
-
-                    d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
-                    d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
+                // Apply runtime tanh cap chain rule (must match gridForce.cu cap order)
+                if (effectiveCap > 0.0f) {
+                    applyRuntimeCapHessianChainRuleTiled(interpolated, dx, dy, dz,
+                        d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
+                    float t = tanhf(interpolated / effectiveCap);
+                    float gradFactor = 1.0f - t * t;
+                    interpolated = effectiveCap * t;
+                    dx *= gradFactor;
+                    dy *= gradFactor;
+                    dz *= gradFactor;
                 }
 
                 // Convert to physical coordinates
@@ -529,9 +590,29 @@ extern "C" __global__ void computeGridHessianTiled(
                         float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
                         float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
 
+                        // Update value and first derivatives to post-inv_power
+                        float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                        float pf = n * absU_nm1;
+                        interpolated = sign * powf(absU, n);
+                        dx *= pf;
+                        dy *= pf;
+                        dz *= pf;
+
                         d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
                         d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
                     }
+                }
+
+                // Apply runtime tanh cap chain rule (must match gridForce.cu cap order)
+                if (effectiveCap > 0.0f) {
+                    applyRuntimeCapHessianChainRuleTiled(interpolated, dx, dy, dz,
+                        d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
+                    float t = tanhf(interpolated / effectiveCap);
+                    float gradFactor = 1.0f - t * t;
+                    interpolated = effectiveCap * t;
+                    dx *= gradFactor;
+                    dy *= gradFactor;
+                    dz *= gradFactor;
                 }
 
                 // Convert to physical coordinates

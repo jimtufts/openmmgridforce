@@ -802,6 +802,27 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     originY = (float)oy;
     originZ = (float)oz;
 
+    // Compute effective bounds in grid-local coordinates
+    if (force.hasEffectiveBounds()) {
+        double ebMinX, ebMinY, ebMinZ, ebMaxX, ebMaxY, ebMaxZ;
+        force.getEffectiveBounds(ebMinX, ebMinY, ebMinZ, ebMaxX, ebMaxY, ebMaxZ);
+        // Convert from absolute coordinates to grid-local coordinates
+        effectiveMinX = (float)(ebMinX - ox);
+        effectiveMinY = (float)(ebMinY - oy);
+        effectiveMinZ = (float)(ebMinZ - oz);
+        effectiveMaxX = (float)(ebMaxX - ox);
+        effectiveMaxY = (float)(ebMaxY - oy);
+        effectiveMaxZ = (float)(ebMaxZ - oz);
+    } else {
+        // Default: full grid extent
+        effectiveMinX = 0.0f;
+        effectiveMinY = 0.0f;
+        effectiveMinZ = 0.0f;
+        effectiveMaxX = (float)(spacing_local[0] * (counts_local[0] - 1));
+        effectiveMaxY = (float)(spacing_local[1] * (counts_local[1] - 1));
+        effectiveMaxZ = (float)(spacing_local[2] * (counts_local[2] - 1));
+    }
+
     // Handle particle groups for multi-ligand workflows
     // Flatten all groups into single arrays for efficient single-kernel-launch execution
     // (numParticleGroups already declared above when generating scaling factors)
@@ -1137,7 +1158,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &groupScalingFactorsPtr,
         &runtimeCap,
         &groupRuntimeCapsPtr,
-        &atomRawEnergyBufferPtr
+        &atomRawEnergyBufferPtr,
+        &effectiveMinX, &effectiveMinY, &effectiveMinZ,
+        &effectiveMaxX, &effectiveMaxY, &effectiveMaxZ
     };
 
 #if DEBUG_GRIDFORCE
@@ -1261,7 +1284,9 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &tileDerivPtrsPtr,
             &numTiles,
             &tileSizeParam,
-            &tileOverlapParam
+            &tileOverlapParam,
+            &effectiveMinX, &effectiveMinY, &effectiveMinZ,
+            &effectiveMaxX, &effectiveMaxY, &effectiveMaxZ
         };
 
         cu.executeKernel(tiledKernel, tiledArgs, kernelNumAtoms, 256);
@@ -1527,7 +1552,22 @@ void CudaCalcGridForceKernel::computeHessian() {
         int tileSizeParam = tileConfig.tileSize;
         int tileOverlapParam = tileConfig.overlap;
 
-        // Launch tiled Hessian kernel
+        // Get per-group scaling pointers for tiled Hessian
+        CUdeviceptr tiledHessGroupScalingPtr = 0;
+        CUdeviceptr tiledHessParticleToGroupPtr = 0;
+        int tiledHessNumGroups = numParticleGroups;
+        if (numParticleGroups > 0 && groupScalingFactorsBuffer.isInitialized() && particleToGroupMap.isInitialized()) {
+            tiledHessGroupScalingPtr = groupScalingFactorsBuffer.getDevicePointer();
+            tiledHessParticleToGroupPtr = particleToGroupMap.getDevicePointer();
+        }
+
+        // Get runtime cap pointers for tiled Hessian
+        CUdeviceptr tiledHessGroupRuntimeCapsPtr = 0;
+        if (numParticleGroups > 0 && groupRuntimeCapsBuffer.isInitialized() && particleToGroupMap.isInitialized()) {
+            tiledHessGroupRuntimeCapsPtr = groupRuntimeCapsBuffer.getDevicePointer();
+        }
+
+        // Launch tiled Hessian kernel (with per-group scaling and runtime cap)
         void* tiledArgs[] = {
             &posqPtr,
             &hessianPtr,
@@ -1548,7 +1588,14 @@ void CudaCalcGridForceKernel::computeHessian() {
             &numTiles,
             &tileSizeParam,
             &tileOverlapParam,
-            &arcsinhScale
+            &arcsinhScale,
+            &tiledHessGroupScalingPtr,
+            &tiledHessParticleToGroupPtr,
+            &tiledHessNumGroups,
+            &runtimeCap,
+            &tiledHessGroupRuntimeCapsPtr,
+            &effectiveMinX, &effectiveMinY, &effectiveMinZ,
+            &effectiveMaxX, &effectiveMaxY, &effectiveMaxZ
         };
 
         // Use larger block size to avoid OpenMM's thread block limit
@@ -1559,7 +1606,22 @@ void CudaCalcGridForceKernel::computeHessian() {
         CUdeviceptr derivsPtr = (g_derivatives_shared != nullptr) ? g_derivatives_shared->getDevicePointer() :
                                 (g_derivatives.isInitialized() ? g_derivatives.getDevicePointer() : 0);
 
-        // Launch Hessian kernel (with invPower and arcsinh chain rule support)
+        // Get per-group scaling pointers for Hessian (must match energy kernel scaling)
+        CUdeviceptr hessGroupScalingPtr = 0;
+        CUdeviceptr hessParticleToGroupPtr = 0;
+        int hessNumGroups = numParticleGroups;
+        if (numParticleGroups > 0 && groupScalingFactorsBuffer.isInitialized() && particleToGroupMap.isInitialized()) {
+            hessGroupScalingPtr = groupScalingFactorsBuffer.getDevicePointer();
+            hessParticleToGroupPtr = particleToGroupMap.getDevicePointer();
+        }
+
+        // Get runtime cap pointers for Hessian
+        CUdeviceptr hessGroupRuntimeCapsPtr = 0;
+        if (numParticleGroups > 0 && groupRuntimeCapsBuffer.isInitialized() && particleToGroupMap.isInitialized()) {
+            hessGroupRuntimeCapsPtr = groupRuntimeCapsBuffer.getDevicePointer();
+        }
+
+        // Launch Hessian kernel (with invPower, arcsinh chain rule, per-group scaling, and runtime cap)
         void* args[] = {
             &posqPtr,
             &hessianPtr,
@@ -1576,7 +1638,14 @@ void CudaCalcGridForceKernel::computeHessian() {
             &derivsPtr,
             &kernelNumAtoms,
             &particleIndicesPtr,
-            &arcsinhScale
+            &arcsinhScale,
+            &hessGroupScalingPtr,
+            &hessParticleToGroupPtr,
+            &hessNumGroups,
+            &runtimeCap,
+            &hessGroupRuntimeCapsPtr,
+            &effectiveMinX, &effectiveMinY, &effectiveMinZ,
+            &effectiveMaxX, &effectiveMaxY, &effectiveMaxZ
         };
 
         // Use larger block size to avoid OpenMM's thread block limit

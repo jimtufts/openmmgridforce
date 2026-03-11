@@ -626,6 +626,10 @@ public:
     double getRuntimeCap() const;
     void setOutOfBoundsRestraint(double k);
     double getOutOfBoundsRestraint() const;
+    void setEffectiveBounds(double minX, double minY, double minZ,
+                            double maxX, double maxY, double maxZ);
+    bool hasEffectiveBounds() const;
+    void clearEffectiveBounds();
     void setInterpolationMethod(int method);
     int getInterpolationMethod() const;
     void setBSplinePrefilterOrder(int order);

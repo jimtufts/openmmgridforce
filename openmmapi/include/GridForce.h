@@ -344,6 +344,46 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double getOutOfBoundsRestraint() const;
 
     /**
+     * Set effective evaluation bounds for this grid force.
+     *
+     * When set, atoms outside these bounds are treated as out-of-bounds even
+     * if they are inside the actual grid data.  This is useful when multiple
+     * grids have different extents (e.g., ELE at 6 nm vs LJr at 3 nm) and
+     * you want all grids to apply OOB restraints at the smallest grid extent.
+     *
+     * Coordinates are in absolute (nm) space, the same frame as atom positions.
+     * The effective bounds must be a subset of the actual grid bounds.
+     *
+     * Call clearEffectiveBounds() to revert to using the full grid extent.
+     *
+     * @param minX  lower X bound (nm)
+     * @param minY  lower Y bound (nm)
+     * @param minZ  lower Z bound (nm)
+     * @param maxX  upper X bound (nm)
+     * @param maxY  upper Y bound (nm)
+     * @param maxZ  upper Z bound (nm)
+     */
+    void setEffectiveBounds(double minX, double minY, double minZ,
+                            double maxX, double maxY, double maxZ);
+
+    /**
+     * Get the effective evaluation bounds.
+     * If not set, returns the actual grid bounds (origin to origin + extent).
+     */
+    void getEffectiveBounds(double& minX, double& minY, double& minZ,
+                            double& maxX, double& maxY, double& maxZ) const;
+
+    /**
+     * Check whether custom effective bounds have been set.
+     */
+    bool hasEffectiveBounds() const;
+
+    /**
+     * Clear effective bounds, reverting to the full grid extent.
+     */
+    void clearEffectiveBounds();
+
+    /**
      * Set the interpolation method for grid value lookup.
      *
      * Supported methods:
@@ -1185,6 +1225,9 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double m_gridCap;  // Capping threshold for grid values (kJ/mol)
     double m_runtimeCap;  // Runtime capping threshold (kJ/mol), 0 = disabled
     double m_outOfBoundsRestraint;  // Force constant for out-of-bounds harmonic restraint (kJ/mol/nm^2)
+    bool m_hasEffectiveBounds;     // Whether custom effective bounds are set
+    std::vector<double> m_effectiveBoundsMin;  // 3 elements: min x,y,z in absolute coordinates (nm)
+    std::vector<double> m_effectiveBoundsMax;  // 3 elements: max x,y,z in absolute coordinates (nm)
     int m_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     int m_bsplinePrefilterOrder;  // 0=none, 3=cubic, 5=quintic
     double m_arcsinhScale;  // 0.0=disabled, >0.0=arcsinh(V/scale) transform

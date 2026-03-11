@@ -50,7 +50,7 @@ using namespace std;
 
 namespace GridForcePlugin {
 
-GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0), m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
+GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0), m_outOfBoundsRestraint(10000.0), m_hasEffectiveBounds(false), m_interpolationMethod(0),
                          m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0), m_blurSigma(0.0),
                          m_adaptiveRegularization(0.0), m_regularizationThreshold(0.0),
                          m_prefilterPCGTolerance(1e-6), m_prefilterMaxIterations(200),
@@ -331,6 +331,43 @@ void GridForce::setOutOfBoundsRestraint(double k) {
 
 double GridForce::getOutOfBoundsRestraint() const {
     return m_outOfBoundsRestraint;
+}
+
+void GridForce::setEffectiveBounds(double minX, double minY, double minZ,
+                                    double maxX, double maxY, double maxZ) {
+    m_effectiveBoundsMin = {minX, minY, minZ};
+    m_effectiveBoundsMax = {maxX, maxY, maxZ};
+    m_hasEffectiveBounds = true;
+}
+
+void GridForce::getEffectiveBounds(double& minX, double& minY, double& minZ,
+                                    double& maxX, double& maxY, double& maxZ) const {
+    if (m_hasEffectiveBounds) {
+        minX = m_effectiveBoundsMin[0];
+        minY = m_effectiveBoundsMin[1];
+        minZ = m_effectiveBoundsMin[2];
+        maxX = m_effectiveBoundsMax[0];
+        maxY = m_effectiveBoundsMax[1];
+        maxZ = m_effectiveBoundsMax[2];
+    } else {
+        // Return actual grid bounds
+        minX = m_gridOrigin[0];
+        minY = m_gridOrigin[1];
+        minZ = m_gridOrigin[2];
+        maxX = m_gridOrigin[0] + m_spacing[0] * (m_counts[0] - 1);
+        maxY = m_gridOrigin[1] + m_spacing[1] * (m_counts[1] - 1);
+        maxZ = m_gridOrigin[2] + m_spacing[2] * (m_counts[2] - 1);
+    }
+}
+
+bool GridForce::hasEffectiveBounds() const {
+    return m_hasEffectiveBounds;
+}
+
+void GridForce::clearEffectiveBounds() {
+    m_hasEffectiveBounds = false;
+    m_effectiveBoundsMin.clear();
+    m_effectiveBoundsMax.clear();
 }
 
 void GridForce::setInterpolationMethod(int method) {

@@ -9,7 +9,7 @@
  *   Output: d3xxx, d3yyy, d3zzz, d3xxy, d3xxz, d3xyy, d3xzz, d3yyz, d3yzz, d3xyz
  *   Only supports method 4 (quintic B-spline, C4 continuity).
  *
- * Both support inv_power and arcsinh chain rule transformations.
+ * Both support inv_power, arcsinh, and runtime cap chain rule transformations.
  */
 
 #include "include/InterpolationBasis.cuh"
@@ -64,6 +64,49 @@ __device__ inline void applyHessianChainRule(
 }
 
 /**
+ * Apply runtime tanh cap chain rule to Hessian.
+ *
+ * The cap function is f(v) = C * tanh(v/C), applied after inv_power and arcsinh.
+ *
+ * First derivative: f'(v) = sech²(v/C) = 1 - tanh²(v/C)
+ * Second derivative: f''(v) = -2 * tanh(v/C) * sech²(v/C) / C
+ *
+ * For the Hessian:
+ *   d^2f/dxi dxj = f'(v) * d^2v/dxi dxj + f''(v) * dv/dxi * dv/dxj
+ *
+ * @param v         Post-transform value (after arcsinh + inv_power, before cap)
+ * @param dvdx/y/z  Post-transform first derivatives (before cap)
+ * @param d2xx/...   Second derivatives (modified in place)
+ * @param cap       Runtime cap value C (must be > 0)
+ */
+__device__ inline void applyRuntimeCapHessianChainRule(
+    float v,
+    float dvdx, float dvdy, float dvdz,
+    float& d2xx, float& d2yy, float& d2zz,
+    float& d2xy, float& d2xz, float& d2yz,
+    float cap
+) {
+    float t = tanhf(v / cap);
+    float sech2 = 1.0f - t * t;
+    float fPrime = sech2;
+    float fDoublePrime = -2.0f * t * sech2 / cap;
+
+    float new_d2xx = fPrime * d2xx + fDoublePrime * dvdx * dvdx;
+    float new_d2yy = fPrime * d2yy + fDoublePrime * dvdy * dvdy;
+    float new_d2zz = fPrime * d2zz + fDoublePrime * dvdz * dvdz;
+    float new_d2xy = fPrime * d2xy + fDoublePrime * dvdx * dvdy;
+    float new_d2xz = fPrime * d2xz + fDoublePrime * dvdx * dvdz;
+    float new_d2yz = fPrime * d2yz + fDoublePrime * dvdy * dvdz;
+
+    d2xx = new_d2xx;
+    d2yy = new_d2yy;
+    d2zz = new_d2zz;
+    d2xy = new_d2xy;
+    d2xz = new_d2xz;
+    d2yz = new_d2yz;
+}
+
+/**
  * Compute Hessian blocks for all atoms using grid interpolation.
  *
  * @param posq              Atom positions (x, y, z, charge)
@@ -96,7 +139,14 @@ extern "C" __global__ void computeGridHessian(
     const float* __restrict__ gridDerivatives,
     const int numAtoms,
     const int* __restrict__ particleIndices,
-    const float arcsinhScale)
+    const float arcsinhScale,
+    const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling (null = no per-group scaling)
+    const int* __restrict__ particleToGroupMap,      // Maps particle index to group index (null = no mapping)
+    const int numGroups,                             // Number of particle groups
+    const float runtimeCap,                          // Global runtime cap (0=disabled)
+    const float* __restrict__ groupRuntimeCaps,      // Per-group runtime caps (null = use global, 0 = use global)
+    const float effectiveMinX, const float effectiveMinY, const float effectiveMinZ,
+    const float effectiveMaxX, const float effectiveMaxY, const float effectiveMaxZ)
 {
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -106,9 +156,25 @@ extern "C" __global__ void computeGridHessian(
     // Get actual particle index
     const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
 
-    // Load position and scaling factor
+    // Load position and scaling factor (with per-group alchemical scaling)
     float4 posOrig = posq[particleIndex];
-    float scalingFactor = scalingFactors[particleIndex];
+    float groupScale = 1.0f;
+    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+        int groupIdx = particleToGroupMap[particleIndex];
+        if (groupIdx >= 0 && groupIdx < numGroups) {
+            groupScale = groupScalingFactors[groupIdx];
+        }
+    }
+    float scalingFactor = groupScale * scalingFactors[particleIndex];
+
+    // Resolve effective runtime cap: per-group if available, else global
+    float effectiveCap = runtimeCap;
+    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+        int gIdx = particleToGroupMap[particleIndex];
+        if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
+            effectiveCap = groupRuntimeCaps[gIdx];
+        }
+    }
 
     // Transform to grid coordinates
     float3 pos;
@@ -122,15 +188,10 @@ extern "C" __global__ void computeGridHessian(
     float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
     float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
 
-    // Grid boundaries
-    float3 gridCorner;
-    gridCorner.x = gridSpacing[0] * (gridCounts[0] - 1);
-    gridCorner.y = gridSpacing[1] * (gridCounts[1] - 1);
-    gridCorner.z = gridSpacing[2] * (gridCounts[2] - 1);
-
-    bool isInside = (pos.x >= 0.0f && pos.x <= gridCorner.x &&
-                     pos.y >= 0.0f && pos.y <= gridCorner.y &&
-                     pos.z >= 0.0f && pos.z <= gridCorner.z);
+    // Check against effective evaluation bounds
+    bool isInside = (pos.x >= effectiveMinX && pos.x <= effectiveMaxX &&
+                     pos.y >= effectiveMinY && pos.y <= effectiveMaxY &&
+                     pos.z >= effectiveMinZ && pos.z <= effectiveMaxZ);
 
     if (isInside && scalingFactor != 0.0f) {
         // Grid indices
@@ -454,6 +515,10 @@ extern "C" __global__ void computeGridHessian(
                     dy *= f2_2;
                     dz *= f2_2;
 
+                    // Update interpolated to post-inv_power value
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    interpolated = sign * powf(absU, n);
+
                     d2xx = new_d2xx;
                     d2yy = new_d2yy;
                     d2zz = new_d2zz;
@@ -461,6 +526,18 @@ extern "C" __global__ void computeGridHessian(
                     d2xz = new_d2xz;
                     d2yz = new_d2yz;
                 }
+            }
+
+            // Apply runtime tanh cap chain rule (must match gridForce.cu cap order)
+            if (effectiveCap > 0.0f) {
+                applyRuntimeCapHessianChainRule(interpolated, dx, dy, dz,
+                    d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
+                float t = tanhf(interpolated / effectiveCap);
+                float gradFactor = 1.0f - t * t;
+                interpolated = effectiveCap * t;
+                dx *= gradFactor;
+                dy *= gradFactor;
+                dz *= gradFactor;
             }
 
             // Convert to physical coordinates
@@ -568,6 +645,29 @@ extern "C" __global__ void computeGridHessian(
             if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
                 applyHessianChainRule(interpolated, dx, dy, dz,
                                      d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, invPower);
+                // Update value and first derivatives to post-inv_power
+                float absU = fabsf(interpolated);
+                if (absU > 1e-10f) {
+                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    float pf = invPower * powf(absU, invPower - 1.0f);
+                    interpolated = sign * powf(absU, invPower);
+                    dx *= pf;
+                    dy *= pf;
+                    dz *= pf;
+                }
+            }
+
+            // Apply runtime tanh cap chain rule (must match gridForce.cu cap order)
+            if (effectiveCap > 0.0f) {
+                applyRuntimeCapHessianChainRule(interpolated, dx, dy, dz,
+                    d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
+                // Update first derivatives for any downstream use
+                float t = tanhf(interpolated / effectiveCap);
+                float gradFactor = 1.0f - t * t;
+                interpolated = effectiveCap * t;
+                dx *= gradFactor;
+                dy *= gradFactor;
+                dz *= gradFactor;
             }
 
             // Convert to physical coordinates

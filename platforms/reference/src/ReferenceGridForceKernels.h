@@ -128,6 +128,8 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     double g_gridCap;
     double g_runtimeCap;
     double g_outOfBoundsRestraint;
+    double g_effectiveMinX, g_effectiveMinY, g_effectiveMinZ;  // Effective bounds (grid-local)
+    double g_effectiveMaxX, g_effectiveMaxY, g_effectiveMaxZ;
     int g_interpolationMethod;  // 0=trilinear, 1=cubic B-spline, 2=tricubic, 3=quintic Hermite
     double g_origin_x, g_origin_y, g_origin_z;
     std::vector<double> g_derivatives;  // 27 derivatives per grid point for triquintic [27, nx, ny, nz]
