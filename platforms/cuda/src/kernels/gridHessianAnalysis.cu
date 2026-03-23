@@ -209,7 +209,7 @@ extern "C" __global__ void analyzeHessianKernel(
     eigenvalues[3*idx + 2] = lambda[2];
 
     // Compute eigenvectors if requested
-    if (eigenvectors != nullptr) {
+    if (eigenvectors != 0) {
         float v[3];
         for (int i = 0; i < 3; i++) {
             eigenvector_for_eigenvalue(dxx, dyy, dzz, dxy, dxz, dyz, lambda[i], v);

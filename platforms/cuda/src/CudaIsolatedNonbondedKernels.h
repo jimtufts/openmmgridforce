@@ -76,6 +76,7 @@ private:
     // GPU arrays - particle groups
     OpenMM::CudaArray groupParticleIndices;  // [numGroups * numAtoms] - particle indices per group
     OpenMM::CudaArray groupEnergiesBuffer;   // [numGroups] - per-group energy accumulation
+    OpenMM::CudaArray fixedPointEnergyBuffer; // [1] unsigned long long - fixed-point energy accumulator
 
     // Alchemical scaling
     float globalScalingFactor;

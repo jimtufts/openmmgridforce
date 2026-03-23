@@ -22,7 +22,7 @@ __device__ void decodePairIndex(int pairIdx, int* i, int* j, int numAtoms) {
 extern "C" __global__ void computeIsolatedNonbonded(
     const real4* __restrict__ posq,             // All positions in Context
     unsigned long long* __restrict__ forceBuffers,  // Force output buffers
-    mixed* __restrict__ energyBuffer,           // Energy accumulator (global total)
+    unsigned long long* __restrict__ fixedPointEnergy,  // Fixed-point energy accumulator
     const int* __restrict__ groupParticleIndices, // Particle indices per group [numGroups * numAtoms]
     const real* __restrict__ charges,           // Partial charges [numAtoms] (template)
     const real* __restrict__ sigmas,            // LJ sigma [numAtoms] (template)
@@ -150,9 +150,9 @@ extern "C" __global__ void computeIsolatedNonbonded(
         atomicAdd(&forceBuffers[particleJ + paddedNumAtoms], static_cast<unsigned long long>((long long)(-fy * 0x100000000)));
         atomicAdd(&forceBuffers[particleJ + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(-fz * 0x100000000)));
 
-        // Accumulate energy
+        // Accumulate energy (fixed-point for pre-sm_60 GPU compatibility)
         if (includeEnergy) {
-            atomicAdd(energyBuffer, (mixed)pairEnergy);
+            atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)pairEnergy * 0x100000000)));
             atomicAdd(&groupEnergies[groupIdx], (float)pairEnergy);
         }
     }

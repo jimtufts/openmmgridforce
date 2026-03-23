@@ -79,7 +79,7 @@ extern "C" __global__ void hmcDrawMBVelocitiesPartial(
 
 extern "C" __global__ void hmcComputeGroupKE(
     const mixed4* __restrict__ velm,
-    double* __restrict__ groupKE,
+    unsigned long long* __restrict__ groupKE,
     const int atomsPerGroup,
     const int numGroups) {
 
@@ -95,7 +95,7 @@ extern "C" __global__ void hmcComputeGroupKE(
         int groupIdx = i / atomsPerGroup;
         double ke = 0.5 * ((double)(v.x * v.x) + (double)(v.y * v.y) + (double)(v.z * v.z))
                     / (double)invMass;
-        atomicAdd(&groupKE[groupIdx], ke);
+        atomicAdd(&groupKE[groupIdx], static_cast<unsigned long long>((long long)(ke * 0x100000000)));
     }
 }
 
@@ -195,7 +195,7 @@ extern "C" __global__ void hmcCopyForces(
 extern "C" __global__ void hmcComputeGroupCOM(
     const real4* __restrict__ posq,
     const mixed4* __restrict__ velm,
-    double* __restrict__ groupCOM,
+    unsigned long long* __restrict__ groupCOM,
     const int atomsPerGroup,
     const int numGroups) {
 
@@ -212,10 +212,10 @@ extern "C" __global__ void hmcComputeGroupCOM(
         real4 pos = posq[i];
         int groupIdx = i / atomsPerGroup;
 
-        atomicAdd(&groupCOM[groupIdx * 4 + 0], mass * (double)pos.x);
-        atomicAdd(&groupCOM[groupIdx * 4 + 1], mass * (double)pos.y);
-        atomicAdd(&groupCOM[groupIdx * 4 + 2], mass * (double)pos.z);
-        atomicAdd(&groupCOM[groupIdx * 4 + 3], mass);
+        atomicAdd(&groupCOM[groupIdx * 4 + 0], static_cast<unsigned long long>((long long)(mass * (double)pos.x * 0x100000000)));
+        atomicAdd(&groupCOM[groupIdx * 4 + 1], static_cast<unsigned long long>((long long)(mass * (double)pos.y * 0x100000000)));
+        atomicAdd(&groupCOM[groupIdx * 4 + 2], static_cast<unsigned long long>((long long)(mass * (double)pos.z * 0x100000000)));
+        atomicAdd(&groupCOM[groupIdx * 4 + 3], static_cast<unsigned long long>((long long)(mass * 0x100000000)));
     }
 }
 

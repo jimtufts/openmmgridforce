@@ -39,7 +39,7 @@ ENDIF()
 # Specify the C++ version we are building for.
 SET(CMAKE_CXX_STANDARD 11)
 SET(CMAKE_CUDA_STANDARD 11)
-SET(CMAKE_CUDA_ARCHITECTURES 89)
+SET(CMAKE_CUDA_ARCHITECTURES "35;52;89")
 
 # Set flags for linking on mac
 IF(APPLE)

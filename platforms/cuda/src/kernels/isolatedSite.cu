@@ -21,7 +21,7 @@
 extern "C" __global__ void computeIsolatedSiteRestraint(
     const real4* __restrict__ posq,
     unsigned long long* __restrict__ forceBuffers,
-    mixed* __restrict__ energyBuffer,
+    unsigned long long* __restrict__ fixedPointEnergy,
     const int* __restrict__ groupParticleIndices,
     const float* __restrict__ atomMasses,
     float* __restrict__ groupEnergies,
@@ -93,7 +93,7 @@ extern "C" __global__ void computeIsolatedSiteRestraint(
             float energy = 0.5f * forceConstant * deltaR * deltaR * scale;
             if (includeEnergy) {
                 atomicAdd(&groupEnergies[groupIdx], energy);
-                atomicAdd(energyBuffer, (mixed)energy);
+                atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
             }
         }
 

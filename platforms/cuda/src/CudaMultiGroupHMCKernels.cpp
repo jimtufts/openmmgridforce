@@ -40,7 +40,7 @@ void CudaIntegrateMultiGroupHMCStepKernel::initialize(
     numParticles = system.getNumParticles();
 
     // Resize host-side vectors
-    groupKEHost.resize(numGroups, 0.0);
+    groupKEHost.resize(numGroups, 0ULL);
     groupStepSizesHost.resize(numGroups, 0.0);
     groupKTHost.resize(numGroups, 0.0);
     acceptedHost.resize(numGroups, 0);
@@ -66,7 +66,7 @@ void CudaIntegrateMultiGroupHMCStepKernel::initialize(
     bondedForceImpl = nullptr;
 
     // MC host vectors
-    groupCOMHost.resize(4 * numGroups, 0.0);
+    groupCOMHost.resize(4 * numGroups, 0ULL);
     mcEnabledHost.resize(numGroups, 0);
     mcRotationHost.resize(9 * numGroups, 0.0);
     mcTranslationHost.resize(3 * numGroups, 0.0);
@@ -117,7 +117,9 @@ void CudaIntegrateMultiGroupHMCStepKernel::computeGroupKE(
     }
 
     groupKEBuffer.download(groupKEHost);
-    groupKE = groupKEHost;
+    groupKE.resize(numGroups);
+    for (int k = 0; k < numGroups; k++)
+        groupKE[k] = (long long)groupKEHost[k] / (double)0x100000000;
 }
 
 void CudaIntegrateMultiGroupHMCStepKernel::launchKick(
@@ -199,7 +201,7 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
         positionsBackup.initialize(cu, paddedNumAtoms, cu.getPosq().getElementSize(),
                                    "hmcPosBackup");
         slowForcesBackup.initialize<long long>(cu, 3 * paddedNumAtoms, "hmcSlowForces");
-        groupKEBuffer.initialize<double>(cu, K, "hmcGroupKE");
+        groupKEBuffer.initialize<unsigned long long>(cu, K, "hmcGroupKE");
         groupStepSizesBuffer.initialize<double>(cu, K, "hmcGroupStepSizes");
         groupKTBuffer.initialize<double>(cu, K, "hmcGroupKT");
         acceptedBuffer.initialize<int>(cu, K, "hmcAccepted");
@@ -214,15 +216,19 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
         copyForcesKernel = cu.getKernel(module, "hmcCopyForces");
         restoreRejectedKernel = cu.getKernel(module, "hmcRestoreRejected");
 
-        // Metric kernels (always loaded; buffers allocated on first use in assembleMetric)
-        assembleMetricKernel = cu.getKernel(module, "assembleMetricTensor");
-        rmVelocityKickKernel = cu.getKernel(module, "rmVelocityKick");
-        rmComputeGroupKEKernel = cu.getKernel(module, "rmComputeGroupKE");
-        rmDrawMBVelocitiesFullKernel = cu.getKernel(module, "rmDrawMBVelocitiesFull");
-        rmDrawMBVelocitiesPartialKernel = cu.getKernel(module, "rmDrawMBVelocitiesPartial");
-        setIdentityMetricKernel = cu.getKernel(module, "setIdentityMetric");
-        accumulateHessianKernel = cu.getKernel(module, "accumulateHessian");
-        accumulateHessianWeightedKernel = cu.getKernel(module, "accumulateHessianWeighted");
+        // Metric kernels (loaded lazily - only if they exist in the module)
+        try {
+            assembleMetricKernel = cu.getKernel(module, "assembleMetricTensor");
+            rmVelocityKickKernel = cu.getKernel(module, "rmVelocityKick");
+            rmComputeGroupKEKernel = cu.getKernel(module, "rmComputeGroupKE");
+            rmDrawMBVelocitiesFullKernel = cu.getKernel(module, "rmDrawMBVelocitiesFull");
+            rmDrawMBVelocitiesPartialKernel = cu.getKernel(module, "rmDrawMBVelocitiesPartial");
+            setIdentityMetricKernel = cu.getKernel(module, "setIdentityMetric");
+            accumulateHessianKernel = cu.getKernel(module, "accumulateHessian");
+            accumulateHessianWeightedKernel = cu.getKernel(module, "accumulateHessianWeighted");
+        } catch (...) {
+            // Metric kernels not available - Riemannian metric features disabled
+        }
 
         // Active buffer: all-ones for HMC (rmVelocityKick requires active mask)
         activeBuffer.initialize<int>(cu, K, "hmcActive");
@@ -234,7 +240,7 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
         mcApplyRigidBodyMoveKernel = cu.getKernel(module, "hmcApplyRigidBodyMove");
 
         // MC GPU buffers
-        groupCOMBuffer.initialize<double>(cu, 4 * K, "hmcGroupCOM");
+        groupCOMBuffer.initialize<unsigned long long>(cu, 4 * K, "hmcGroupCOM");
         mcEnabledBuffer.initialize<int>(cu, K, "hmcMCEnabled");
         mcRotationBuffer.initialize<double>(cu, 9 * K, "hmcMCRotation");
         mcTranslationBuffer.initialize<double>(cu, 3 * K, "hmcMCTranslation");
@@ -796,14 +802,15 @@ void CudaIntegrateMultiGroupHMCStepKernel::executeMC(
             void* args[] = { &posqPtr, &velmPtr, &comPtr, &atomsPerGroup, &numGroups };
             cu.executeKernel(mcComputeCOMKernel, args, numBlocks * blockSize, blockSize);
 
-            // Download and finalize COM (divide by total mass)
+            // Download fixed-point COM and convert back to double
+            const double INV_COM_SCALE = 1.0 / 0x100000000;
             groupCOMBuffer.download(groupCOMHost);
             for (int k = 0; k < K; k++) {
-                double totalMass = groupCOMHost[k * 4 + 3];
+                double totalMass = (long long)groupCOMHost[k * 4 + 3] * INV_COM_SCALE;
                 if (totalMass > 0) {
-                    mcCOMHost[k * 3 + 0] = groupCOMHost[k * 4 + 0] / totalMass;
-                    mcCOMHost[k * 3 + 1] = groupCOMHost[k * 4 + 1] / totalMass;
-                    mcCOMHost[k * 3 + 2] = groupCOMHost[k * 4 + 2] / totalMass;
+                    mcCOMHost[k * 3 + 0] = (long long)groupCOMHost[k * 4 + 0] * INV_COM_SCALE / totalMass;
+                    mcCOMHost[k * 3 + 1] = (long long)groupCOMHost[k * 4 + 1] * INV_COM_SCALE / totalMass;
+                    mcCOMHost[k * 3 + 2] = (long long)groupCOMHost[k * 4 + 2] * INV_COM_SCALE / totalMass;
                 }
             }
             mcCOMBuffer.upload(mcCOMHost);

@@ -19,7 +19,7 @@
 extern "C" __global__ void computeIsolatedBonds(
     const real4* __restrict__ posq,
     unsigned long long* __restrict__ forceBuffers,
-    mixed* __restrict__ energyBuffer,
+    unsigned long long* __restrict__ fixedPointEnergy,
     const int* __restrict__ groupParticleIndices,
     const int2* __restrict__ bondAtoms,
     const float2* __restrict__ bondParams,
@@ -69,7 +69,7 @@ extern "C" __global__ void computeIsolatedBonds(
         // Accumulate energy
         if (includeEnergy) {
             atomicAdd(&groupEnergies[groupIdx], (float)energy);
-            atomicAdd(energyBuffer, (mixed)energy);
+            atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
         }
 
         // Compute and accumulate forces
@@ -96,7 +96,7 @@ extern "C" __global__ void computeIsolatedBonds(
 extern "C" __global__ void computeIsolatedAngles(
     const real4* __restrict__ posq,
     unsigned long long* __restrict__ forceBuffers,
-    mixed* __restrict__ energyBuffer,
+    unsigned long long* __restrict__ fixedPointEnergy,
     const int* __restrict__ groupParticleIndices,
     const int4* __restrict__ angleAtoms,
     const float2* __restrict__ angleParams,
@@ -165,7 +165,7 @@ extern "C" __global__ void computeIsolatedAngles(
 
         if (includeEnergy) {
             atomicAdd(&groupEnergies[groupIdx], (float)energy);
-            atomicAdd(energyBuffer, (mixed)energy);
+            atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
         }
 
         // Force decomposition from ReferenceAngleBondIxn
@@ -213,7 +213,7 @@ extern "C" __global__ void computeIsolatedAngles(
 extern "C" __global__ void computeIsolatedTorsions(
     const real4* __restrict__ posq,
     unsigned long long* __restrict__ forceBuffers,
-    mixed* __restrict__ energyBuffer,
+    unsigned long long* __restrict__ fixedPointEnergy,
     const int* __restrict__ groupParticleIndices,
     const int4* __restrict__ torsionAtoms,
     const float4* __restrict__ torsionParams,
@@ -301,7 +301,7 @@ extern "C" __global__ void computeIsolatedTorsions(
 
         if (includeEnergy) {
             atomicAdd(&groupEnergies[groupIdx], (float)energy);
-            atomicAdd(energyBuffer, (mixed)energy);
+            atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
         }
 
         // Force computation (from ReferenceProperDihedralBond)

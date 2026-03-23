@@ -43,6 +43,7 @@ private:
     OpenMM::CudaArray groupParticleIndices;   // [numGroups * numAtoms] int
     OpenMM::CudaArray atomMasses;             // [numAtoms] float
     OpenMM::CudaArray groupEnergiesBuffer;    // [numGroups] float
+    OpenMM::CudaArray fixedPointEnergyBuffer; // [1] unsigned long long - fixed-point energy accumulator
     OpenMM::CudaArray groupScalingFactorsBuffer;  // [numGroups] float
 
     // Site parameters (passed as kernel args)

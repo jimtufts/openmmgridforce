@@ -75,7 +75,7 @@ private:
     OpenMM::CudaArray acceptedBuffer;
 
     // Host-side caches
-    std::vector<double> groupKEHost;
+    std::vector<unsigned long long> groupKEHost;
     std::vector<double> groupStepSizesHost;
     std::vector<double> groupKTHost;
     std::vector<int> acceptedHost;
@@ -108,14 +108,14 @@ private:
     std::normal_distribution<double> normalDist;
 
     // MC GPU buffers
-    OpenMM::CudaArray groupCOMBuffer;       // 4 doubles per group (sum_mx, sum_my, sum_mz, sum_m)
+    OpenMM::CudaArray groupCOMBuffer;       // 4 unsigned long longs per group (fixed-point sum_mx, sum_my, sum_mz, sum_m)
     OpenMM::CudaArray mcEnabledBuffer;      // int per group
     OpenMM::CudaArray mcRotationBuffer;     // 9 doubles per group (3x3 row-major)
     OpenMM::CudaArray mcTranslationBuffer;  // 3 doubles per group
     OpenMM::CudaArray mcCOMBuffer;          // 3 doubles per group (finalized COM)
 
     // MC host-side vectors
-    std::vector<double> groupCOMHost;        // 4 * numGroups
+    std::vector<unsigned long long> groupCOMHost; // 4 * numGroups (fixed-point)
     std::vector<int> mcEnabledHost;
     std::vector<double> mcRotationHost;      // 9 * numGroups
     std::vector<double> mcTranslationHost;   // 3 * numGroups

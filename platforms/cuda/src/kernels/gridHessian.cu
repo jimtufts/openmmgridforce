@@ -154,12 +154,12 @@ extern "C" __global__ void computeGridHessian(
         return;
 
     // Get actual particle index
-    const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
+    const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
     // Load position and scaling factor (with per-group alchemical scaling)
     float4 posOrig = posq[particleIndex];
     float groupScale = 1.0f;
-    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+    if (groupScalingFactors != 0 && particleToGroupMap != 0) {
         int groupIdx = particleToGroupMap[particleIndex];
         if (groupIdx >= 0 && groupIdx < numGroups) {
             groupScale = groupScalingFactors[groupIdx];
@@ -169,7 +169,7 @@ extern "C" __global__ void computeGridHessian(
 
     // Resolve effective runtime cap: per-group if available, else global
     float effectiveCap = runtimeCap;
-    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+    if (groupRuntimeCaps != 0 && particleToGroupMap != 0) {
         int gIdx = particleToGroupMap[particleIndex];
         if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
             effectiveCap = groupRuntimeCaps[gIdx];
@@ -210,7 +210,7 @@ extern "C" __global__ void computeGridHessian(
 
         int nyz = gridCounts[1] * gridCounts[2];
 
-        if (interpolationMethod == 3 && gridDerivatives != nullptr) {
+        if (interpolationMethod == 3 && gridDerivatives != 0) {
             // TRIQUINTIC HERMITE - Analytical second derivatives
             //
             // For RUNTIME mode: transform corners from actual potential (G) to smoothed space (S),
@@ -784,7 +784,7 @@ extern "C" __global__ void computeGridThirdDerivatives(
     if (index >= numAtoms)
         return;
 
-    const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
+    const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
     float4 posOrig = posq[particleIndex];
     float scalingFactor = scalingFactors[particleIndex];

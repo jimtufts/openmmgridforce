@@ -49,6 +49,7 @@ private:
     // Particle groups
     OpenMM::CudaArray groupParticleIndices;  // [numGroups * numAtoms]
     OpenMM::CudaArray groupEnergiesBuffer;   // [numGroups]
+    OpenMM::CudaArray fixedPointEnergyBuffer; // [1] unsigned long long - fixed-point energy accumulator
 
     // Alchemical scaling
     float globalScalingFactor;

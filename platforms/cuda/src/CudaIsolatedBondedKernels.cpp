@@ -55,6 +55,7 @@ void CudaCalcIsolatedBondedForceKernel::initialize(const System& system, const I
     // Per-group energy buffer
     groupEnergiesBuffer.initialize<float>(cu, numParticleGroups, "isolatedBonded_groupEnergies");
     groupEnergiesHost.resize(numParticleGroups, 0.0f);
+    fixedPointEnergyBuffer.initialize<unsigned long long>(cu, 1, "isolatedBonded_fixedPointEnergy");
 
     // Alchemical scaling
     globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
@@ -156,13 +157,15 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
         return 0.0;
 
     // Zero per-group energy buffer (only when energy is needed to avoid sync barriers)
-    if (includeEnergy)
+    if (includeEnergy) {
         cu.clearBuffer(groupEnergiesBuffer);
+        cu.clearBuffer(fixedPointEnergyBuffer);
+    }
 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
-    CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
+    CUdeviceptr fixedPointEnergyPtr = fixedPointEnergyBuffer.getDevicePointer();
     CUdeviceptr groupIndicesPtr = groupParticleIndices.getDevicePointer();
     CUdeviceptr groupEnergiesPtr = groupEnergiesBuffer.getDevicePointer();
     CUdeviceptr groupScalingPtr = groupScalingFactorsBuffer.getDevicePointer();
@@ -178,7 +181,7 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
         CUdeviceptr bondParamsPtr = bondParams.getDevicePointer();
 
         void* args[] = {
-            &posqPtr, &forcePtr, &energyPtr,
+            &posqPtr, &forcePtr, &fixedPointEnergyPtr,
             &groupIndicesPtr, &bondAtomsPtr, &bondParamsPtr,
             &groupEnergiesPtr, &groupScalingPtr,
             &globalScalingFactor, &numAtoms, &numBonds,
@@ -196,7 +199,7 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
         CUdeviceptr angleParamsPtr = angleParams.getDevicePointer();
 
         void* args[] = {
-            &posqPtr, &forcePtr, &energyPtr,
+            &posqPtr, &forcePtr, &fixedPointEnergyPtr,
             &groupIndicesPtr, &angleAtomsPtr, &angleParamsPtr,
             &groupEnergiesPtr, &groupScalingPtr,
             &globalScalingFactor, &numAtoms, &numAngles,
@@ -214,7 +217,7 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
         CUdeviceptr torsionParamsPtr = torsionParams.getDevicePointer();
 
         void* args[] = {
-            &posqPtr, &forcePtr, &energyPtr,
+            &posqPtr, &forcePtr, &fixedPointEnergyPtr,
             &groupIndicesPtr, &torsionAtomsPtr, &torsionParamsPtr,
             &groupEnergiesPtr, &groupScalingPtr,
             &globalScalingFactor, &numAtoms, &numTorsions,
@@ -223,11 +226,17 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
         cu.executeKernel(torsionKernel, args, numBlocks * blockSize, blockSize);
     }
 
-    // Download per-group energies (only when energy is needed to avoid sync barriers)
-    if (includeEnergy && !skipGroupEnergyDownload_)
-        groupEnergiesBuffer.download(groupEnergiesHost);
+    // Convert fixed-point energy and return
+    if (includeEnergy) {
+        unsigned long long fixedPointEnergyRaw;
+        fixedPointEnergyBuffer.download(&fixedPointEnergyRaw);
+        double energy = (long long)fixedPointEnergyRaw / (double)0x100000000;
+        if (!skipGroupEnergyDownload_)
+            groupEnergiesBuffer.download(groupEnergiesHost);
+        return energy;
+    }
 
-    return 0.0;  // Energy accumulated in energy buffer
+    return 0.0;
 }
 
 double CudaCalcIsolatedBondedForceKernel::getGroupEnergy(int groupIndex) const {

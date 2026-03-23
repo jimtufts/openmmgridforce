@@ -64,6 +64,9 @@ void CudaCalcIsolatedSiteForceKernel::initialize(
                                          "isolatedSite_groupEnergies");
     groupEnergiesHost.resize(numParticleGroups, 0.0f);
 
+    // Fixed-point energy accumulator (for pre-sm_60 GPU compatibility)
+    fixedPointEnergyBuffer.initialize<unsigned long long>(cu, 1, "isolatedSite_fixedPointEnergy");
+
     // Per-group scaling factors
     vector<float> scalingFactors(numParticleGroups);
     for (int g = 0; g < numParticleGroups; g++)
@@ -84,15 +87,16 @@ double CudaCalcIsolatedSiteForceKernel::execute(
 
     if (!hasInitializedKernel) return 0.0;
 
-    // Clear per-group energies
+    // Clear per-group energies and fixed-point accumulator
     if (includeEnergy) {
         cu.clearBuffer(groupEnergiesBuffer);
+        cu.clearBuffer(fixedPointEnergyBuffer);
     }
 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
-    CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
+    CUdeviceptr fixedPointEnergyPtr = fixedPointEnergyBuffer.getDevicePointer();
     CUdeviceptr groupIndPtr = groupParticleIndices.getDevicePointer();
     CUdeviceptr massPtr = atomMasses.getDevicePointer();
     CUdeviceptr groupEPtr = groupEnergiesBuffer.getDevicePointer();
@@ -106,7 +110,7 @@ double CudaCalcIsolatedSiteForceKernel::execute(
                         cu.getNumThreadBlocks());
 
     void* args[] = {
-        &posqPtr, &forcePtr, &energyPtr,
+        &posqPtr, &forcePtr, &fixedPointEnergyPtr,
         &groupIndPtr, &massPtr, &groupEPtr, &groupSPtr,
         &globalScalingFactor,
         &centerX, &centerY, &centerZ,
@@ -116,12 +120,17 @@ double CudaCalcIsolatedSiteForceKernel::execute(
     };
     cu.executeKernel(siteKernel, args, numBlocks * blockSize, blockSize);
 
-    // Download per-group energies
-    if (includeEnergy && !skipGroupEnergyDownload_) {
-        groupEnergiesBuffer.download(groupEnergiesHost);
+    // Convert fixed-point energy and return
+    if (includeEnergy) {
+        unsigned long long fixedPointEnergyRaw;
+        fixedPointEnergyBuffer.download(&fixedPointEnergyRaw);
+        double energy = (long long)fixedPointEnergyRaw / (double)0x100000000;
+        if (!skipGroupEnergyDownload_)
+            groupEnergiesBuffer.download(groupEnergiesHost);
+        return energy;
     }
 
-    return 0.0;  // Energy accumulated in energyBuffer
+    return 0.0;
 }
 
 void CudaCalcIsolatedSiteForceKernel::copyParametersToContext(

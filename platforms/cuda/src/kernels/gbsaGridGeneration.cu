@@ -255,6 +255,30 @@ extern "C" __global__ void generateLigandHCTGridWithCorrections(
 }
 
 /**
+ * Helper: compute HCT sum at a given point from all receptor atoms.
+ */
+__device__ float computeHCTSumAtPoint(
+    float px, float py, float pz,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScales,
+    int numReceptorAtoms,
+    float R_probe_off) {
+    float hctSum = 0.0f;
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        float3 pos_j = receptorPositions[j];
+        float ddx = px - pos_j.x;
+        float ddy = py - pos_j.y;
+        float ddz = pz - pos_j.z;
+        float r = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
+        float R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+        float S_j = R_j_off * receptorScales[j];
+        hctSum += computeHCTContribution(r, R_probe_off, S_j);
+    }
+    return hctSum;
+}
+
+/**
  * Generate ligand HCT grid with analytical derivatives for triquintic interpolation.
  *
  * Computes the HCT value and all 27 RASPA3 derivatives at each grid point.
@@ -312,41 +336,25 @@ extern "C" __global__ void generateLigandHCTGridWithDerivatives(
     // Central difference step
     float h = 0.0005f;  // 0.5 pm
 
-    // Helper to compute HCT sum at a position
-    auto computeHCTAtPoint = [&](float px, float py, float pz) -> float {
-        float hctSum = 0.0f;
-        for (int j = 0; j < numReceptorAtoms; j++) {
-            float3 pos_j = receptorPositions[j];
-            float ddx = px - pos_j.x;
-            float ddy = py - pos_j.y;
-            float ddz = pz - pos_j.z;
-            float r = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
-            float R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
-            float S_j = R_j_off * receptorScales[j];
-            hctSum += computeHCTContribution(r, R_probe_off, S_j);
-        }
-        return hctSum;
-    };
-
     // Compute value
-    float f = computeHCTAtPoint(gx, gy, gz);
+    float f = computeHCTSumAtPoint(gx, gy, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off);
 
     // First derivatives (central difference)
-    float fx = (computeHCTAtPoint(gx+h, gy, gz) - computeHCTAtPoint(gx-h, gy, gz)) / (2.0f*h);
-    float fy = (computeHCTAtPoint(gx, gy+h, gz) - computeHCTAtPoint(gx, gy-h, gz)) / (2.0f*h);
-    float fz = (computeHCTAtPoint(gx, gy, gz+h) - computeHCTAtPoint(gx, gy, gz-h)) / (2.0f*h);
+    float fx = (computeHCTSumAtPoint(gx+h, gy, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - computeHCTSumAtPoint(gx-h, gy, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (2.0f*h);
+    float fy = (computeHCTSumAtPoint(gx, gy+h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - computeHCTSumAtPoint(gx, gy-h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (2.0f*h);
+    float fz = (computeHCTSumAtPoint(gx, gy, gz+h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - computeHCTSumAtPoint(gx, gy, gz-h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (2.0f*h);
 
     // Second derivatives
-    float fxx = (computeHCTAtPoint(gx+h, gy, gz) - 2.0f*f + computeHCTAtPoint(gx-h, gy, gz)) / (h*h);
-    float fyy = (computeHCTAtPoint(gx, gy+h, gz) - 2.0f*f + computeHCTAtPoint(gx, gy-h, gz)) / (h*h);
-    float fzz = (computeHCTAtPoint(gx, gy, gz+h) - 2.0f*f + computeHCTAtPoint(gx, gy, gz-h)) / (h*h);
+    float fxx = (computeHCTSumAtPoint(gx+h, gy, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - 2.0f*f + computeHCTSumAtPoint(gx-h, gy, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (h*h);
+    float fyy = (computeHCTSumAtPoint(gx, gy+h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - 2.0f*f + computeHCTSumAtPoint(gx, gy-h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (h*h);
+    float fzz = (computeHCTSumAtPoint(gx, gy, gz+h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - 2.0f*f + computeHCTSumAtPoint(gx, gy, gz-h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (h*h);
 
-    float fxy = (computeHCTAtPoint(gx+h, gy+h, gz) - computeHCTAtPoint(gx+h, gy-h, gz)
-               - computeHCTAtPoint(gx-h, gy+h, gz) + computeHCTAtPoint(gx-h, gy-h, gz)) / (4.0f*h*h);
-    float fxz = (computeHCTAtPoint(gx+h, gy, gz+h) - computeHCTAtPoint(gx+h, gy, gz-h)
-               - computeHCTAtPoint(gx-h, gy, gz+h) + computeHCTAtPoint(gx-h, gy, gz-h)) / (4.0f*h*h);
-    float fyz = (computeHCTAtPoint(gx, gy+h, gz+h) - computeHCTAtPoint(gx, gy+h, gz-h)
-               - computeHCTAtPoint(gx, gy-h, gz+h) + computeHCTAtPoint(gx, gy-h, gz-h)) / (4.0f*h*h);
+    float fxy = (computeHCTSumAtPoint(gx+h, gy+h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - computeHCTSumAtPoint(gx+h, gy-h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)
+               - computeHCTSumAtPoint(gx-h, gy+h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) + computeHCTSumAtPoint(gx-h, gy-h, gz, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (4.0f*h*h);
+    float fxz = (computeHCTSumAtPoint(gx+h, gy, gz+h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - computeHCTSumAtPoint(gx+h, gy, gz-h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)
+               - computeHCTSumAtPoint(gx-h, gy, gz+h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) + computeHCTSumAtPoint(gx-h, gy, gz-h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (4.0f*h*h);
+    float fyz = (computeHCTSumAtPoint(gx, gy+h, gz+h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) - computeHCTSumAtPoint(gx, gy+h, gz-h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)
+               - computeHCTSumAtPoint(gx, gy-h, gz+h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off) + computeHCTSumAtPoint(gx, gy-h, gz-h, receptorPositions, receptorRadii, receptorScales, numReceptorAtoms, R_probe_off)) / (4.0f*h*h);
 
     // Higher derivatives set to zero (first/second order usually sufficient for smooth interpolation)
     // Scale to cell-fractional coordinates

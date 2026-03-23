@@ -54,12 +54,12 @@ extern "C" __global__ void computeGridForce(
         return;
 
     // Get actual particle index (use filtering if enabled)
-    const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
+    const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
     // Load atom position and scaling factor (with global and per-group alchemical scaling)
     float4 posOrig = posq[particleIndex];
     float groupScale = 1.0f;
-    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+    if (groupScalingFactors != 0 && particleToGroupMap != 0) {
         int groupIdx = particleToGroupMap[particleIndex];
         if (groupIdx >= 0 && groupIdx < numGroups) {
             groupScale = groupScalingFactors[groupIdx];
@@ -70,7 +70,7 @@ extern "C" __global__ void computeGridForce(
 
     // Resolve effective runtime cap: per-group if available, else global
     float effectiveCap = runtimeCap;
-    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+    if (groupRuntimeCaps != 0 && particleToGroupMap != 0) {
         int gIdx = particleToGroupMap[particleIndex];
         if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
             effectiveCap = groupRuntimeCaps[gIdx];
@@ -97,7 +97,7 @@ extern "C" __global__ void computeGridForce(
                     pos.z >= effectiveMinZ && pos.z <= effectiveMaxZ);
 
     // Enter interpolation if scaled OR unscaled energy is needed
-    bool needUnscaled = (groupUnscaledEnergyBuffer != nullptr && unscaledScaling != 0.0f);
+    bool needUnscaled = (groupUnscaledEnergyBuffer != 0 && unscaledScaling != 0.0f);
     if (isInside && (scalingFactor != 0.0f || needUnscaled)) {
         // =====================================================================
         // Fast path: Use shared GridInterpolation library when no inv_power transformation
@@ -129,7 +129,7 @@ extern "C" __global__ void computeGridForce(
                 }
 
                 // Store raw (pre-cap) energy for u_kln recomputation
-                if (atomRawEnergyBuffer != nullptr) {
+                if (atomRawEnergyBuffer != 0) {
                     atomRawEnergyBuffer[index] = unscaledScaling * val;
                 }
 
@@ -285,13 +285,13 @@ extern "C" __global__ void computeGridForce(
             dy = dvdy;
             dz = dvdz;
 
-        } else if (interpolationMethod == 2 && gridDerivatives != nullptr) {
+        } else if (interpolationMethod == 2 && gridDerivatives != 0) {
             // LEKIEN-MARSDEN TRICUBIC INTERPOLATION (as used in RASPA3)
             // Uses 64x64 transformation matrix to compute polynomial coefficients
             // Requires precomputed analytical derivatives
             // Debug output removed - feature now working correctly
             // if (index == 0) {
-            //     if (gridDerivatives != nullptr) {
+            //     if (gridDerivatives != 0) {
             //         printf("TRICUBIC (Lekien-Marsden with ANALYTICAL derivatives) BRANCH EXECUTED for atom 0\n");
             //     } else {
             //         printf("TRICUBIC (Lekien-Marsden with finite differences) BRANCH EXECUTED for atom 0\n");
@@ -383,7 +383,7 @@ extern "C" __global__ void computeGridForce(
             // Don't divide by spacing here - let the common code at the end handle it
             // This ensures chain rule is applied to unit cell gradients for RUNTIME inv_power mode
 
-        } else if (interpolationMethod == 3 && gridDerivatives != nullptr) {
+        } else if (interpolationMethod == 3 && gridDerivatives != 0) {
             // TRIQUINTIC HERMITE INTERPOLATION (requires precomputed derivatives)
             // Gather 216 derivative values (27 derivatives × 8 corners)
             int totalPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
@@ -463,7 +463,7 @@ extern "C" __global__ void computeGridForce(
             dy = dvalue_dy;
             dz = dvalue_dz;
 
-        } else if ((interpolationMethod == 2 || interpolationMethod == 3) && gridDerivatives == nullptr) {
+        } else if ((interpolationMethod == 2 || interpolationMethod == 3) && gridDerivatives == 0) {
             // Tricubic/Triquintic requested but derivatives not available - return NaN
             // This prevents silent fallback to trilinear which would give incorrect results
             interpolated = nanf("");
@@ -573,7 +573,7 @@ extern "C" __global__ void computeGridForce(
         }
 
         // Store raw (pre-cap) energy for u_kln recomputation
-        if (atomRawEnergyBuffer != nullptr) {
+        if (atomRawEnergyBuffer != 0) {
             atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
         }
 
@@ -656,23 +656,23 @@ extern "C" __global__ void computeGridForce(
     atomicAdd(&forceBuffers[particleIndex + 2 * paddedNumAtoms], fz_fixed);
 
     // Store per-atom energy if buffer provided (for debugging/analysis)
-    if (atomEnergyBuffer != nullptr) {
+    if (atomEnergyBuffer != 0) {
         atomEnergyBuffer[index] = threadEnergy;
     }
 
     // Store per-atom out-of-bounds flag if buffer provided
-    if (outOfBoundsBuffer != nullptr) {
+    if (outOfBoundsBuffer != 0) {
         outOfBoundsBuffer[index] = isInside ? 0 : 1;
     }
 
     // Accumulate energy - EITHER to group OR to total, not both
-    if (particleToGroupMap != nullptr && groupEnergyBuffer != nullptr) {
+    if (particleToGroupMap != 0 && groupEnergyBuffer != 0) {
         int groupIndex = particleToGroupMap[particleIndex];
         if (groupIndex >= 0 && groupIndex < numGroups) {
             // Particle in a group - only add to group energy
             atomicAdd(&groupEnergyBuffer[groupIndex], threadEnergy);
             // Also track unscaled energy (without group scaling factor)
-            if (groupUnscaledEnergyBuffer != nullptr) {
+            if (groupUnscaledEnergyBuffer != 0) {
                 atomicAdd(&groupUnscaledEnergyBuffer[groupIndex], threadUnscaledEnergy);
             }
         } else {

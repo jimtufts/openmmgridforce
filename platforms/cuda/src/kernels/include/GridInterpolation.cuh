@@ -293,7 +293,7 @@ __device__ inline InterpolationResult tricubicInterpolate(
     result.value = 0.0f;
     result.gradient = make_float3(0.0f, 0.0f, 0.0f);
 
-    if (gridDerivatives == nullptr) {
+    if (gridDerivatives == 0) {
         result.isInside = false;
         return result;
     }
@@ -405,7 +405,7 @@ __device__ inline InterpolationResult triquinticInterpolate(
     result.value = 0.0f;
     result.gradient = make_float3(0.0f, 0.0f, 0.0f);
 
-    if (gridDerivatives == nullptr) {
+    if (gridDerivatives == 0) {
         result.isInside = false;
         return result;
     }
@@ -588,7 +588,7 @@ __device__ inline InterpolationResult quinticBsplineInterpolate(
  * Generic grid interpolation dispatcher.
  *
  * @param gridValues      Grid data array [nx * ny * nz]
- * @param gridDerivatives Derivative array (required for methods 2,3; can be nullptr for 0,1,4)
+ * @param gridDerivatives Derivative array (required for methods 2,3; can be 0 for 0,1,4)
  * @param gridCounts      Grid dimensions {nx, ny, nz}
  * @param gridSpacing     Grid spacing {dx, dy, dz} in nm
  * @param originX/Y/Z     Grid origin coordinates in nm

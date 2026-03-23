@@ -88,6 +88,9 @@ void CudaCalcIsolatedNonbondedForceKernel::initialize(const System& system, cons
     groupEnergiesBuffer.initialize<float>(cu, numParticleGroups, "isolatedNB_groupEnergies");
     groupEnergiesHost.resize(numParticleGroups, 0.0f);
 
+    // Fixed-point energy accumulator (for pre-sm_60 GPU compatibility)
+    fixedPointEnergyBuffer.initialize<unsigned long long>(cu, 1, "isolatedNB_fixedPointEnergy");
+
     // Alchemical scaling
     globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
     vector<float> h_groupScalings(numParticleGroups, 1.0f);
@@ -178,8 +181,10 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
     }
 
     // Zero per-group energy buffer (only when energy is needed to avoid sync barriers)
-    if (includeEnergy)
+    if (includeEnergy) {
         cu.clearBuffer(groupEnergiesBuffer);
+        cu.clearBuffer(fixedPointEnergyBuffer);
+    }
 
     // Total work items: numGroups * numPairs
     int totalWork = numParticleGroups * numPairs;
@@ -188,7 +193,7 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
-    CUdeviceptr energyPtr = cu.getEnergyBuffer().getDevicePointer();
+    CUdeviceptr fixedPointEnergyPtr = fixedPointEnergyBuffer.getDevicePointer();
     CUdeviceptr groupParticleIndicesPtr = groupParticleIndices.getDevicePointer();
     CUdeviceptr chargesPtr = charges.getDevicePointer();
     CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
@@ -202,7 +207,7 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
     void* args[] = {
         &posqPtr,
         &forcePtr,
-        &energyPtr,
+        &fixedPointEnergyPtr,
         &groupParticleIndicesPtr,
         &chargesPtr,
         &sigmasPtr,
@@ -225,11 +230,17 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
     int numBlocks = (totalWork + blockSize - 1) / blockSize;
     cu.executeKernel(kernel, args, numBlocks * blockSize, blockSize);
 
-    // Download per-group energies (only when energy is needed to avoid sync barriers)
-    if (includeEnergy && !skipGroupEnergyDownload_)
-        groupEnergiesBuffer.download(groupEnergiesHost);
+    // Convert fixed-point energy and return
+    if (includeEnergy) {
+        unsigned long long fixedPointEnergyRaw;
+        fixedPointEnergyBuffer.download(&fixedPointEnergyRaw);
+        double energy = (long long)fixedPointEnergyRaw / (double)0x100000000;
+        if (!skipGroupEnergyDownload_)
+            groupEnergiesBuffer.download(groupEnergiesHost);
+        return energy;
+    }
 
-    return 0.0;  // Energy is accumulated in the energy buffer
+    return 0.0;
 }
 
 double CudaCalcIsolatedNonbondedForceKernel::getGroupEnergy(int groupIndex) const {

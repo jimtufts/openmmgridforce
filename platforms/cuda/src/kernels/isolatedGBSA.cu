@@ -982,7 +982,7 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     atomicAdd(&groupEnergies[groupIdx], energy * scale);
     atomicAdd(&groupLigandSelfEnergies[groupIdx], energy * scale);
     // Accumulate unscaled energies (no per-group alchemical scaling)
-    if (groupUnscaledEnergies != nullptr) {
+    if (groupUnscaledEnergies != 0) {
         float unscaledScale = globalScalingFactor;  // only global, no group scaling
         atomicAdd(&groupUnscaledEnergies[groupIdx], energy * unscaledScale);
     }
@@ -1037,7 +1037,7 @@ extern "C" __global__ void computeIsolatedSAEnergy(
 
     atomicAdd(&groupEnergies[groupIdx], saEnergy);
     // Accumulate unscaled SA energy (no per-group alchemical scaling)
-    if (groupUnscaledEnergies != nullptr) {
+    if (groupUnscaledEnergies != 0) {
         float saEnergyUnscaled = surfaceTension * area * globalScalingFactor;
         atomicAdd(&groupUnscaledEnergies[groupIdx], saEnergyUnscaled);
     }

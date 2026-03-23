@@ -503,11 +503,11 @@ extern "C" __global__ void computeGridForceTiled(
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= numAtoms) return;
 
-    const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
+    const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
     float4 posOrig = posq[particleIndex];
     float groupScale = 1.0f;
-    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+    if (groupScalingFactors != 0 && particleToGroupMap != 0) {
         int groupIdx = particleToGroupMap[particleIndex];
         if (groupIdx >= 0 && groupIdx < numGroups) {
             groupScale = groupScalingFactors[groupIdx];
@@ -518,7 +518,7 @@ extern "C" __global__ void computeGridForceTiled(
 
     // Resolve effective runtime cap: per-group if available, else global
     float effectiveCap = runtimeCap;
-    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+    if (groupRuntimeCaps != 0 && particleToGroupMap != 0) {
         int gIdx = particleToGroupMap[particleIndex];
         if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
             effectiveCap = groupRuntimeCaps[gIdx];
@@ -541,7 +541,7 @@ extern "C" __global__ void computeGridForceTiled(
                      pos.z >= effectiveMinZ && pos.z <= effectiveMaxZ);
 
     // Enter interpolation if scaled OR unscaled energy is needed
-    bool needUnscaled = (groupUnscaledEnergyBuffer != nullptr && unscaledScaling != 0.0f);
+    bool needUnscaled = (groupUnscaledEnergyBuffer != 0 && unscaledScaling != 0.0f);
     if (isInside && (scalingFactor != 0.0f || needUnscaled)) {
         // Calculate grid indices
         int ix = min(max((int)(pos.x / gridSpacing[0]), 0), gridCounts[0] - 2);
@@ -649,7 +649,7 @@ extern "C" __global__ void computeGridForceTiled(
                         dz *= powerFactor;
                     }
                 }
-            } else if (interpolationMethod == 2 && tileDerivatives != nullptr) {
+            } else if (interpolationMethod == 2 && tileDerivatives != 0) {
                 // Tricubic interpolation (handles inv_power pre-transform internally)
                 tricubicInterpolateTiled(
                     tileValues, tileDerivatives, localX, localY, localZ,
@@ -683,7 +683,7 @@ extern "C" __global__ void computeGridForceTiled(
                         dz *= powerFactor;
                     }
                 }
-            } else if (interpolationMethod == 3 && tileDerivatives != nullptr) {
+            } else if (interpolationMethod == 3 && tileDerivatives != 0) {
                 // Triquintic interpolation (handles inv_power pre-transform internally)
                 triquinticInterpolateTiled(
                     tileValues, tileDerivatives, localX, localY, localZ,
@@ -799,7 +799,7 @@ extern "C" __global__ void computeGridForceTiled(
             }
 
             // Store raw (pre-cap) energy for u_kln recomputation
-            if (atomRawEnergyBuffer != nullptr) {
+            if (atomRawEnergyBuffer != 0) {
                 atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
             }
 
@@ -846,24 +846,24 @@ extern "C" __global__ void computeGridForceTiled(
     }
 
     // Store per-atom energy if buffer provided
-    if (atomEnergyBuffer != nullptr) {
+    if (atomEnergyBuffer != 0) {
         atomEnergyBuffer[index] = threadEnergy;
     }
 
     // Store per-atom out-of-bounds flag if buffer provided
-    if (outOfBoundsBuffer != nullptr) {
+    if (outOfBoundsBuffer != 0) {
         outOfBoundsBuffer[index] = isInside ? 0 : 1;
     }
 
     // Accumulate energy - EITHER to group OR to total, not both
     // (This matches the non-tiled kernel behavior)
-    if (particleToGroupMap != nullptr && groupEnergyBuffer != nullptr) {
+    if (particleToGroupMap != 0 && groupEnergyBuffer != 0) {
         int groupIdx = particleToGroupMap[particleIndex];
         if (groupIdx >= 0 && groupIdx < numGroups) {
             // Particle in a group - only add to group energy
             atomicAdd(&groupEnergyBuffer[groupIdx], threadEnergy);
             // Also track unscaled energy (without group scaling factor)
-            if (groupUnscaledEnergyBuffer != nullptr) {
+            if (groupUnscaledEnergyBuffer != 0) {
                 atomicAdd(&groupUnscaledEnergyBuffer[groupIdx], threadUnscaledEnergy);
             }
         } else {

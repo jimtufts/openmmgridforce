@@ -315,7 +315,7 @@ extern "C" __global__ void nutsRestoreDivergent(
  */
 extern "C" __global__ void nutsComputeGroupKE(
     const mixed4* __restrict__ velm,
-    double* __restrict__ groupKE,
+    unsigned long long* __restrict__ groupKE,
     const int atomsPerGroup,
     const int numGroups) {
 
@@ -331,7 +331,7 @@ extern "C" __global__ void nutsComputeGroupKE(
         int groupIdx = i / atomsPerGroup;
         double ke = 0.5 * ((double)(v.x * v.x) + (double)(v.y * v.y) + (double)(v.z * v.z))
                     / (double)invMass;
-        atomicAdd(&groupKE[groupIdx], ke);
+        atomicAdd(&groupKE[groupIdx], static_cast<unsigned long long>((long long)(ke * 0x100000000)));
     }
 }
 

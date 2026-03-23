@@ -59,7 +59,7 @@ struct GBSAHessianResult {
  * @param origin         Grid origin (x, y, z)
  * @param gridHctProbe   HCT values at probe radius (also stores f derivative for tricubic/triquintic)
  * @param gridHctDerivatives  HCT derivatives for tricubic (8) or triquintic (27), RASPA3 layout
- *                            Shape: (n_derivs, total_points), nullptr for trilinear/bspline
+ *                            Shape: (n_derivs, total_points), 0 for trilinear/bspline
  * @param gridCorrectionN, A, B  Correction grids: [numBins * numPoints] or [27 * numPoints] for KDE
  * @param binOffset      Offset into correction grids for selected bin (ignored if useKDECorrections=true)
  * @param method         Interpolation method (0=trilinear, 1=bspline, 2=tricubic, 3=triquintic)
@@ -184,7 +184,7 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
         // Tricubic (2) or triquintic (3) interpolation for HCT
         // Correction grids use same method when KDE mode, trilinear when binned mode
 
-        if (gridHctDerivatives == nullptr) {
+        if (gridHctDerivatives == 0) {
             // No derivatives provided, fall back to trilinear
             // (will be handled by the else branch below)
             method = 0;
@@ -682,7 +682,7 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
         // =============================================================
         // HERMITE: Polynomial evaluation with analytical Hessian.
         // =============================================================
-        if (gridHctDerivatives == nullptr) {
+        if (gridHctDerivatives == 0) {
             method = 0;  // Fall through to trilinear below
         } else {
             int totalPoints = gridCounts[0] * nyz;
@@ -1102,7 +1102,7 @@ extern "C" __global__ void computeReceptorHCT(
     const float* __restrict__ radii,           // Intrinsic radii (template)
     const int* __restrict__ gridCounts,        // [nx, ny, nz]
     const float* __restrict__ gridHctProbe,    // HCT values at probe radius
-    const float* __restrict__ gridHctDerivatives, // HCT derivatives for tricubic/triquintic (or nullptr)
+    const float* __restrict__ gridHctDerivatives, // HCT derivatives for tricubic/triquintic (or 0)
     const float* __restrict__ gridCorrectionN, // Correction N [nBins * nPoints] or [27 * nPoints] for KDE
     const float* __restrict__ gridCorrectionA, // Correction A
     const float* __restrict__ gridCorrectionB, // Correction B
@@ -1565,7 +1565,7 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
     const float* __restrict__ dE_dR,            // dE/dR_born from accumulation
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridHctProbe,
-    const float* __restrict__ gridHctDerivatives, // HCT derivatives for tricubic/triquintic (or nullptr)
+    const float* __restrict__ gridHctDerivatives, // HCT derivatives for tricubic/triquintic (or 0)
     const float* __restrict__ gridCorrectionN,
     const float* __restrict__ gridCorrectionA,
     const float* __restrict__ gridCorrectionB,

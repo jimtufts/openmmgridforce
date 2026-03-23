@@ -128,12 +128,12 @@ extern "C" __global__ void computeGridHessianTiled(
         return;
 
     // Get actual particle index
-    const unsigned int particleIndex = (particleIndices != nullptr) ? particleIndices[index] : index;
+    const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
     // Load position and scaling factor (with per-group alchemical scaling)
     float4 posOrig = posq[particleIndex];
     float groupScale = 1.0f;
-    if (groupScalingFactors != nullptr && particleToGroupMap != nullptr) {
+    if (groupScalingFactors != 0 && particleToGroupMap != 0) {
         int groupIdx = particleToGroupMap[particleIndex];
         if (groupIdx >= 0 && groupIdx < numGroups) {
             groupScale = groupScalingFactors[groupIdx];
@@ -143,7 +143,7 @@ extern "C" __global__ void computeGridHessianTiled(
 
     // Resolve effective runtime cap: per-group if available, else global
     float effectiveCap = runtimeCap;
-    if (groupRuntimeCaps != nullptr && particleToGroupMap != nullptr) {
+    if (groupRuntimeCaps != 0 && particleToGroupMap != 0) {
         int gIdx = particleToGroupMap[particleIndex];
         if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
             effectiveCap = groupRuntimeCaps[gIdx];
@@ -202,7 +202,7 @@ extern "C" __global__ void computeGridHessianTiled(
             float interpolated = 0.0f;
             float dx = 0.0f, dy = 0.0f, dz = 0.0f;
 
-            if (interpolationMethod == 3 && tileDerivatives != nullptr) {
+            if (interpolationMethod == 3 && tileDerivatives != 0) {
                 // TRIQUINTIC HERMITE - Analytical second derivatives using tile data
 
                 // 8 corners of the cell in tile-local coordinates
