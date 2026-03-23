@@ -505,6 +505,10 @@ public:
     double getCutoffDistance() const;
     void setCutoffDistance(double distance);
 
+    // Receptor locality cutoff
+    double getReceptorLocalityCutoff() const;
+    void setReceptorLocalityCutoff(double distance);
+
     // Receptor mode
     ReceptorMode getReceptorMode() const;
     void setReceptorMode(ReceptorMode mode);

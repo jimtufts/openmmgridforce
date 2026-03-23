@@ -66,14 +66,16 @@ ADD_DEPENDENCIES(${SHARED_TARGET} CudaKernels)
 TARGET_LINK_LIBRARIES(${SHARED_TARGET} CUDA::cuda_driver CUDA::cudart CUDA::cublas OpenMM OpenMMCUDA OpenMMGridForce)
 
 SET_TARGET_PROPERTIES(${SHARED_TARGET} PROPERTIES
-    CUDA_ARCHITECTURES "35;52;89"
+    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
     POSITION_INDEPENDENT_CODE ON
     COMPILE_FLAGS "-DOPENMM_BUILDING_SHARED_LIBRARY ${EXTRA_COMPILE_FLAGS}"
     LINK_FLAGS "${EXTRA_COMPILE_FLAGS}")
 
 # Set CUDA compilation flags for compatibility with older drivers
-# Generate PTX for older CUDA versions to ensure driver compatibility
-SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_89,code=sm_89")
+SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52")
+IF(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
+    SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_89,code=sm_89")
+ENDIF()
 
 # Use system GCC as CUDA host compiler to avoid incompatibilities with
 # conda-provided GCC 14+ (whose C++20 standard library headers conflict with nvcc)

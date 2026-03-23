@@ -151,6 +151,7 @@ void ReferenceCalcIsolatedGBSAForceKernel::initialize(
     gbMethod = force.getGBMethod();
     receptorMode = force.getReceptorMode();
     cutoffDistance = force.getCutoffDistance();
+    receptorLocalityCutoff = force.getReceptorLocalityCutoff();
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = force.getSurfaceTension();
     interpolationMethod = force.getInterpolationMethod();
@@ -311,6 +312,27 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
 
         const vector<int>& particles = groupParticleIndices[g];
 
+        // Build active receptor atom set (for locality optimization)
+        double localityCutoff2 = 0.0;
+        bool useLocality = (receptorLocalityCutoff > 0.0 && receptorMode == IsolatedGBSAForce::PAIRWISE);
+        vector<bool> isActiveRecAtom(numReceptorAtoms, !useLocality);
+        if (useLocality) {
+            localityCutoff2 = receptorLocalityCutoff * receptorLocalityCutoff;
+            for (int j = 0; j < numReceptorAtoms; j++) {
+                for (int i = 0; i < numAtoms; i++) {
+                    int pi = particles[i];
+                    double dx = receptorPositions[j * 3] - posData[pi][0];
+                    double dy = receptorPositions[j * 3 + 1] - posData[pi][1];
+                    double dz = receptorPositions[j * 3 + 2] - posData[pi][2];
+                    double r2 = dx * dx + dy * dy + dz * dz;
+                    if (r2 < localityCutoff2) {
+                        isActiveRecAtom[j] = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         // ---- Step 1: Receptor HCT for each ligand atom ----
         vector<double> hctReceptor(numAtoms, 0.0);
 
@@ -412,11 +434,12 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
             }
 
         } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            // Pairwise receptor HCT
+            // Pairwise receptor HCT (skip inactive receptor atoms if locality enabled)
             for (int i = 0; i < numAtoms; i++) {
                 int pi = particles[i];
                 double R_i_off = radii[i] - DIELECTRIC_OFFSET;
                 for (int j = 0; j < numReceptorAtoms; j++) {
+                    if (useLocality && !isActiveRecAtom[j]) continue;
                     double dx = posData[pi][0] - receptorPositions[j * 3];
                     double dy = posData[pi][1] - receptorPositions[j * 3 + 1];
                     double dz = posData[pi][2] - receptorPositions[j * 3 + 2];
@@ -731,9 +754,12 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
 
         // ---- Step 7: PAIRWISE receptor desolvation + cross-term ----
         if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            // 7a: Compute ligand→receptor HCT screening
+            // Active atom mask was already computed at the top of this group loop
+
+            // 7a: Compute ligand→receptor HCT screening (only active atoms)
             vector<double> ligandToRecHCT(numReceptorAtoms, 0.0);
             for (int j = 0; j < numReceptorAtoms; j++) {
+                if (!isActiveRecAtom[j]) continue;
                 double R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
                 for (int i = 0; i < numAtoms; i++) {
                     int pi = particles[i];
@@ -750,8 +776,13 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
             }
 
             // 7b: Receptor Born radii with ligand screening
+            // Active atoms: recompute with ligand HCT. Inactive: keep reference.
             vector<double> recBornRadiiWithLig(numReceptorAtoms);
             for (int j = 0; j < numReceptorAtoms; j++) {
+                if (!isActiveRecAtom[j]) {
+                    recBornRadiiWithLig[j] = receptorBornRadiiRef[j];
+                    continue;
+                }
                 double totalHCT = receptorSelfHCT[j] + ligandToRecHCT[j];
                 double R_off = receptorRadii[j] - DIELECTRIC_OFFSET;
                 if (gbMethod == IsolatedGBSAForce::HCT) {
@@ -768,30 +799,71 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
 
             groupReceptorBornRadii_[g] = recBornRadiiWithLig;
 
-            // 7c: Receptor GB energy with ligand present
-            double recEnergyWithLig = 0.0;
-            for (int i = 0; i < numReceptorAtoms; i++) {
-                recEnergyWithLig += 0.5 * prefactor * receptorCharges[i] * receptorCharges[i]
-                                    / recBornRadiiWithLig[i];
-                for (int j = i + 1; j < numReceptorAtoms; j++) {
-                    double dx = receptorPositions[i * 3] - receptorPositions[j * 3];
-                    double dy = receptorPositions[i * 3 + 1] - receptorPositions[j * 3 + 1];
-                    double dz = receptorPositions[i * 3 + 2] - receptorPositions[j * 3 + 2];
-                    double r2 = dx * dx + dy * dy + dz * dz;
-                    double D = recBornRadiiWithLig[i] * recBornRadiiWithLig[j];
-                    double exp_alpha = exp(-r2 / (4.0 * D));
-                    double f_gb = sqrt(r2 + D * exp_alpha);
-                    recEnergyWithLig += prefactor * receptorCharges[i]
-                                        * receptorCharges[j] / f_gb;
+            // 7c: Receptor desolvation energy
+            double desolvation = 0.0;
+            if (!useLocality) {
+                // Full O(N_rec^2) computation
+                double recEnergyWithLig = 0.0;
+                for (int i = 0; i < numReceptorAtoms; i++) {
+                    recEnergyWithLig += 0.5 * prefactor * receptorCharges[i] * receptorCharges[i]
+                                        / recBornRadiiWithLig[i];
+                    for (int j = i + 1; j < numReceptorAtoms; j++) {
+                        double dx = receptorPositions[i * 3] - receptorPositions[j * 3];
+                        double dy = receptorPositions[i * 3 + 1] - receptorPositions[j * 3 + 1];
+                        double dz = receptorPositions[i * 3 + 2] - receptorPositions[j * 3 + 2];
+                        double r2 = dx * dx + dy * dy + dz * dz;
+                        double D = recBornRadiiWithLig[i] * recBornRadiiWithLig[j];
+                        double exp_alpha = exp(-r2 / (4.0 * D));
+                        double f_gb = sqrt(r2 + D * exp_alpha);
+                        recEnergyWithLig += prefactor * receptorCharges[i]
+                                            * receptorCharges[j] / f_gb;
+                    }
+                }
+                desolvation = recEnergyWithLig - receptorReferenceEnergy;
+            } else {
+                // Delta approach: O(|A| * N_rec) where A = active atoms
+                // Only active atoms have changed Born radii, so we compute
+                // the energy difference from pairs involving at least one active atom.
+                for (int a = 0; a < numReceptorAtoms; a++) {
+                    if (!isActiveRecAtom[a]) continue;
+
+                    // Self-term delta
+                    desolvation += 0.5 * prefactor * receptorCharges[a] * receptorCharges[a]
+                                   * (1.0 / recBornRadiiWithLig[a] - 1.0 / receptorBornRadiiRef[a]);
+
+                    // Pair-term deltas: iterate all j != a
+                    for (int j = 0; j < numReceptorAtoms; j++) {
+                        if (j == a) continue;
+                        // Avoid double-counting when both a and j are active
+                        if (isActiveRecAtom[j] && j < a) continue;
+
+                        double dx = receptorPositions[a * 3] - receptorPositions[j * 3];
+                        double dy = receptorPositions[a * 3 + 1] - receptorPositions[j * 3 + 1];
+                        double dz = receptorPositions[a * 3 + 2] - receptorPositions[j * 3 + 2];
+                        double r2 = dx * dx + dy * dy + dz * dz;
+
+                        // Energy with new (mixed) Born radii
+                        double D_new = recBornRadiiWithLig[a] * recBornRadiiWithLig[j];
+                        double exp_new = exp(-r2 / (4.0 * D_new));
+                        double f_new = sqrt(r2 + D_new * exp_new);
+                        double E_new = prefactor * receptorCharges[a] * receptorCharges[j] / f_new;
+
+                        // Energy with reference Born radii
+                        double D_ref = receptorBornRadiiRef[a] * receptorBornRadiiRef[j];
+                        double exp_ref = exp(-r2 / (4.0 * D_ref));
+                        double f_ref = sqrt(r2 + D_ref * exp_ref);
+                        double E_ref = prefactor * receptorCharges[a] * receptorCharges[j] / f_ref;
+
+                        desolvation += E_new - E_ref;
+                    }
                 }
             }
-
-            double desolvation = (recEnergyWithLig - receptorReferenceEnergy) * scale;
+            desolvation *= scale;
             groupReceptorDesolvations_[g] = desolvation;
             groupEnergies_[g] += desolvation;
             totalEnergy += desolvation;
 
-            // 7d: Cross-term energy (receptor-ligand GB pairs)
+            // 7d: Cross-term energy (receptor-ligand GB pairs, ALL receptor atoms)
             double crossTermEnergy = 0.0;
             for (int i = 0; i < numAtoms; i++) {
                 int pi = particles[i];
@@ -833,35 +905,40 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
 
             // 7e: Receptor desolvation forces on ligand atoms
             if (includeForces) {
-                // Compute receptor dE/dR_born (for chain rule through receptor Born radii)
+                // Compute receptor dE/dR_born for active atoms only.
+                // Only active atoms have nonzero ligandToRecHCT, so only they
+                // contribute to desolvation forces through the chain rule.
+                // We need dE/dR for active atoms, which requires O(|A|*N_rec) work.
                 vector<double> recDeDR(numReceptorAtoms, 0.0);
-                for (int i = 0; i < numReceptorAtoms; i++) {
+                for (int a = 0; a < numReceptorAtoms; a++) {
+                    if (!isActiveRecAtom[a]) continue;
                     // Self term
-                    recDeDR[i] += -0.5 * prefactor * receptorCharges[i] * receptorCharges[i]
-                                  / (recBornRadiiWithLig[i] * recBornRadiiWithLig[i]);
-                    // Pair terms with other receptor atoms
+                    recDeDR[a] += -0.5 * prefactor * receptorCharges[a] * receptorCharges[a]
+                                  / (recBornRadiiWithLig[a] * recBornRadiiWithLig[a]);
+                    // Pair terms with all other receptor atoms
                     for (int j = 0; j < numReceptorAtoms; j++) {
-                        if (i == j) continue;
-                        double dx = receptorPositions[i * 3] - receptorPositions[j * 3];
-                        double dy = receptorPositions[i * 3 + 1] - receptorPositions[j * 3 + 1];
-                        double dz = receptorPositions[i * 3 + 2] - receptorPositions[j * 3 + 2];
+                        if (j == a) continue;
+                        double dx = receptorPositions[a * 3] - receptorPositions[j * 3];
+                        double dy = receptorPositions[a * 3 + 1] - receptorPositions[j * 3 + 1];
+                        double dz = receptorPositions[a * 3 + 2] - receptorPositions[j * 3 + 2];
                         double r2 = dx * dx + dy * dy + dz * dz;
-                        double D = recBornRadiiWithLig[i] * recBornRadiiWithLig[j];
+                        double D = recBornRadiiWithLig[a] * recBornRadiiWithLig[j];
                         double alpha_val = r2 / (4.0 * D);
                         double exp_alpha = exp(-alpha_val);
                         double f_gb2 = r2 + D * exp_alpha;
                         double f_gb = sqrt(f_gb2);
-                        double qq = receptorCharges[i] * receptorCharges[j];
+                        double qq = receptorCharges[a] * receptorCharges[j];
 
-                        double df_dRi = recBornRadiiWithLig[j] * exp_alpha
+                        double df_dRa = recBornRadiiWithLig[j] * exp_alpha
                                         * (1.0 + alpha_val) / (2.0 * f_gb);
-                        recDeDR[i] += -prefactor * qq / f_gb2 * df_dRi;
+                        recDeDR[a] += -prefactor * qq / f_gb2 * df_dRa;
                     }
                 }
 
-                // Compute receptor dR_born/dHCT
+                // Compute receptor dR_born/dHCT (only for active atoms)
                 vector<double> recDRdHCT(numReceptorAtoms, 0.0);
                 for (int j = 0; j < numReceptorAtoms; j++) {
+                    if (!isActiveRecAtom[j]) continue;
                     double R_off = receptorRadii[j] - DIELECTRIC_OFFSET;
                     if (R_off <= 0.0) continue;
                     double totalHCT = receptorSelfHCT[j] + ligandToRecHCT[j];
@@ -881,12 +958,13 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
                 }
 
                 // Chain rule: force on ligand atom from receptor desolvation
-                // F_ligand += -scale * sum_j (recDeDR[j] * recDRdHCT[j] * dHCT_j/dpos_ligand)
+                // Only iterate active receptor atoms (inactive have zero ligandToRecHCT)
                 for (int i = 0; i < numAtoms; i++) {
                     int pi = particles[i];
                     double R_i_off = radii[i] - DIELECTRIC_OFFSET;
 
                     for (int j = 0; j < numReceptorAtoms; j++) {
+                        if (!isActiveRecAtom[j]) continue;
                         double dx = receptorPositions[j * 3] - posData[pi][0];
                         double dy = receptorPositions[j * 3 + 1] - posData[pi][1];
                         double dz = receptorPositions[j * 3 + 2] - posData[pi][2];
@@ -897,17 +975,12 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
                         if (cutoffDistance > 0.0 && r > cutoffDistance) continue;
 
                         double R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
-                        // dHCT_j/dr where r is distance from receptor j to ligand i
                         double dHCT_dr = computeHCTTermDerivative(r, R_j_off, R_i_off,
                                                                    scaleFactors[i]);
 
-                        // Force on ligand atom: -dE/dr along receptor→ligand direction
-                        // The distance vector is rec→lig, so force on ligand is
-                        // along -rec→lig direction
                         double recChainFactor = recDeDR[j] * recDRdHCT[j];
                         double forceMag = -scale * recChainFactor * dHCT_dr;
                         double invR = 1.0 / r;
-                        // dx,dy,dz point from ligand to receptor, so negate for force on ligand
                         forceData[pi][0] -= forceMag * dx * invR;
                         forceData[pi][1] -= forceMag * dy * invR;
                         forceData[pi][2] -= forceMag * dz * invR;
@@ -938,6 +1011,7 @@ void ReferenceCalcIsolatedGBSAForceKernel::updateParametersInContext(
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = force.getSurfaceTension();
     cutoffDistance = force.getCutoffDistance();
+    receptorLocalityCutoff = force.getReceptorLocalityCutoff();
 
     // Update alchemical scaling
     globalScalingFactor = force.getGlobalScalingFactor();

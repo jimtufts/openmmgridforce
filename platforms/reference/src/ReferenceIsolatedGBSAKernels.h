@@ -56,6 +56,7 @@ private:
     bool includeSurfaceArea;
     double surfaceTension;
     double cutoffDistance;
+    double receptorLocalityCutoff;
     double globalScalingFactor;
     std::vector<double> groupScalingFactors;
 

@@ -721,6 +721,10 @@ extern "C" __global__ void computeIsolatedLigandHCT(
 /**
  * Compute HCT contribution from receptor via pairwise interactions.
  */
+/**
+ * Compute HCT contribution from receptor via pairwise interactions.
+ * If isActiveRecAtom is non-null, only active receptor atoms contribute.
+ */
 extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
     const float4* __restrict__ posq,
     const int* __restrict__ particleIndices,
@@ -734,7 +738,8 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor
+    float* __restrict__ hctReceptor,
+    const int* __restrict__ isActiveRecAtom
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -762,8 +767,10 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
-    // Loop over receptor atoms
+    // Loop over receptor atoms (skip inactive if locality mask provided)
     for (int j = 0; j < numReceptorAtoms; j++) {
+        if (isActiveRecAtom != 0 && !isActiveRecAtom[j]) continue;
+
         float3 pos_j = receptorPositions[j];
 
         float dx = pos_i.x - pos_j.x;
@@ -1587,6 +1594,9 @@ extern "C" __global__ void computeReceptorReferenceEnergy(
  * Compute ligand's HCT contribution to receptor Born radii.
  * Each ligand group produces a separate HCT contribution to each receptor atom.
  * Output: ligandToReceptorHCT[groupIdx * numReceptorAtoms + receptorIdx]
+ *
+ * If isActiveRecAtom is non-null, only active receptor atoms are computed.
+ * Inactive atoms get ligandToReceptorHCT = 0.
  */
 extern "C" __global__ void computeLigandToReceptorHCT(
     const float4* __restrict__ posq,
@@ -1600,7 +1610,8 @@ extern "C" __global__ void computeLigandToReceptorHCT(
     int numReceptorAtoms,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ ligandToReceptorHCT
+    float* __restrict__ ligandToReceptorHCT,
+    const int* __restrict__ isActiveRecAtom
 ) {
     // Grid-stride loop: each thread handles multiple (group, receptor_atom) pairs.
     int totalWork = numGroups * numReceptorAtoms;
@@ -1610,6 +1621,12 @@ extern "C" __global__ void computeLigandToReceptorHCT(
 
         int groupIdx = globalIdx / numReceptorAtoms;
         int recIdx = globalIdx % numReceptorAtoms;
+
+        // Skip inactive receptor atoms if locality mask is provided
+        if (isActiveRecAtom != 0 && !isActiveRecAtom[recIdx]) {
+            ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] = 0.0f;
+            continue;
+        }
 
         float3 pos_rec = receptorPositions[recIdx];
         float R_rec = receptorRadii[recIdx];
@@ -1673,6 +1690,8 @@ extern "C" __global__ void computeLigandToReceptorHCT(
 /**
  * Compute receptor Born radii with ligand screening.
  * receptorHCT = receptorSelfHCT + ligandToReceptorHCT
+ *
+ * If isActiveRecAtom is non-null, inactive atoms copy from receptorBornRadiiRef.
  */
 extern "C" __global__ void computeReceptorBornRadiiWithLigand(
     const float* __restrict__ receptorRadii,
@@ -1680,10 +1699,18 @@ extern "C" __global__ void computeReceptorBornRadiiWithLigand(
     const float* __restrict__ ligandToReceptorHCT,
     int numReceptorAtoms,
     int groupIdx,
-    float* __restrict__ receptorBornRadii
+    float* __restrict__ receptorBornRadii,
+    const float* __restrict__ receptorBornRadiiRef,
+    const int* __restrict__ isActiveRecAtom
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numReceptorAtoms) return;
+
+    // Inactive atoms keep reference Born radii
+    if (isActiveRecAtom != 0 && !isActiveRecAtom[i]) {
+        receptorBornRadii[i] = receptorBornRadiiRef[i];
+        return;
+    }
 
     float R_i = receptorRadii[i];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
@@ -1791,7 +1818,8 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     float globalScalingFactor,
-    const float* __restrict__ groupScalingFactors
+    const float* __restrict__ groupScalingFactors,
+    const int* __restrict__ isActiveRecAtom
 ) {
     // Thread per ligand atom
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1826,7 +1854,8 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     float energy = 0.0f;
     float3 force_lig = make_float3(0.0f, 0.0f, 0.0f);
 
-    // Loop over receptor atoms
+    // Loop over all receptor atoms (cross-term is Coulomb-like — not pruned)
+    // isActiveRecAtom parameter kept in signature for interface consistency but ignored
     for (int j = 0; j < numReceptorAtoms; j++) {
         float3 pos_rec = receptorPositions[j];
         float q_rec = receptorCharges[j];
@@ -2187,7 +2216,8 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     float globalScalingFactor,
-    const float* __restrict__ groupScalingFactors
+    const float* __restrict__ groupScalingFactors,
+    const int* __restrict__ isActiveRecAtom
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2226,7 +2256,7 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     bool useCutoff = (cutoffDistance > 0.0f);
 
     // Part 1: dE_cross/dR_born_lig → chain through ligand HCT
-    // Accumulate dE_cross/dR_born_lig from all receptor atoms
+    // Accumulate dE_cross/dR_born_lig from all receptor atoms (not pruned)
     float dEdR_lig = 0.0f;
     for (int j = 0; j < numReceptorAtoms; j++) {
         float3 pos_rec = receptorPositions[j];
@@ -2313,7 +2343,7 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
         atomicAdd(&forceBuffer[particleIdx_j + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(-de * dz * 0x100000000)));
     }
 
-    // Chain through receptor→ligand HCT (receptor screening this ligand)
+    // Chain through receptor→ligand HCT (receptor screening this ligand, not pruned)
     for (int j = 0; j < numReceptorAtoms; j++) {
         float3 pos_rec = receptorPositions[j];
         float R_rec = receptorRadii[j];
@@ -2357,4 +2387,439 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     atomicAdd(&forceBuffer[particleIdx_lig], static_cast<unsigned long long>((long long)(force_lig.x * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_lig + paddedNumAtoms], static_cast<unsigned long long>((long long)(force_lig.y * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_lig + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force_lig.z * 0x100000000)));
+}
+
+// =============================================================================
+// GPU-SIDE ACCUMULATION KERNELS (eliminate host-device sync)
+// =============================================================================
+
+/**
+ * Accumulate desolvation energy into group energy buffers on GPU.
+ * Single-thread kernel: computes desolvation = receptorEnergy[0] - referenceEnergy,
+ * applies scaling, and adds to groupEnergies/groupDesolvations/groupUnscaledEnergies.
+ */
+extern "C" __global__ void accumulateDesolvationOnGPU(
+    const float* __restrict__ receptorEnergy,
+    float referenceEnergy,
+    int groupIdx,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ groupEnergies,
+    float* __restrict__ groupReceptorDesolvations,
+    float* __restrict__ groupUnscaledEnergies
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    float desolvation = receptorEnergy[0] - referenceEnergy;
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+
+    groupReceptorDesolvations[groupIdx] = desolvation * scale;
+    groupEnergies[groupIdx] += desolvation * scale;
+    if (groupUnscaledEnergies != 0) {
+        groupUnscaledEnergies[groupIdx] += desolvation * globalScalingFactor;
+    }
+}
+
+/**
+ * Accumulate desolvation delta energy into group energy buffers on GPU.
+ * For locality cutoff: receptorEnergy[0] already contains the delta.
+ */
+extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
+    const float* __restrict__ receptorEnergyDelta,
+    int groupIdx,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ groupEnergies,
+    float* __restrict__ groupReceptorDesolvations,
+    float* __restrict__ groupUnscaledEnergies
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    float desolvation = receptorEnergyDelta[0];
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+
+    groupReceptorDesolvations[groupIdx] = desolvation * scale;
+    groupEnergies[groupIdx] += desolvation * scale;
+    if (groupUnscaledEnergies != 0) {
+        groupUnscaledEnergies[groupIdx] += desolvation * globalScalingFactor;
+    }
+}
+
+/**
+ * Accumulate cross-term energies into group energy buffers on GPU.
+ * Single-thread kernel, handles all groups.
+ */
+extern "C" __global__ void accumulateCrossTermOnGPU(
+    const float* __restrict__ crossTermEnergies,
+    int numGroups,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ groupEnergies,
+    float* __restrict__ groupUnscaledEnergies
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    for (int g = 0; g < numGroups; g++) {
+        groupEnergies[g] += crossTermEnergies[g];
+        if (groupUnscaledEnergies != 0) {
+            float groupScale = groupScalingFactors[g];
+            if (groupScale != 0.0f) {
+                groupUnscaledEnergies[g] += crossTermEnergies[g] / groupScale;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// RECEPTOR LOCALITY CUTOFF KERNELS
+// =============================================================================
+
+/**
+ * Compute per-receptor-atom HCT contributions to each ligand atom.
+ * Stores hctPerAtom[ligIdx * numReceptorAtoms + recIdx] for baseline caching.
+ * Called once at first execute to build the baseline.
+ */
+extern "C" __global__ void computeReceptorHCTPerAtom(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ radii,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScaleFactors,
+    int numReceptorAtoms,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int totalParticles,
+    int templateNumAtoms,
+    float* __restrict__ hctPerAtom
+) {
+    // Grid-stride loop over (ligand_atom, receptor_atom) pairs
+    int totalWork = totalParticles * numReceptorAtoms;
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
+
+        int ligIdx = globalIdx / numReceptorAtoms;
+        int recIdx = globalIdx % numReceptorAtoms;
+
+        if (ligIdx >= totalParticles) continue;
+
+        // Determine template index for this ligand atom
+        int atomInGroup = ligIdx;
+        for (int g = 0; g < numGroups; g++) {
+            int gs = groupStart[g];
+            int ge = groupStart[g + 1];
+            if (ligIdx >= gs && ligIdx < ge) {
+                atomInGroup = ligIdx - gs;
+                break;
+            }
+        }
+        int templateIdx = atomInGroup % templateNumAtoms;
+
+        int particleIdx = particleIndices[ligIdx];
+        float4 pos = posq[particleIdx];
+        float R_i = radii[templateIdx];
+        float R_i_off = R_i - DIELECTRIC_OFFSET;
+
+        float3 pos_rec = receptorPositions[recIdx];
+        float dx = pos.x - pos_rec.x;
+        float dy = pos.y - pos_rec.y;
+        float dz = pos.z - pos_rec.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+        float r = sqrtf(r2);
+
+        float term = 0.0f;
+        if (r > 1e-6f) {
+            float R_j = receptorRadii[recIdx];
+            float R_j_off = R_j - DIELECTRIC_OFFSET;
+            float S_j = R_j_off * receptorScaleFactors[recIdx];
+
+            float r_plus_Sj = r + S_j;
+            if (R_i_off < r_plus_Sj) {
+                float r_minus_Sj = fabsf(r - S_j);
+                float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+                float u_ij = 1.0f / r_plus_Sj;
+                float l_ij2 = l_ij * l_ij;
+                float u_ij2 = u_ij * u_ij;
+                float r_inv = 1.0f / r;
+
+                term = l_ij - u_ij +
+                       0.25f * r * (u_ij2 - l_ij2) +
+                       0.5f * r_inv * logf(u_ij / l_ij) +
+                       0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
+
+                if (R_i_off < (S_j - r)) {
+                    term += 2.0f * (1.0f / R_i_off - l_ij);
+                }
+            }
+        }
+
+        hctPerAtom[ligIdx * numReceptorAtoms + recIdx] = term;
+    }
+}
+
+/**
+ * Reconstruct receptor HCT on ligand using baseline + active update.
+ * For each ligand atom: sum frozen baseline from inactive atoms + fresh from active atoms.
+ * Active atoms use freshly computed values; inactive atoms use cached baseline.
+ */
+extern "C" __global__ void reconstructReceptorHCT(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ radii,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScaleFactors,
+    const float* __restrict__ hctPerAtomBaseline,
+    const int* __restrict__ isActiveRecAtom,
+    int numReceptorAtoms,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int totalParticles,
+    int templateNumAtoms,
+    float cutoffDistance,
+    float* __restrict__ hctReceptor
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= totalParticles) return;
+
+    int atomInGroup = idx;
+    for (int g = 0; g < numGroups; g++) {
+        int gs = groupStart[g];
+        int ge = groupStart[g + 1];
+        if (idx >= gs && idx < ge) {
+            atomInGroup = idx - gs;
+            break;
+        }
+    }
+    int templateIdx = atomInGroup % templateNumAtoms;
+
+    int particleIdx = particleIndices[idx];
+    float4 pos = posq[particleIdx];
+    float R_i = radii[templateIdx];
+    float R_i_off = R_i - DIELECTRIC_OFFSET;
+
+    float hct = 0.0f;
+    float cutoff2 = cutoffDistance * cutoffDistance;
+    bool useCutoff = (cutoffDistance > 0.0f);
+
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        if (!isActiveRecAtom[j]) {
+            // Inactive: use frozen baseline
+            hct += hctPerAtomBaseline[idx * numReceptorAtoms + j];
+        } else {
+            // Active: compute fresh
+            float3 pos_rec = receptorPositions[j];
+            float dx = pos.x - pos_rec.x;
+            float dy = pos.y - pos_rec.y;
+            float dz = pos.z - pos_rec.z;
+            float r2 = dx*dx + dy*dy + dz*dz;
+
+            if (useCutoff && r2 > cutoff2) continue;
+
+            float r = sqrtf(r2);
+            if (r < 1e-6f) continue;
+
+            float R_j = receptorRadii[j];
+            float R_j_off = R_j - DIELECTRIC_OFFSET;
+            float S_j = R_j_off * receptorScaleFactors[j];
+
+            float r_plus_Sj = r + S_j;
+            if (R_i_off >= r_plus_Sj) continue;
+
+            float r_minus_Sj = fabsf(r - S_j);
+            float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+            float u_ij = 1.0f / r_plus_Sj;
+            float l_ij2 = l_ij * l_ij;
+            float u_ij2 = u_ij * u_ij;
+            float r_inv = 1.0f / r;
+
+            float term = l_ij - u_ij +
+                         0.25f * r * (u_ij2 - l_ij2) +
+                         0.5f * r_inv * logf(u_ij / l_ij) +
+                         0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
+
+            if (R_i_off < (S_j - r)) {
+                term += 2.0f * (1.0f / R_i_off - l_ij);
+            }
+
+            hct += term;
+        }
+    }
+
+    hctReceptor[idx] = hct;
+}
+
+/**
+ * Determine which receptor atoms are within locality cutoff of any ligand atom.
+ * Sets isActiveRecAtom[j] = 1 if receptor atom j is within cutoff of any ligand atom
+ * in any group, 0 otherwise.
+ */
+extern "C" __global__ void computeActiveReceptorAtoms(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float3* __restrict__ receptorPositions,
+    int numReceptorAtoms,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    float localityCutoff2,
+    int* __restrict__ isActiveRecAtom
+) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= numReceptorAtoms) return;
+
+    float3 pos_rec = receptorPositions[j];
+    int active = 0;
+
+    // Check all ligand atoms across all groups
+    int totalLigandAtoms = groupStart[numGroups];
+    for (int k = 0; k < totalLigandAtoms && !active; k++) {
+        int particleIdx = particleIndices[k];
+        float4 pos_lig = posq[particleIdx];
+        float dx = pos_rec.x - pos_lig.x;
+        float dy = pos_rec.y - pos_lig.y;
+        float dz = pos_rec.z - pos_lig.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < localityCutoff2) {
+            active = 1;
+        }
+    }
+
+    isActiveRecAtom[j] = active;
+}
+
+/**
+ * Compute receptor energy DELTA using the locality optimization.
+ * Only iterates pairs where at least one atom is active.
+ * Each active atom computes its self-term delta + pair deltas with all N_rec atoms.
+ * Complexity: O(|A| * N_rec) instead of O(N_rec^2).
+ *
+ * Uses shared memory reduction to accumulate the total delta energy.
+ */
+extern "C" __global__ void computeReceptorEnergyDelta(
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadiiRef,
+    const float* __restrict__ receptorBornRadii,
+    const int* __restrict__ isActiveRecAtom,
+    int numReceptorAtoms,
+    float prefactor,
+    float* __restrict__ energyDelta
+) {
+    extern __shared__ float sdata[];
+
+    int tid = threadIdx.x;
+    int a = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float delta = 0.0f;
+
+    if (a < numReceptorAtoms && isActiveRecAtom[a]) {
+        float3 pos_a = receptorPositions[a];
+        float q_a = receptorCharges[a];
+        float R_a_new = receptorBornRadii[a];
+        float R_a_ref = receptorBornRadiiRef[a];
+
+        // Self-term delta
+        delta += 0.5f * prefactor * q_a * q_a * (1.0f / R_a_new - 1.0f / R_a_ref);
+
+        // Pair-term deltas with all other atoms
+        for (int j = 0; j < numReceptorAtoms; j++) {
+            if (j == a) continue;
+            // Avoid double-counting when both a and j are active
+            if (isActiveRecAtom[j] && j < a) continue;
+
+            float3 pos_j = receptorPositions[j];
+            float q_j = receptorCharges[j];
+
+            float dx = pos_a.x - pos_j.x;
+            float dy = pos_a.y - pos_j.y;
+            float dz = pos_a.z - pos_j.z;
+            float r2 = dx*dx + dy*dy + dz*dz;
+
+            // New energy (mixed Born radii)
+            float R_j_new = receptorBornRadii[j];
+            float D_new = R_a_new * R_j_new;
+            float exp_new = expf(-r2 / (4.0f * D_new));
+            float f_new = sqrtf(r2 + D_new * exp_new);
+            float E_new = prefactor * q_a * q_j / f_new;
+
+            // Reference energy
+            float R_j_ref = receptorBornRadiiRef[j];
+            float D_ref = R_a_ref * R_j_ref;
+            float exp_ref = expf(-r2 / (4.0f * D_ref));
+            float f_ref = sqrtf(r2 + D_ref * exp_ref);
+            float E_ref = prefactor * q_a * q_j / f_ref;
+
+            delta += E_new - E_ref;
+        }
+    }
+
+    sdata[tid] = delta;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(energyDelta, sdata[0]);
+    }
+}
+
+/**
+ * Compute dE/dR_born for active receptor atoms only.
+ * Each active atom iterates all N_rec atoms for its dE/dR.
+ * Inactive atoms get dE/dR = 0 (they don't contribute to desolvation forces).
+ */
+extern "C" __global__ void computeReceptorDeDRActive(
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,
+    const int* __restrict__ isActiveRecAtom,
+    int numReceptorAtoms,
+    float prefactor,
+    float* __restrict__ receptorDeDR
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numReceptorAtoms) return;
+
+    if (!isActiveRecAtom[i]) {
+        receptorDeDR[i] = 0.0f;
+        return;
+    }
+
+    float3 pos_i = receptorPositions[i];
+    float q_i = receptorCharges[i];
+    float R_i = receptorBornRadii[i];
+
+    // Self term: dE_self/dR = -0.5 * prefactor * q² / R²
+    float dEdR = -0.5f * prefactor * q_i * q_i / (R_i * R_i);
+
+    // Pair terms
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        if (j == i) continue;
+
+        float3 pos_j = receptorPositions[j];
+        float q_j = receptorCharges[j];
+        float R_j = receptorBornRadii[j];
+
+        float dx = pos_j.x - pos_i.x;
+        float dy = pos_j.y - pos_i.y;
+        float dz = pos_j.z - pos_i.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+
+        float RiRj = R_i * R_j;
+        float expArg = -r2 / (4.0f * RiRj);
+        float expTerm = expf(expArg);
+        float f_gb2 = r2 + RiRj * expTerm;
+        float f_gb = sqrtf(f_gb2);
+
+        float dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+        dEdR += -prefactor * q_i * q_j / (f_gb * f_gb) * dFgbDRi;
+    }
+
+    receptorDeDR[i] = dEdR;
 }

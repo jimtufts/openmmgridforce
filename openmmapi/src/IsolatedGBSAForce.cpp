@@ -19,6 +19,7 @@ constexpr double IsolatedGBSAForce::DEFAULT_SOLUTE_DIELECTRIC;
 constexpr double IsolatedGBSAForce::DEFAULT_SOLVENT_DIELECTRIC;
 constexpr double IsolatedGBSAForce::DEFAULT_SA_SURFACE_TENSION;
 constexpr double IsolatedGBSAForce::NO_CUTOFF;
+constexpr double IsolatedGBSAForce::NO_LOCALITY_CUTOFF;
 
 IsolatedGBSAForce::IsolatedGBSAForce()
     : numAtoms(0),
@@ -28,6 +29,7 @@ IsolatedGBSAForce::IsolatedGBSAForce()
       includeSurfaceArea(true),
       surfaceTension(DEFAULT_SA_SURFACE_TENSION),
       cutoffDistance(NO_CUTOFF),
+      receptorLocalityCutoff(NO_LOCALITY_CUTOFF),
       receptorMode(NONE),
       interpolationMethod(0),
       numReceptorAtoms(0),

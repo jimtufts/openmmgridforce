@@ -66,6 +66,9 @@ public:
     // Cutoff
     static constexpr double NO_CUTOFF = -1.0;  // Special value meaning no cutoff
 
+    // Receptor locality cutoff
+    static constexpr double NO_LOCALITY_CUTOFF = -1.0;  // Special value: update all receptor atoms
+
     /**
      * Create an IsolatedGBSAForce.
      */
@@ -155,6 +158,29 @@ public:
      * as the HCT integral decays rapidly with distance.
      */
     void setCutoffDistance(double distance) { cutoffDistance = distance; }
+
+    // ========== Receptor Locality Cutoff ==========
+
+    /**
+     * Get the locality cutoff for receptor desolvation in PAIRWISE mode.
+     * Only receptor atoms within this distance of any ligand atom have their
+     * Born radii updated with ligand screening. Distant atoms keep reference
+     * Born radii (precomputed without ligand). This reduces the per-frame
+     * receptor desolvation cost from O(N_rec^2) to O(|A| * N_rec).
+     *
+     * Returns NO_LOCALITY_CUTOFF (-1.0) if all receptor atoms are updated.
+     */
+    double getReceptorLocalityCutoff() const { return receptorLocalityCutoff; }
+
+    /**
+     * Set the locality cutoff for receptor desolvation (nm).
+     * Set to NO_LOCALITY_CUTOFF (-1.0) to update all receptor atoms (default).
+     * A value of ~2.0-2.5 nm typically gives < 4 kJ/mol error.
+     *
+     * Note: This only affects receptor desolvation (Step 7). Ligand Born radii
+     * and the cross-term always use all receptor atoms.
+     */
+    void setReceptorLocalityCutoff(double distance) { receptorLocalityCutoff = distance; }
 
     // ========== Receptor Mode ==========
 
@@ -417,6 +443,9 @@ private:
 
     // Cutoff
     double cutoffDistance;
+
+    // Receptor locality cutoff
+    double receptorLocalityCutoff;
 
     // Receptor mode
     ReceptorMode receptorMode;

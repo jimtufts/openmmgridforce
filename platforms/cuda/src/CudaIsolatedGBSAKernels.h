@@ -53,6 +53,7 @@ private:
     bool includeSurfaceArea;
     float surfaceTension;
     float cutoffDistance;  // -1.0 for no cutoff
+    float receptorLocalityCutoff;  // -1.0 for no locality cutoff (update all receptor atoms)
 
     // Grid mode parameters (when receptorMode == GRID)
     float originX, originY, originZ;
@@ -90,6 +91,11 @@ private:
     OpenMM::CudaArray receptorBornRadii;        // [N_rec] - working buffer for Born radii with ligand
     OpenMM::CudaArray receptorEnergy;           // [1] - working buffer for receptor energy
     OpenMM::CudaArray receptorDeDR;             // [N_rec] - pre-computed dE/dR_born for receptor atoms
+    OpenMM::CudaArray isActiveRecAtom;           // [N_rec] - int mask: 1=active, 0=inactive (locality cutoff)
+
+    // Baseline HCT: per-receptor-atom contribution to each ligand atom (locality optimization)
+    OpenMM::CudaArray hctReceptorPerAtom;       // [totalParticles * N_rec] - cached per-receptor contributions
+    bool hasHctBaseline;                         // true after first execute computes baseline
 
     // Device arrays - ligand atom parameters
     OpenMM::CudaArray charges;
@@ -153,6 +159,18 @@ private:
     CUfunction computeReceptorDesolvationForcesKernel; // Runtime: forces from receptor desolv (old, slow)
     CUfunction computeReceptorDesolvationForcesOptimizedKernel; // Runtime: forces with pre-computed dE/dR
     CUfunction computeCrossTermChainRuleForcesKernel;  // Runtime: forces from cross-term chain rule
+
+    // Locality cutoff kernels
+    CUfunction computeActiveReceptorAtomsKernel;     // Runtime: build active atom mask
+    CUfunction computeReceptorEnergyDeltaKernel;     // Runtime: O(|A|*N) delta energy
+    CUfunction computeReceptorDeDRActiveKernel;      // Runtime: dE/dR for active atoms only
+    CUfunction computeReceptorHCTPerAtomKernel;      // Init: per-receptor HCT contributions
+    CUfunction reconstructReceptorHCTKernel;         // Runtime: reconstruct HCT from baseline + active
+
+    // GPU-side accumulation (eliminate host-device sync)
+    CUfunction accumulateDesolvationOnGPUKernel;
+    CUfunction accumulateDesolvationDeltaOnGPUKernel;
+    CUfunction accumulateCrossTermOnGPUKernel;
 
     CUfunction computeHessianKernel;
 

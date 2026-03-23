@@ -39,7 +39,12 @@ ENDIF()
 # Specify the C++ version we are building for.
 SET(CMAKE_CXX_STANDARD 11)
 SET(CMAKE_CUDA_STANDARD 11)
-SET(CMAKE_CUDA_ARCHITECTURES "35;52;89")
+# sm_89 (Ada Lovelace) requires CUDA >= 11.8
+IF(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
+    SET(CMAKE_CUDA_ARCHITECTURES "35;52;89")
+ELSE()
+    SET(CMAKE_CUDA_ARCHITECTURES "35;52")
+ENDIF()
 
 # Set flags for linking on mac
 IF(APPLE)
