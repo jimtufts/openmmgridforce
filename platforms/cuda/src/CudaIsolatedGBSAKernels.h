@@ -81,6 +81,7 @@ private:
     OpenMM::CudaArray receptorRadii;
     OpenMM::CudaArray receptorScaleFactors;
     OpenMM::CudaArray receptorCharges;
+    OpenMM::CudaArray recBlockBounds;     // float4 array: (cx, cy, cz, radius) per 32-atom block
 
     // Device arrays - receptor desolvation (for PAIRWISE mode)
     OpenMM::CudaArray receptorSelfHCT;          // [N_rec] - receptor-receptor HCT (constant, float)
@@ -91,12 +92,20 @@ private:
     OpenMM::CudaArray receptorBornRadii;        // [K * N_rec] - per-group Born radii with ligand
     OpenMM::CudaArray receptorEnergy;           // [K] - per-group receptor energy working buffer
     OpenMM::CudaArray receptorDeDR;             // [K * N_rec] - per-group dE/dR_born for receptor atoms
+    OpenMM::CudaArray receptorBornForces;       // [K * N_rec] - precomputed bornForces per receptor per group
+    OpenMM::CudaArray dEdR_crossTerm;           // [totalParticles] - fixed-point dE_cross/dR_born_lig
+    OpenMM::CudaArray bornForceLig;             // [totalParticles] - precomputed bornForce for ligand atoms
     OpenMM::CudaArray isActiveRecAtom;           // [K * N_rec] - per-group int mask: 1=active, 0=inactive
     bool fusedHCTComputed_;                       // true if fused kernel already computed ligandToReceptorHCT
 
     // Fixed-point accumulators for tiled HCT kernel
     OpenMM::CudaArray hctReceptorFixed;             // [totalParticles] - fixed-point receptor→ligand HCT
     OpenMM::CudaArray ligToRecHCTFixed;             // [K * N_rec] - fixed-point ligand→receptor HCT
+
+    // Tile-skip cache (locality cutoff optimization)
+    OpenMM::CudaArray hctRecBlockCache;             // [totalParticles * numRecBlocks] - per-block rec→lig HCT
+    OpenMM::CudaArray ligToRecHCTCache;             // [K * N_rec] - cached lig→rec HCT
+    bool hasTileCache;                              // true after first call builds cache
     bool localityMaskValid;                      // true if cached mask is still valid
     int localityMaskAge;                         // number of execute() calls since last mask recompute
 
@@ -131,6 +140,7 @@ private:
     // Alchemical scaling
     float globalScalingFactor;
     OpenMM::CudaArray groupScalingFactorsBuffer;  // Per-group scaling factors [numGroups]
+    std::vector<float> groupScalingFactorsHostCopy;  // Host-side copy for CPU loops
 
     // Device arrays - per-group energies
     OpenMM::CudaArray groupEnergies;              // Total energy
@@ -174,7 +184,12 @@ private:
     CUfunction computeReceptorDeDRSimpleKernel;        // Runtime: compute dE/dR_born for receptors
     CUfunction computeCrossTermGBEnergyKernel;         // Runtime: receptor-ligand GB pairs
     CUfunction computeReceptorDesolvationForcesKernel; // Runtime: forces from receptor desolv (old, slow)
-    CUfunction computeReceptorDesolvationForcesOptimizedKernel; // Runtime: forces with pre-computed dE/dR
+    CUfunction computeReceptorDesolvationForcesOptimizedKernel; // Runtime: forces with pre-computed bornForces
+    CUfunction precomputeReceptorBornForcesKernel;    // Runtime: precompute bornForces per receptor
+    CUfunction computeFusedReceptorForcesKernel;     // Runtime: fused desolv + cross-term forces (legacy)
+    CUfunction computePairwiseGBForceTiledKernel;   // Runtime: tiled pass 1 (cross-term + desolv + dEdR)
+    CUfunction reduceLigandBornForceKernel;          // Runtime: dEdR → bornForceLig
+    CUfunction computePairwiseChainRuleTiledKernel;  // Runtime: tiled pass 2 (chain rule)
     CUfunction computeCrossTermChainRuleForcesKernel;  // Runtime: forces from cross-term chain rule
 
     // Locality cutoff kernels
@@ -191,6 +206,8 @@ private:
     CUfunction computeReceptorLigandHCTParallelKernel; // Runtime: receptor-threaded bidirectional HCT
     CUfunction computeReceptorLigandHCTTiledKernel;   // Runtime: rectangular tiled bidirectional HCT
     CUfunction convertTiledHCTToFloatKernel;           // Convert fixed-point HCT to float
+    CUfunction addDistantHCTFromCacheKernel;          // Reconstruct distant HCT from cache
+    CUfunction restoreDistantLigToRecHCTKernel;       // Restore cached lig→rec HCT for distant atoms
 
     // GPU-side accumulation (eliminate host-device sync)
     CUfunction accumulateDesolvationOnGPUKernel;
@@ -211,8 +228,14 @@ private:
     mutable std::vector<std::vector<float>> groupReceptorBornRadiiHost;  // PAIRWISE mode only
 
     bool skipGroupEnergyDownload_ = false;
+
+    // Profiling
+    bool profilingEnabled_ = true;
+    int profilingCallCount_ = 0;
+    static constexpr int PROFILE_CALLS = 3;
 public:
     void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
+    void enableProfiling(bool enable) { profilingEnabled_ = enable; }
     void* getGroupEnergyDevicePointer() override {
         return groupEnergies.isInitialized()
             ? (void*)groupEnergies.getDevicePointer() : nullptr;

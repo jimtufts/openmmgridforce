@@ -753,7 +753,11 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
     float cutoffDistance,
     unsigned long long* __restrict__ global_hctReceptor,  // fixed-point accumulator
     unsigned long long* __restrict__ global_ligToRecHCT, // fixed-point accumulator [K * N_rec]
-    int numTilesPerGroup
+    int numTilesPerGroup,
+    const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius) or NULL
+    float localityCutoff,                             // tile-skip cutoff (-1 = no skip)
+    float* __restrict__ hctRecBlockCache,             // [totalParticles * numRecBlocks] or NULL
+    int numRecBlocks                                  // for cache indexing
 ) {
     const int tgx = threadIdx.x & (TILE_SIZE - 1);
     const int tbx = threadIdx.x - tgx;
@@ -819,6 +823,23 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
         sLigHCT[tbx + tgx] = 0.0f;
         __syncwarp();
 
+        // Tile-skip: check if any ligand atom in this tile is close to this receptor block
+        bool useTileSkip = (localityCutoff > 0.0f && recBlockBounds != NULL);
+        if (useTileSkip) {
+            float4 bounds = recBlockBounds[recBlock];
+            float threshold = localityCutoff + bounds.w;
+            float threshold2 = threshold * threshold;
+            bool anyClose = false;
+            int nInTile = min(TILE_SIZE, groupSize - ligBlock * TILE_SIZE);
+            for (int i = 0; i < nInTile && !anyClose; i++) {
+                float dx = sLigPos[tbx + i].x - bounds.x;
+                float dy = sLigPos[tbx + i].y - bounds.y;
+                float dz = sLigPos[tbx + i].z - bounds.z;
+                if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
+            }
+            if (!anyClose) continue;  // skip this tile
+        }
+
         // Accumulate receptor-side HCT in register
         float recHCT = 0.0f;
 
@@ -880,10 +901,104 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
         }
 
         // Ligand-side: write accumulated HCT from shared memory
-        if (validLig && sLigHCT[tbx + tgx] != 0.0f) {
+        float ligHCTVal = sLigHCT[tbx + tgx];
+        if (validLig && ligHCTVal != 0.0f) {
             atomicAdd(&global_hctReceptor[ligGlobalIdx],
-                      (unsigned long long)(long long)(sLigHCT[tbx + tgx] * 0x100000000));
+                      (unsigned long long)(long long)(ligHCTVal * 0x100000000));
         }
+
+        // Write per-block cache for receptor→ligand direction
+        if (hctRecBlockCache != NULL && validLig) {
+            hctRecBlockCache[ligGlobalIdx * numRecBlocks + recBlock] = ligHCTVal;
+        }
+    }
+}
+
+/**
+ * Add cached HCT values for distant receptor blocks (receptor→ligand direction).
+ * After a tile-skipped tiled HCT, distant blocks contributed zero. This kernel
+ * adds the cached per-block partial sums for blocks that were skipped.
+ */
+extern "C" __global__ void addDistantHCTFromCache(
+    const float* __restrict__ hctRecBlockCache,  // [totalParticles * numRecBlocks]
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float4* __restrict__ recBlockBounds,   // [numRecBlocks]
+    float localityCutoff,
+    int numRecBlocks,
+    int totalParticles,
+    unsigned long long* __restrict__ global_hctReceptor  // fixed-point accumulator to add to
+) {
+    int ligIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ligIdx >= totalParticles) return;
+
+    int particleIdx = particleIndices[ligIdx];
+    float4 p = posq[particleIdx];
+
+    float cachedSum = 0.0f;
+    for (int b = 0; b < numRecBlocks; b++) {
+        float4 bounds = recBlockBounds[b];
+        float threshold = localityCutoff + bounds.w;
+        float dx = p.x - bounds.x;
+        float dy = p.y - bounds.y;
+        float dz = p.z - bounds.z;
+        if (dx*dx + dy*dy + dz*dz >= threshold * threshold) {
+            // Block was distant (skipped by tiled kernel) → add cached value
+            cachedSum += hctRecBlockCache[ligIdx * numRecBlocks + b];
+        }
+    }
+
+    if (cachedSum != 0.0f) {
+        atomicAdd(&global_hctReceptor[ligIdx],
+                  (unsigned long long)(long long)(cachedSum * 0x100000000));
+    }
+}
+
+/**
+ * Restore cached ligand→receptor HCT for distant receptor atoms.
+ * After tile-skipped HCT, distant receptor atoms got zero contribution.
+ * This kernel replaces zero with the cached full value for distant atoms.
+ */
+extern "C" __global__ void restoreDistantLigToRecHCT(
+    const float* __restrict__ ligToRecHCTCache,  // [K * N_rec] cached values
+    float* __restrict__ ligandToReceptorHCT,     // [K * N_rec] current (post-conversion)
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float4* __restrict__ recBlockBounds,
+    float localityCutoff,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int numReceptorAtoms,
+    int totalParticles
+) {
+    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalWork = numGroups * numReceptorAtoms;
+    if (globalIdx >= totalWork) return;
+
+    int groupIdx = globalIdx / numReceptorAtoms;
+    int recIdx = globalIdx % numReceptorAtoms;
+    int recBlock = recIdx / TILE_SIZE;
+
+    float4 bounds = recBlockBounds[recBlock];
+    float threshold = localityCutoff + bounds.w;
+    float threshold2 = threshold * threshold;
+
+    // Check if ANY ligand atom in this group is near this block
+    int gs = groupStart[groupIdx];
+    int ge = groupStart[groupIdx + 1];
+    bool anyClose = false;
+    for (int li = gs; li < ge && !anyClose; li++) {
+        int particleIdx = particleIndices[li];
+        float4 p = posq[particleIdx];
+        float dx = p.x - bounds.x;
+        float dy = p.y - bounds.y;
+        float dz = p.z - bounds.z;
+        if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
+    }
+
+    if (!anyClose) {
+        // Block was distant → restore cached value
+        ligandToReceptorHCT[globalIdx] = ligToRecHCTCache[globalIdx];
     }
 }
 
@@ -2992,11 +3107,289 @@ extern "C" __global__ void computeReceptorDesolvationForces(
  * This reduces each ligand thread from O(N_rec²) to O(N_rec) work.
  */
 /**
- * Compute forces on ligand from receptor desolvation.
- * Uses pre-computed dE/dR_born for receptor atoms.
+ * Precompute bornForces for each receptor atom per group.
+ * bornForces = dE/dR_born * R_born^2 * obcChain
  *
- * singleGroupIdx: if >= 0, only process atoms from this group.
- *                 if < 0, process all groups (legacy behavior).
+ * This extracts the expensive OBC chain rule (tanh + sech²) computation
+ * from the per-pair force loop, where it was redundantly computed for
+ * every ligand-receptor pair even though it only depends on the receptor atom.
+ *
+ * Output: bornForcesRec[groupIdx * numReceptorAtoms + recIdx]
+ */
+extern "C" __global__ void precomputeReceptorBornForces(
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorSelfHCT,
+    const float* __restrict__ ligandToReceptorHCT,
+    const float* __restrict__ receptorBornRadii,
+    const float* __restrict__ receptorDeDR,
+    int numReceptorAtoms,
+    int numGroups,
+    float* __restrict__ bornForcesRec,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
+) {
+    int totalWork = numGroups * numReceptorAtoms;
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
+
+        int groupIdx = globalIdx / numReceptorAtoms;
+        int recIdx = globalIdx % numReceptorAtoms;
+        int gOffset = groupIdx * numReceptorAtoms + recIdx;
+
+        // Skip zero-scaled groups (low alpha)
+        float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+        if (scale < 0.05f) {
+            bornForcesRec[gOffset] = 0.0f;
+            continue;
+        }
+
+        float R_rec = receptorRadii[recIdx];
+        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        float bornR_rec = receptorBornRadii[gOffset];
+        float dEdR_rec = receptorDeDR[gOffset];
+
+        float hctTotal = receptorSelfHCT[recIdx] + ligandToReceptorHCT[gOffset];
+        float psi = 0.5f * R_rec_off * hctTotal;
+        float psi2 = psi * psi;
+
+        float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+        float tanhVal = tanhf(tanhArg);
+        float sech2 = 1.0f - tanhVal * tanhVal;
+        float dTanhArgDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+
+        float obcChain = R_rec_off * dTanhArgDPsi * sech2 / R_rec;
+        bornForcesRec[gOffset] = dEdR_rec * bornR_rec * bornR_rec * obcChain;
+    }
+}
+
+/**
+ * Fused receptor force kernel: desolvation + cross-term chain rule in TWO passes.
+ *
+ * Pass 1: iterate N_rec once per ligand atom, computing:
+ *   - Desolvation force (HCT gradient × precomputed bornForcesRec)
+ *   - dE_cross/dR_born_lig accumulation (Still equation derivative)
+ *
+ * Between passes: compute bornForces_lig from dEdR_lig (tanh, once per ligand atom)
+ *
+ * Pass 2: iterate N_rec again, computing:
+ *   - Cross-term chain rule force (HCT gradient × bornForces_lig)
+ *   - Ligand-ligand chain rule (N_lig iterations, tiny)
+ *
+ * Replaces: computeReceptorDesolvationForcesOptimized + computeCrossTermChainRuleForces
+ */
+extern "C" __global__ void computeFusedReceptorForces(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ ligandRadii,
+    const float* __restrict__ ligandScaleFactors,
+    const float* __restrict__ ligandCharges,
+    const float* __restrict__ ligandBornRadii,
+    const float* __restrict__ hctReceptor,
+    const float* __restrict__ hctLigand,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScaleFactors,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,    // [K * N_rec]
+    const float* __restrict__ bornForcesRec,        // [K * N_rec] precomputed
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int numReceptorAtoms,
+    int templateNumAtoms,
+    float prefactor,
+    float cutoffDistance,
+    unsigned long long* __restrict__ forceBuffer,
+    int paddedNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int groupIdx = 0;
+    int atomInGroup = idx;
+    int groupStartIdx = 0;
+    int groupEndIdx = 0;
+
+    for (int g = 0; g < numGroups; g++) {
+        groupStartIdx = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            groupIdx = g;
+            atomInGroup = idx - groupStartIdx;
+            break;
+        }
+    }
+    if (idx >= groupEndIdx) return;
+
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+    int particleIdx_lig = particleIndices[idx];
+    int templateIdx_lig = atomInGroup % templateNumAtoms;
+
+    float4 pos_lig = posq[particleIdx_lig];
+    float R_lig = ligandRadii[templateIdx_lig];
+    float R_lig_off = R_lig - DIELECTRIC_OFFSET;
+    float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
+    float q_lig = ligandCharges[templateIdx_lig];
+    float bornR_lig = ligandBornRadii[idx];
+
+    float3 force_lig = make_float3(0.0f, 0.0f, 0.0f);
+    float cutoff2 = cutoffDistance * cutoffDistance;
+    bool useCutoff = (cutoffDistance > 0.0f);
+    const float MIN_R2 = 0.01f;
+
+    // ===== PASS 1: Desolvation forces + dE_cross/dR_born_lig =====
+    float dEdR_lig = 0.0f;
+
+    for (int recIdx = 0; recIdx < numReceptorAtoms; recIdx++) {
+        float3 pos_rec = receptorPositions[recIdx];
+        float dx = pos_rec.x - pos_lig.x;
+        float dy = pos_rec.y - pos_lig.y;
+        float dz = pos_rec.z - pos_lig.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+
+        if (useCutoff && r2 > cutoff2) continue;
+        if (r2 < MIN_R2) continue;
+
+        float invR = rsqrtf(r2);
+        float r = r2 * invR;
+
+        float R_rec_off = receptorRadii[recIdx] - DIELECTRIC_OFFSET;
+
+        // --- Desolvation force: ligand screens receptor ---
+        float r_plus_Slig = r + S_lig;
+        if (R_rec_off < r_plus_Slig) {
+            float r_minus_Slig = fabsf(r - S_lig);
+            float l = (R_rec_off > r_minus_Slig) ? (1.0f/R_rec_off) : (1.0f/r_minus_Slig);
+            float u = 1.0f / r_plus_Slig;
+            float l2 = l*l, u2 = u*u;
+            float r2_inv = invR * invR;
+
+            float t3 = 0.125f * (1.0f + S_lig*S_lig*r2_inv) * (l2 - u2)
+                     + 0.25f * logf(u/l) * r2_inv;
+
+            float de = bornForcesRec[groupIdx * numReceptorAtoms + recIdx] * t3 * invR * scale;
+            force_lig.x -= de * dx;
+            force_lig.y -= de * dy;
+            force_lig.z -= de * dz;
+        }
+
+        // --- Cross-term: dE_cross/dR_born_lig accumulation ---
+        float R_rec_born = receptorBornRadii[groupIdx * numReceptorAtoms + recIdx];
+        float q_rec = receptorCharges[recIdx];
+        float RiRj = bornR_lig * R_rec_born;
+        float expArg = -r2 / (4.0f * RiRj);
+        float expTerm = expf(expArg);
+        float f_gb2 = r2 + RiRj * expTerm;
+        float f_gb = sqrtf(f_gb2);
+        float dFgbDRlig = (R_rec_born * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+        dEdR_lig += -prefactor * q_lig * q_rec / (f_gb * f_gb) * dFgbDRlig;
+    }
+
+    // ===== Between passes: compute bornForces_lig =====
+    float hctTotal_lig = hctReceptor[idx] + hctLigand[idx];
+    float psi = 0.5f * R_lig_off * hctTotal_lig;
+    float psi2 = psi * psi;
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+    float tanhVal = tanhf(tanhArg);
+    float sech2 = 1.0f - tanhVal * tanhVal;
+    float dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    float obcChain = R_lig_off * dTanhDPsi * sech2 / R_lig;
+    float bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain * scale;
+
+    // ===== PASS 2: Cross-term chain rule forces =====
+
+    // Part A: receptor→ligand HCT gradient (receptor screens this ligand)
+    for (int recIdx = 0; recIdx < numReceptorAtoms; recIdx++) {
+        float3 pos_rec = receptorPositions[recIdx];
+        float R_rec = receptorRadii[recIdx];
+        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        float S_rec = R_rec_off * receptorScaleFactors[recIdx];
+
+        float dx = pos_lig.x - pos_rec.x;
+        float dy = pos_lig.y - pos_rec.y;
+        float dz = pos_lig.z - pos_rec.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+
+        if (useCutoff && r2 > cutoff2) continue;
+
+        float invR = rsqrtf(r2);
+        float r = r2 * invR;
+        if (r < 1e-6f) continue;
+
+        float r_plus_Srec = r + S_rec;
+        if (R_lig_off >= r_plus_Srec) continue;
+
+        float r_minus_Srec = fabsf(r - S_rec);
+        float l = (R_lig_off > r_minus_Srec) ? (1.0f/R_lig_off) : (1.0f/r_minus_Srec);
+        float u = 1.0f / r_plus_Srec;
+        float l2 = l*l, u2 = u*u;
+        float r2_inv = invR * invR;
+
+        float t3 = 0.125f * (1.0f + S_rec*S_rec*r2_inv) * (l2 - u2)
+                 + 0.25f * logf(u/l) * r2_inv;
+
+        float de = bornForces_lig * t3 * invR;
+        force_lig.x += de * dx;
+        force_lig.y += de * dy;
+        force_lig.z += de * dz;
+    }
+
+    // Part B: ligand-ligand HCT gradient (other ligand atoms screening this one)
+    int groupSize = groupEndIdx - groupStartIdx;
+    for (int jLocal = 0; jLocal < groupSize; jLocal++) {
+        if (jLocal == atomInGroup) continue;
+        int j = groupStartIdx + jLocal;
+        int templateIdx_j = jLocal % templateNumAtoms;
+        int particleIdx_j = particleIndices[j];
+
+        float4 pos_j = posq[particleIdx_j];
+        float R_j = ligandRadii[templateIdx_j];
+        float R_j_off = R_j - DIELECTRIC_OFFSET;
+        float S_j = R_j_off * ligandScaleFactors[templateIdx_j];
+
+        float dx = pos_lig.x - pos_j.x;
+        float dy = pos_lig.y - pos_j.y;
+        float dz = pos_lig.z - pos_j.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+
+        if (useCutoff && r2 > cutoff2) continue;
+        float invR = rsqrtf(r2);
+        float r = r2 * invR;
+        if (r < 1e-6f) continue;
+
+        float r_plus_Sj = r + S_j;
+        if (R_lig_off >= r_plus_Sj) continue;
+
+        float r_minus_Sj = fabsf(r - S_j);
+        float l = (R_lig_off > r_minus_Sj) ? (1.0f/R_lig_off) : (1.0f/r_minus_Sj);
+        float u = 1.0f / r_plus_Sj;
+        float l2 = l*l, u2 = u*u;
+        float r2_inv = invR * invR;
+
+        float t3 = 0.125f * (1.0f + S_j*S_j*r2_inv) * (l2 - u2)
+                 + 0.25f * logf(u/l) * r2_inv;
+
+        float de = bornForces_lig * t3 * invR;
+        force_lig.x += de * dx;
+        force_lig.y += de * dy;
+        force_lig.z += de * dz;
+
+        // Newton's 3rd law on the screening atom
+        atomicAdd(&forceBuffer[particleIdx_j], static_cast<unsigned long long>((long long)(-de * dx * 0x100000000)));
+        atomicAdd(&forceBuffer[particleIdx_j + paddedNumAtoms], static_cast<unsigned long long>((long long)(-de * dy * 0x100000000)));
+        atomicAdd(&forceBuffer[particleIdx_j + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(-de * dz * 0x100000000)));
+    }
+
+    // Write accumulated force
+    atomicAdd(&forceBuffer[particleIdx_lig], static_cast<unsigned long long>((long long)(force_lig.x * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx_lig + paddedNumAtoms], static_cast<unsigned long long>((long long)(force_lig.y * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx_lig + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force_lig.z * 0x100000000)));
+}
+
+/**
+ * Compute forces on ligand from receptor desolvation (legacy, kept for fallback).
+ * Uses pre-computed bornForces per receptor atom (no OBC chain rule in inner loop).
  */
 extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     const float4* __restrict__ posq,
@@ -3005,10 +3398,7 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     const float* __restrict__ ligandScaleFactors,
     const float3* __restrict__ receptorPositions,
     const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorSelfHCT,
-    const float* __restrict__ ligandToReceptorHCT,
-    const float* __restrict__ receptorBornRadii,
-    const float* __restrict__ receptorDeDR,
+    const float* __restrict__ bornForcesRec,  // Pre-computed: dE/dR * R²_born * obcChain
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
@@ -3053,7 +3443,7 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
-    // For each receptor atom, compute force contribution using pre-computed dE/dR
+    // Desolvation force: each ligand atom loops over receptor atoms
     for (int recIdx = 0; recIdx < numReceptorAtoms; recIdx++) {
         float3 pos_rec = receptorPositions[recIdx];
         float R_rec = receptorRadii[recIdx];
@@ -3070,7 +3460,6 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
         float r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        // Check if ligand screens this receptor atom
         float r_plus_Slig = r + S_lig;
         if (R_rec_off >= r_plus_Slig) continue;
 
@@ -3078,42 +3467,17 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
         float l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
         float u_ij = 1.0f / r_plus_Slig;
 
-        // Use pre-computed per-group dE/dR_born_rec
-        float dEdR_rec = receptorDeDR[groupIdx * numReceptorAtoms + recIdx];
+        float bf = bornForcesRec[groupIdx * numReceptorAtoms + recIdx];
 
-        // OBC chain rule: dR_born/dHCT
-        float bornR_rec = receptorBornRadii[groupIdx * numReceptorAtoms + recIdx];
-        float hctTotal_rec = receptorSelfHCT[recIdx] + ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx];
-        float psi_rec = 0.5f * R_rec_off * hctTotal_rec;
-        float psi2_rec = psi_rec * psi_rec;
+        float l2 = l_ij * l_ij;
+        float u2 = u_ij * u_ij;
+        float r2_inv = invR * invR;
 
-        float tanhArg_rec = OBC_ALPHA * psi_rec - OBC_BETA * psi2_rec + OBC_GAMMA * psi2_rec * psi_rec;
-        float tanhVal_rec = tanhf(tanhArg_rec);
-        float sech2_rec = 1.0f - tanhVal_rec * tanhVal_rec;
-        float dTanhArgDPsi_rec = OBC_ALPHA - 2.0f * OBC_BETA * psi_rec + 3.0f * OBC_GAMMA * psi2_rec;
-
-        // obcChain = R_off * (dTanhArg/dPsi) * sech² / R
-        float obcChain_rec = R_rec_off * dTanhArgDPsi_rec * sech2_rec / R_rec;
-
-        // bornForces = dE/dR_born * R_born² * obcChain
-        float bornForces_rec = dEdR_rec * bornR_rec * bornR_rec * obcChain_rec;
-
-        // HCT gradient: OpenMM simplified formula
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float S_lig2 = S_lig * S_lig;
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
-
-        float t3 = 0.125f * (1.0f + S_lig2 * r2_inv) * (l_ij2 - u_ij2)
+        float t3 = 0.125f * (1.0f + S_lig * S_lig * r2_inv) * (l2 - u2)
                  + 0.25f * logf(u_ij / l_ij) * r2_inv;
 
-        float de = bornForces_rec * t3 * r_inv * scale;
+        float de = bf * t3 * invR * scale;
 
-        // Force on ligand (the screening atom)
-        // The ligand screens the receptor, so by Newton's 3rd law the force on ligand
-        // is opposite to what would be on the receptor. This is analogous to force_j
-        // in the ligand-ligand HCT chain rule, which uses -= not +=.
         force_lig.x -= de * dx;
         force_lig.y -= de * dy;
         force_lig.z -= de * dz;
@@ -3981,5 +4345,413 @@ extern "C" __global__ void computeReceptorDeDRActive(
         }
 
         receptorDeDR[groupIdx * numReceptorAtoms + i] = dEdR;
+    }
+}
+
+// =============================================================================
+// TILED FORCE KERNELS (matching OpenMM architecture)
+// =============================================================================
+
+/**
+ * Tiled pass 1: Cross-term energy + direct forces + dE/dR_born_lig + desolvation chain rule.
+ *
+ * Each warp processes one receptor block (32 atoms) against ALL ligand atoms
+ * for one group. Ligand data loaded into shared memory once per warp.
+ *
+ * Fuses: computeCrossTermGBEnergy + computeFusedReceptorForces pass 1
+ * into a SINGLE pass of N_rec per group.
+ *
+ * Output:
+ *   forceBuffer: cross-term direct forces + desolvation chain rule forces on ligand
+ *   crossTermEnergies[groupIdx]: cross-term energy per group
+ *   dEdR_crossTerm[ligGlobalIdx]: accumulated dE_cross/dR_born_lig (fixed-point)
+ */
+extern "C" __global__ void computePairwiseGBForceTiled(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ ligandRadii,
+    const float* __restrict__ ligandScaleFactors,
+    const float* __restrict__ ligandCharges,
+    const float* __restrict__ ligandBornRadii,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScaleFactors,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,      // [K * N_rec]
+    const float* __restrict__ bornForcesRec,          // [K * N_rec] precomputed
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int numReceptorAtoms,
+    int templateNumAtoms,
+    float prefactor,
+    float cutoffDistance,
+    unsigned long long* __restrict__ forceBuffer,
+    int paddedNumAtoms,
+    float* __restrict__ crossTermEnergies,            // [numGroups]
+    unsigned long long* __restrict__ dEdR_crossTerm,  // [totalParticles] fixed-point
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    int numRecBlocks,
+    const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius)
+    float localityCutoff                              // tile-skip cutoff (-1 = no skip)
+) {
+    // Max ligand atoms in shared memory
+    const int MAX_LIG = 64;
+
+    // Shared memory: ligand data for this warp's group
+    __shared__ float3 sLigPos[MAX_LIG * 8];        // 8 warps per block
+    __shared__ float sLigCharge[MAX_LIG * 8];
+    __shared__ float sLigBornR[MAX_LIG * 8];
+    __shared__ float sLigR_off[MAX_LIG * 8];
+    __shared__ float sLigS[MAX_LIG * 8];
+
+    const int tgx = threadIdx.x & (TILE_SIZE - 1);
+    const int warpInBlock = threadIdx.x / TILE_SIZE;
+    const int sBase = warpInBlock * MAX_LIG;
+
+    const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / TILE_SIZE;
+    const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
+
+    int totalTiles = numGroups * numRecBlocks;
+    float cutoff2 = cutoffDistance * cutoffDistance;
+    bool useCutoff = (cutoffDistance > 0.0f);
+    bool useTileSkip = (localityCutoff > 0.0f);
+    const float MIN_R2 = 0.01f;
+
+    for (int tileIdx = warp; tileIdx < totalTiles; tileIdx += totalWarps) {
+        int groupIdx = tileIdx / numRecBlocks;
+        int recBlock = tileIdx % numRecBlocks;
+
+        float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+        if (scale < 0.05f) continue;  // skip zero-scaled groups
+
+        int gs = groupStart[groupIdx];
+        int ge = groupStart[groupIdx + 1];
+        int groupSize = ge - gs;
+        int nLig = (groupSize < MAX_LIG) ? groupSize : MAX_LIG;
+
+        // Cooperative load: ligand atoms into shared memory
+        for (int i = tgx; i < nLig; i += TILE_SIZE) {
+            int ligGlobal = gs + i;
+            int particleIdx = particleIndices[ligGlobal];
+            int templateIdx = i % templateNumAtoms;
+            float4 p = posq[particleIdx];
+            sLigPos[sBase + i] = make_float3(p.x, p.y, p.z);
+            sLigCharge[sBase + i] = ligandCharges[templateIdx];
+            sLigBornR[sBase + i] = ligandBornRadii[ligGlobal];
+            float R = ligandRadii[templateIdx];
+            sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
+            sLigS[sBase + i] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
+        }
+        __syncwarp();
+
+        // Tile-skip: check if any ligand atom is close enough to this receptor block
+        if (useTileSkip) {
+            float4 bounds = recBlockBounds[recBlock];  // (cx, cy, cz, radius)
+            float threshold = localityCutoff + bounds.w;
+            float threshold2 = threshold * threshold;
+            bool anyClose = false;
+            for (int i = 0; i < nLig && !anyClose; i++) {
+                float dx = sLigPos[sBase + i].x - bounds.x;
+                float dy = sLigPos[sBase + i].y - bounds.y;
+                float dz = sLigPos[sBase + i].z - bounds.z;
+                if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
+            }
+            if (!anyClose) continue;  // skip this tile entirely
+        }
+
+        // Load receptor atom for this thread
+        int recIdx = recBlock * TILE_SIZE + tgx;
+        bool validRec = (recIdx < numReceptorAtoms);
+
+        float3 recPos = make_float3(0, 0, 0);
+        float recR = 0.1f, recR_off = 0.1f, recS = 0.1f;
+        float recQ = 0.0f, recBornR = 1.0f, recBF = 0.0f;
+
+        if (validRec) {
+            recPos = receptorPositions[recIdx];
+            recR = receptorRadii[recIdx];
+            recR_off = recR - DIELECTRIC_OFFSET;
+            recS = recR_off * receptorScaleFactors[recIdx];
+            recQ = receptorCharges[recIdx];
+            recBornR = receptorBornRadii[groupIdx * numReceptorAtoms + recIdx];
+            recBF = bornForcesRec[groupIdx * numReceptorAtoms + recIdx];
+        }
+
+        // Accumulate per-receptor-atom contributions
+        float3 recForceOnLig = make_float3(0, 0, 0);
+        float crossEnergy = 0.0f;
+
+        // Iterate over all ligand atoms from shared memory
+        for (int li = 0; li < nLig; li++) {
+            float3 lPos = sLigPos[sBase + li];
+            float lQ = sLigCharge[sBase + li];
+            float lBornR = sLigBornR[sBase + li];
+            float lR_off = sLigR_off[sBase + li];
+            float lS = sLigS[sBase + li];
+
+            float dx = recPos.x - lPos.x;
+            float dy = recPos.y - lPos.y;
+            float dz = recPos.z - lPos.z;
+            float r2 = dx*dx + dy*dy + dz*dz;
+
+            if (useCutoff && r2 > cutoff2) continue;
+            if (r2 < MIN_R2) continue;
+
+            float invR = rsqrtf(r2);
+            float r = r2 * invR;
+
+            // === Cross-term Still equation: energy + direct force ===
+            float RiRj = lBornR * recBornR;
+            float expArg = -r2 / (4.0f * RiRj);
+            float expTerm = expf(expArg);
+            float f_gb2 = r2 + RiRj * expTerm;
+            float f_gb = sqrtf(f_gb2);
+            float invFgb = 1.0f / f_gb;
+
+            float pairEnergy = prefactor * lQ * recQ * invFgb;
+            crossEnergy += pairEnergy;
+
+            // Direct force on ligand
+            float dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
+            float dEdR_direct = -prefactor * lQ * recQ * invFgb * invFgb * dFgbDr * scale;
+            // Force direction: rec → lig = (dx, dy, dz), force on lig
+            float fx = dEdR_direct * dx * invR;
+            float fy = dEdR_direct * dy * invR;
+            float fz = dEdR_direct * dz * invR;
+
+            // === dE_cross/dR_born_lig accumulation ===
+            float dFgbDRlig = (recBornR * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+            float dEdR_lig = -prefactor * lQ * recQ * invFgb * invFgb * dFgbDRlig;
+
+            // === Desolvation chain rule: ligand screens receptor ===
+            float r_plus_Slig = r + lS;
+            if (recR_off < r_plus_Slig) {
+                float r_minus_Slig = fabsf(r - lS);
+                float l = (recR_off > r_minus_Slig) ? (1.0f/recR_off) : (1.0f/r_minus_Slig);
+                float u = 1.0f / r_plus_Slig;
+                float l2 = l*l, u2 = u*u;
+                float r2_inv = invR * invR;
+
+                float t3 = 0.125f * (1.0f + lS*lS*r2_inv) * (l2 - u2)
+                         + 0.25f * logf(u/l) * r2_inv;
+
+                float de_desolv = recBF * t3 * invR * scale;
+                fx -= de_desolv * dx;
+                fy -= de_desolv * dy;
+                fz -= de_desolv * dz;
+            }
+
+            // Write forces on ligand atom via atomicAdd
+            int ligGlobal = gs + li;
+            int ligParticle = particleIndices[ligGlobal];
+            atomicAdd(&forceBuffer[ligParticle], static_cast<unsigned long long>((long long)(fx * 0x100000000)));
+            atomicAdd(&forceBuffer[ligParticle + paddedNumAtoms], static_cast<unsigned long long>((long long)(fy * 0x100000000)));
+            atomicAdd(&forceBuffer[ligParticle + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(fz * 0x100000000)));
+
+            // Accumulate dE/dR_born_lig via fixed-point atomicAdd
+            atomicAdd(&dEdR_crossTerm[ligGlobal], static_cast<unsigned long long>((long long)(dEdR_lig * 0x100000000)));
+        }
+
+        // Write cross-term energy (per-group, scaled)
+        if (validRec) {
+            atomicAdd(&crossTermEnergies[groupIdx], crossEnergy * scale);
+        }
+
+        __syncwarp();
+    }
+}
+
+/**
+ * Reduce dE/dR_born_lig to bornForce_lig for each ligand atom.
+ * bornForce_lig = dE/dR * R_born^2 * obcChain * scale
+ */
+extern "C" __global__ void reduceLigandBornForce(
+    const unsigned long long* __restrict__ dEdR_crossTerm,  // fixed-point
+    const float* __restrict__ ligandBornRadii,
+    const float* __restrict__ hctReceptor,
+    const float* __restrict__ hctLigand,
+    const float* __restrict__ ligandRadii,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int totalParticles,
+    int templateNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ bornForceLig   // output [totalParticles]
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= totalParticles) return;
+
+    // Determine group and template
+    int atomInGroup = idx;
+    int groupIdx = 0;
+    for (int g = 0; g < numGroups; g++) {
+        int gs = groupStart[g];
+        int ge = groupStart[g + 1];
+        if (idx >= gs && idx < ge) {
+            atomInGroup = idx - gs;
+            groupIdx = g;
+            break;
+        }
+    }
+    int templateIdx = atomInGroup % templateNumAtoms;
+
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+
+    // Convert fixed-point dE/dR to float
+    float dEdR_lig = (float)((long long)dEdR_crossTerm[idx] / (double)0x100000000);
+
+    // OBC chain rule
+    float R = ligandRadii[templateIdx];
+    float R_off = R - DIELECTRIC_OFFSET;
+    float bornR = ligandBornRadii[idx];
+    float hctTotal = hctReceptor[idx] + hctLigand[idx];
+    float psi = 0.5f * R_off * hctTotal;
+    float psi2 = psi * psi;
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+    float tanhVal = tanhf(tanhArg);
+    float sech2 = 1.0f - tanhVal * tanhVal;
+    float dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    float obcChain = R_off * dTanhDPsi * sech2 / R;
+
+    bornForceLig[idx] = dEdR_lig * bornR * bornR * obcChain * scale;
+}
+
+/**
+ * Tiled pass 2: Cross-term HCT chain rule forces.
+ * Uses precomputed bornForceLig from reduceLigandBornForce.
+ *
+ * For each (receptor, ligand) pair where receptor screens ligand:
+ *   force_lig += bornForceLig * t3(r, S_rec, R_lig_off) * (dx/r)
+ *
+ * Same tile structure as pass 1.
+ */
+extern "C" __global__ void computePairwiseChainRuleTiled(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ ligandRadii,
+    const float* __restrict__ ligandScaleFactors,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScaleFactors,
+    const float* __restrict__ bornForceLig,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int numReceptorAtoms,
+    int templateNumAtoms,
+    float cutoffDistance,
+    unsigned long long* __restrict__ forceBuffer,
+    int paddedNumAtoms,
+    int numRecBlocks,
+    const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius)
+    float localityCutoff                              // tile-skip cutoff (-1 = no skip)
+) {
+    const int MAX_LIG = 64;
+
+    __shared__ float3 sLigPos[MAX_LIG * 8];
+    __shared__ float sLigR_off[MAX_LIG * 8];
+    __shared__ float sLigBF[MAX_LIG * 8];  // bornForceLig per ligand
+
+    const int tgx = threadIdx.x & (TILE_SIZE - 1);
+    const int warpInBlock = threadIdx.x / TILE_SIZE;
+    const int sBase = warpInBlock * MAX_LIG;
+
+    const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / TILE_SIZE;
+    const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
+
+    int totalTiles = numGroups * numRecBlocks;
+    float cutoff2 = cutoffDistance * cutoffDistance;
+    bool useCutoff = (cutoffDistance > 0.0f);
+    bool useTileSkip = (localityCutoff > 0.0f);
+
+    for (int tileIdx = warp; tileIdx < totalTiles; tileIdx += totalWarps) {
+        int groupIdx = tileIdx / numRecBlocks;
+        int recBlock = tileIdx % numRecBlocks;
+
+        int gs = groupStart[groupIdx];
+        int ge = groupStart[groupIdx + 1];
+        int groupSize = ge - gs;
+        int nLig = (groupSize < MAX_LIG) ? groupSize : MAX_LIG;
+
+        // Load ligand data into shared memory
+        for (int i = tgx; i < nLig; i += TILE_SIZE) {
+            int ligGlobal = gs + i;
+            int particleIdx = particleIndices[ligGlobal];
+            int templateIdx = i % templateNumAtoms;
+            float4 p = posq[particleIdx];
+            sLigPos[sBase + i] = make_float3(p.x, p.y, p.z);
+            float R = ligandRadii[templateIdx];
+            sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
+            sLigBF[sBase + i] = bornForceLig[ligGlobal];
+        }
+        __syncwarp();
+
+        // Tile-skip: check if any ligand atom is close enough to this receptor block
+        if (useTileSkip) {
+            float4 bounds = recBlockBounds[recBlock];
+            float threshold = localityCutoff + bounds.w;
+            float threshold2 = threshold * threshold;
+            bool anyClose = false;
+            for (int i = 0; i < nLig && !anyClose; i++) {
+                float dx = sLigPos[sBase + i].x - bounds.x;
+                float dy = sLigPos[sBase + i].y - bounds.y;
+                float dz = sLigPos[sBase + i].z - bounds.z;
+                if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
+            }
+            if (!anyClose) continue;
+        }
+
+        // Load receptor atom
+        int recIdx = recBlock * TILE_SIZE + tgx;
+        bool validRec = (recIdx < numReceptorAtoms);
+        float3 recPos = make_float3(0, 0, 0);
+        float recR_off = 0.1f, recS = 0.1f;
+        if (validRec) {
+            recPos = receptorPositions[recIdx];
+            float R = receptorRadii[recIdx];
+            recR_off = R - DIELECTRIC_OFFSET;
+            recS = recR_off * receptorScaleFactors[recIdx];
+        }
+
+        // Iterate ligand atoms: receptor screens ligand → force on ligand
+        for (int li = 0; li < nLig; li++) {
+            float3 lPos = sLigPos[sBase + li];
+            float lR_off = sLigR_off[sBase + li];
+            float lBF = sLigBF[sBase + li];
+
+            float dx = lPos.x - recPos.x;
+            float dy = lPos.y - recPos.y;
+            float dz = lPos.z - recPos.z;
+            float r2 = dx*dx + dy*dy + dz*dz;
+
+            if (useCutoff && r2 > cutoff2) continue;
+
+            float invR = rsqrtf(r2);
+            float r = r2 * invR;
+            if (r < 1e-6f) continue;
+
+            float r_plus_Srec = r + recS;
+            if (!validRec || lR_off >= r_plus_Srec) continue;
+
+            float r_minus_Srec = fabsf(r - recS);
+            float l = (lR_off > r_minus_Srec) ? (1.0f/lR_off) : (1.0f/r_minus_Srec);
+            float u = 1.0f / r_plus_Srec;
+            float l2 = l*l, u2 = u*u;
+            float r2_inv = invR * invR;
+
+            float t3 = 0.125f * (1.0f + recS*recS*r2_inv) * (l2 - u2)
+                     + 0.25f * logf(u/l) * r2_inv;
+
+            float de = lBF * t3 * invR;
+
+            int ligGlobal = gs + li;
+            int ligParticle = particleIndices[ligGlobal];
+            atomicAdd(&forceBuffer[ligParticle], static_cast<unsigned long long>((long long)(de * dx * 0x100000000)));
+            atomicAdd(&forceBuffer[ligParticle + paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dy * 0x100000000)));
+            atomicAdd(&forceBuffer[ligParticle + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dz * 0x100000000)));
+        }
+
+        __syncwarp();
     }
 }
