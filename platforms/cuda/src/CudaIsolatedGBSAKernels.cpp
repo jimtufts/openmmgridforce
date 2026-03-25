@@ -186,12 +186,10 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         receptorCharges.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorCharges");
         receptorCharges.upload(recCharges);
 
-        // Allocate buffers for receptor desolvation computation
+        // Allocate constant receptor buffers (per-group buffers allocated after groups are known)
         receptorSelfHCT.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorSelfHCT");
         receptorBornRadiiRef.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorBornRadiiRef");
         receptorReferenceEnergy.initialize<float>(cu, 1, "isolatedGbsaReceptorReferenceEnergy");
-        receptorBornRadii.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorBornRadii");
-        receptorEnergy.initialize<float>(cu, 1, "isolatedGbsaReceptorEnergy");
     }
 
     // Process particle groups
@@ -270,9 +268,16 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     groupBornRadiiHost.resize(numParticleGroups);
     groupAtomEnergiesHost.resize(numParticleGroups);
 
-    // Allocate ligand-to-receptor HCT buffer for PAIRWISE mode
+    // Allocate per-group receptor buffers for PAIRWISE mode (now that K is known)
     if (receptorMode == IsolatedGBSAForce::PAIRWISE && numReceptorAtoms > 0) {
         ligandToReceptorHCT.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaLigandToReceptorHCT");
+        receptorBornRadii.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornRadii");
+        receptorEnergy.initialize<float>(cu, numParticleGroups, "isolatedGbsaReceptorEnergy");
+        receptorDeDR.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDR");
+
+        // Fixed-point accumulators for tiled HCT kernel
+        hctReceptorFixed.initialize<unsigned long long>(cu, totalParticles, "hctReceptorFixed");
+        ligToRecHCTFixed.initialize<unsigned long long>(cu, numReceptorAtoms * numParticleGroups, "ligToRecHCTFixed");
     }
 
     // Allocate intermediate result buffers
@@ -300,6 +305,11 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         computeReceptorHCTGradientForceKernel = cu.getKernel(module, "computeIsolatedReceptorHCTGradientForce");
     } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
         computeReceptorHCTPairwiseKernel = cu.getKernel(module, "computeIsolatedReceptorHCTPairwise");
+        computeReceptorHCTPairwiseTiledKernel = cu.getKernel(module, "computeIsolatedReceptorHCTPairwiseTiled");
+        computeFusedReceptorLigandHCTKernel = cu.getKernel(module, "computeFusedReceptorLigandHCT");
+        computeReceptorLigandHCTParallelKernel = cu.getKernel(module, "computeReceptorLigandHCTParallel");
+        computeReceptorLigandHCTTiledKernel = cu.getKernel(module, "computeReceptorLigandHCTTiled");
+        convertTiledHCTToFloatKernel = cu.getKernel(module, "convertTiledHCTToFloat");
         computeReceptorHCTPairwiseChainRuleKernel = cu.getKernel(module, "computeIsolatedReceptorHCTPairwiseChainRule");
 
         // PAIRWISE mode: receptor desolvation kernels (both old and tiled versions)
@@ -325,21 +335,83 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
 
         // Allocate fixed-point buffer for tiled HCT computation
         receptorSelfHCTFixed.initialize<unsigned long long>(cu, numReceptorAtoms, "receptorSelfHCTFixed");
-        // Allocate buffer for pre-computed receptor dE/dR_born
-        receptorDeDR.initialize<float>(cu, numReceptorAtoms, "receptorDeDR");
 
         // Locality cutoff: allocate active atom mask and load kernels
         if (receptorLocalityCutoff > 0.0f) {
-            isActiveRecAtom.initialize<int>(cu, numReceptorAtoms, "isActiveRecAtom");
+            isActiveRecAtom.initialize<int>(cu, numParticleGroups * numReceptorAtoms, "isActiveRecAtom");
             computeActiveReceptorAtomsKernel = cu.getKernel(module, "computeActiveReceptorAtoms");
             computeReceptorEnergyDeltaKernel = cu.getKernel(module, "computeReceptorEnergyDelta");
             computeReceptorDeDRActiveKernel = cu.getKernel(module, "computeReceptorDeDRActive");
 
             // Per-receptor-atom HCT baseline for frozen inactive contributions
+            localityMaskValid = false;
+            localityMaskAge = 0;
+
             hctReceptorPerAtom.initialize<float>(cu, totalParticles * numReceptorAtoms, "hctReceptorPerAtom");
+            hctReceptorBaselineSum.initialize<float>(cu, totalParticles, "hctReceptorBaselineSum");
             hasHctBaseline = false;
             computeReceptorHCTPerAtomKernel = cu.getKernel(module, "computeReceptorHCTPerAtom");
+            computeBaselineHCTSumKernel = cu.getKernel(module, "computeBaselineHCTSum");
             reconstructReceptorHCTKernel = cu.getKernel(module, "reconstructReceptorHCT");
+            reconstructReceptorHCTFastKernel = cu.getKernel(module, "reconstructReceptorHCTFast");
+
+            // Build receptor cell list for spatial neighbor lookup
+            // Cell size = locality cutoff. Each cell contains receptor atoms in that region.
+            const auto& recPos = force.getReceptorPositions();
+            float3 recMin = make_float3(1e30f, 1e30f, 1e30f);
+            float3 recMax = make_float3(-1e30f, -1e30f, -1e30f);
+            for (int i = 0; i < numReceptorAtoms; i++) {
+                float x = static_cast<float>(recPos[i*3]);
+                float y = static_cast<float>(recPos[i*3+1]);
+                float z = static_cast<float>(recPos[i*3+2]);
+                recMin.x = std::min(recMin.x, x); recMax.x = std::max(recMax.x, x);
+                recMin.y = std::min(recMin.y, y); recMax.y = std::max(recMax.y, y);
+                recMin.z = std::min(recMin.z, z); recMax.z = std::max(recMax.z, z);
+            }
+            // Pad by cutoff so ligand atoms near edges still find neighbors
+            float pad = receptorLocalityCutoff;
+            cellOriginX = recMin.x - pad;
+            cellOriginY = recMin.y - pad;
+            cellOriginZ = recMin.z - pad;
+            cellSize = receptorLocalityCutoff;
+            cellNx = std::max(1, (int)ceilf((recMax.x + pad - cellOriginX) / cellSize));
+            cellNy = std::max(1, (int)ceilf((recMax.y + pad - cellOriginY) / cellSize));
+            cellNz = std::max(1, (int)ceilf((recMax.z + pad - cellOriginZ) / cellSize));
+            int numCells = cellNx * cellNy * cellNz;
+
+            // Count atoms per cell
+            std::vector<int> cellCount(numCells, 0);
+            std::vector<int> atomCell(numReceptorAtoms);
+            for (int i = 0; i < numReceptorAtoms; i++) {
+                int cx = std::min(cellNx-1, std::max(0, (int)((recPos[i*3] - cellOriginX) / cellSize)));
+                int cy = std::min(cellNy-1, std::max(0, (int)((recPos[i*3+1] - cellOriginY) / cellSize)));
+                int cz = std::min(cellNz-1, std::max(0, (int)((recPos[i*3+2] - cellOriginZ) / cellSize)));
+                int cell = cx * cellNy * cellNz + cy * cellNz + cz;
+                atomCell[i] = cell;
+                cellCount[cell]++;
+            }
+            // Build cell start array (prefix sum)
+            std::vector<int> cellStartHost(numCells + 1, 0);
+            for (int c = 0; c < numCells; c++)
+                cellStartHost[c + 1] = cellStartHost[c] + cellCount[c];
+            // Build sorted atom index
+            std::vector<int> atomIndexHost(numReceptorAtoms);
+            std::vector<int> cellFill(numCells, 0);
+            for (int i = 0; i < numReceptorAtoms; i++) {
+                int c = atomCell[i];
+                atomIndexHost[cellStartHost[c] + cellFill[c]] = i;
+                cellFill[c]++;
+            }
+            // Upload to GPU
+            cellAtomIndex.initialize<int>(cu, numReceptorAtoms, "cellAtomIndex");
+            cellAtomIndex.upload(atomIndexHost);
+            cellStart.initialize<int>(cu, numCells + 1, "cellStart");
+            cellStart.upload(cellStartHost);
+            hasCellList = true;
+
+            // Load cell-list-based HCT kernel
+            computeReceptorHCTCellListKernel = cu.getKernel(module, "computeIsolatedReceptorHCTCellList");
+            reconstructReceptorHCTCellListKernel = cu.getKernel(module, "reconstructReceptorHCTCellList");
         }
 
         // Compute receptor self-HCT using TILED kernel for O(N²) efficiency
@@ -429,6 +501,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     // Get device pointers
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
+    fusedHCTComputed_ = false;
+
     CUdeviceptr forcePtr = cu.getLongForceBuffer().getDevicePointer();
     CUdeviceptr particleIndicesPtr = particleIndices.getDevicePointer();
     CUdeviceptr radiiPtr = radii.getDevicePointer();
@@ -444,20 +518,30 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     int blockSize = 256;
     int numBlocks = (totalParticles + blockSize - 1) / blockSize;
 
-    // Step 0: Compute active receptor atom mask (if locality cutoff enabled)
-    // Must happen before Step 1 since receptor HCT on ligand also uses the mask
+    // Step 0: Compute per-group active receptor atom masks (if locality cutoff enabled)
+    // Cached across HMC steps within a sweep — recompute periodically.
+    // Within a 200-step HMC trajectory, ligand positions change ~0.01nm per step,
+    // far less than the 2.0nm locality cutoff, so the mask is stable.
     if (receptorMode == IsolatedGBSAForce::PAIRWISE && receptorLocalityCutoff > 0.0f) {
-        CUdeviceptr receptorPosPtr0 = receptorPositions.getDevicePointer();
-        CUdeviceptr isActiveRecAtomPtr0 = isActiveRecAtom.getDevicePointer();
-        float localityCutoff2 = receptorLocalityCutoff * receptorLocalityCutoff;
-        int recBlockSize0 = 256;
-        int recNumBlocks0 = (numReceptorAtoms + recBlockSize0 - 1) / recBlockSize0;
-        void* activeArgs[] = {
-            &posqPtr, &particleIndicesPtr, &receptorPosPtr0,
-            &numReceptorAtoms, &groupStartPtr, &numParticleGroups,
-            &localityCutoff2, &isActiveRecAtomPtr0
-        };
-        cu.executeKernel(computeActiveReceptorAtomsKernel, activeArgs, recNumBlocks0 * recBlockSize0, recBlockSize0);
+        localityMaskAge++;
+        if (!localityMaskValid || localityMaskAge >= 200) {
+            CUdeviceptr receptorPosPtr0 = receptorPositions.getDevicePointer();
+            CUdeviceptr isActiveRecAtomPtr0 = isActiveRecAtom.getDevicePointer();
+            float localityCutoff2 = receptorLocalityCutoff * receptorLocalityCutoff;
+            int recBlockSize0 = 256;
+            int totalMaskWork = numParticleGroups * numReceptorAtoms;
+            int recNumBlocks0 = (totalMaskWork + recBlockSize0 - 1) / recBlockSize0;
+            CUdeviceptr groupScalingFactorsPtr0 = groupScalingFactorsBuffer.getDevicePointer();
+            void* activeArgs[] = {
+                &posqPtr, &particleIndicesPtr, &receptorPosPtr0,
+                &numReceptorAtoms, &groupStartPtr, &numParticleGroups,
+                &localityCutoff2, &isActiveRecAtomPtr0,
+                &globalScalingFactor, &groupScalingFactorsPtr0
+            };
+            cu.executeKernel(computeActiveReceptorAtomsKernel, activeArgs, recNumBlocks0 * recBlockSize0, recBlockSize0);
+            localityMaskValid = true;
+            localityMaskAge = 0;
+        }
     }
 
     // Step 1: Compute receptor HCT (if receptor mode is enabled)
@@ -499,41 +583,95 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &totalParticles, &numAtoms, &hctPerAtomPtr
             };
             cu.executeKernel(computeReceptorHCTPerAtomKernel, perAtomArgs, perAtomBlocks * blockSize, blockSize);
+
+            // Compute baseline sum per ligand atom
+            CUdeviceptr baselineSumPtr = hctReceptorBaselineSum.getDevicePointer();
+            int sumBlocks = (totalParticles + blockSize - 1) / blockSize;
+            void* sumArgs[] = {
+                &hctPerAtomPtr, &numReceptorAtoms, &totalParticles, &baselineSumPtr
+            };
+            cu.executeKernel(computeBaselineHCTSumKernel, sumArgs, sumBlocks * blockSize, blockSize);
+
             hasHctBaseline = true;
 
-            // Also compute the full HCT sum for this first frame (no pruning)
-            CUdeviceptr isActiveNull = (CUdeviceptr)0;
+            // Full HCT for first frame using cell list (no active mask pruning)
+            CUdeviceptr cellAtomIdxPtr = cellAtomIndex.getDevicePointer();
+            CUdeviceptr cellStartPtr2 = cellStart.getDevicePointer();
             void* receptorArgs[] = {
                 &posqPtr, &particleIndicesPtr, &radiiPtr,
                 &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
-                &numReceptorAtoms, &groupStartPtr, &numParticleGroups,
-                &totalParticles, &numAtoms, &cutoffDistance, &hctReceptorPtr,
-                &isActiveNull
+                &cellAtomIdxPtr, &cellStartPtr2,
+                &numReceptorAtoms,
+                &cellNx, &cellNy, &cellNz,
+                &cellOriginX, &cellOriginY, &cellOriginZ, &cellSize,
+                &groupStartPtr, &numParticleGroups,
+                &totalParticles, &numAtoms, &cutoffDistance, &hctReceptorPtr
             };
-            cu.executeKernel(computeReceptorHCTPairwiseKernel, receptorArgs, numBlocks * blockSize, blockSize);
+            cu.executeKernel(computeReceptorHCTCellListKernel, receptorArgs, numBlocks * blockSize, blockSize);
         } else if (useLocalityHCT) {
-            // Subsequent executes: reconstruct HCT from baseline (inactive) + fresh (active)
+            // Cell list reconstruction: baseline sum + fresh for active atoms in nearby cells
             CUdeviceptr isActiveRecAtomPtr = isActiveRecAtom.getDevicePointer();
             CUdeviceptr hctPerAtomPtr = hctReceptorPerAtom.getDevicePointer();
+            CUdeviceptr baselineSumPtr = hctReceptorBaselineSum.getDevicePointer();
+            CUdeviceptr cellAtomIdxPtr = cellAtomIndex.getDevicePointer();
+            CUdeviceptr cellStartPtr2 = cellStart.getDevicePointer();
+            // Effective cutoff for this call (uses base cutoff; scaling handled per-group in mask)
+            float effCutoff = receptorLocalityCutoff;
             void* reconstructArgs[] = {
                 &posqPtr, &particleIndicesPtr, &radiiPtr,
                 &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
-                &hctPerAtomPtr, &isActiveRecAtomPtr,
-                &numReceptorAtoms, &groupStartPtr, &numParticleGroups,
+                &hctPerAtomPtr, &baselineSumPtr, &isActiveRecAtomPtr,
+                &cellAtomIdxPtr, &cellStartPtr2,
+                &numReceptorAtoms,
+                &cellNx, &cellNy, &cellNz,
+                &cellOriginX, &cellOriginY, &cellOriginZ, &cellSize,
+                &effCutoff,
+                &groupStartPtr, &numParticleGroups,
                 &totalParticles, &numAtoms, &cutoffDistance, &hctReceptorPtr
             };
-            cu.executeKernel(reconstructReceptorHCTKernel, reconstructArgs, numBlocks * blockSize, blockSize);
+            cu.executeKernel(reconstructReceptorHCTCellListKernel, reconstructArgs, numBlocks * blockSize, blockSize);
         } else {
-            // No locality: full computation
-            CUdeviceptr isActiveNull = (CUdeviceptr)0;
-            void* receptorArgs[] = {
-                &posqPtr, &particleIndicesPtr, &radiiPtr,
+            // No locality: rectangular tiled HCT (OpenMM-style, both directions)
+            CUdeviceptr hctRecFixedPtr = hctReceptorFixed.getDevicePointer();
+            CUdeviceptr ligToRecFixedPtr = ligToRecHCTFixed.getDevicePointer();
+
+            // Clear fixed-point accumulators
+            cu.clearBuffer(hctReceptorFixed);
+            cu.clearBuffer(ligToRecHCTFixed);
+
+            // Compute tile count
+            int ligGroupSize = totalParticles / numParticleGroups;  // atoms per group
+            int numLigBlocks = (ligGroupSize + 31) / 32;
+            int numRecBlocks = (numReceptorAtoms + 31) / 32;
+            int tilesPerGroup = numRecBlocks * numLigBlocks;
+            int totalTiles = tilesPerGroup * numParticleGroups;
+
+            // Launch: 1 warp per tile, 8 warps per block
+            int tiledBlockSize = 256;
+            int totalWarps = totalTiles;
+            int tiledBlocks = (totalWarps * 32 + tiledBlockSize - 1) / tiledBlockSize;
+
+            void* tiledArgs[] = {
+                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
                 &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
                 &numReceptorAtoms, &groupStartPtr, &numParticleGroups,
-                &totalParticles, &numAtoms, &cutoffDistance, &hctReceptorPtr,
-                &isActiveNull
+                &numAtoms, &cutoffDistance,
+                &hctRecFixedPtr, &ligToRecFixedPtr, &tilesPerGroup
             };
-            cu.executeKernel(computeReceptorHCTPairwiseKernel, receptorArgs, numBlocks * blockSize, blockSize);
+            cu.executeKernel(computeReceptorLigandHCTTiledKernel, tiledArgs, tiledBlocks * tiledBlockSize, tiledBlockSize);
+
+            // Convert fixed-point to float
+            int convBlocks = (totalParticles + blockSize - 1) / blockSize;
+            void* convArgs1[] = { &hctRecFixedPtr, &hctReceptorPtr, &totalParticles };
+            cu.executeKernel(convertTiledHCTToFloatKernel, convArgs1, convBlocks * blockSize, blockSize);
+
+            int ligRecTotal = numReceptorAtoms * numParticleGroups;
+            CUdeviceptr ligandToReceptorHCTPtr2 = ligandToReceptorHCT.getDevicePointer();
+            int convBlocks2 = (ligRecTotal + blockSize - 1) / blockSize;
+            void* convArgs2[] = { &ligToRecFixedPtr, &ligandToReceptorHCTPtr2, &ligRecTotal };
+            cu.executeKernel(convertTiledHCTToFloatKernel, convArgs2, convBlocks2 * blockSize, blockSize);
+
+            fusedHCTComputed_ = true;
         }
     }
 
@@ -602,65 +740,114 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         bool useLocality = (receptorLocalityCutoff > 0.0f);
         CUdeviceptr isActiveRecAtomPtr = useLocality ? isActiveRecAtom.getDevicePointer() : (CUdeviceptr)0;
 
-        // 4b.1: Compute ligand→receptor HCT (skip inactive atoms if locality enabled)
-        int ligRecWorkItems = numParticleGroups * numReceptorAtoms;
-        int ligRecBlocks = (ligRecWorkItems + blockSize - 1) / blockSize;
-        void* ligToRecHctArgs[] = {
-            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-            &receptorPosPtr, &receptorRadiiPtr, &groupStartPtr,
-            &numParticleGroups, &numReceptorAtoms, &numAtoms, &cutoffDistance, &ligandToReceptorHCTPtr,
-            &isActiveRecAtomPtr
-        };
-        cu.executeKernel(computeLigandToReceptorHCTKernel, ligToRecHctArgs, ligRecBlocks * blockSize, blockSize);
-
-        // For each group, compute receptor desolvation (all on GPU, no host sync)
-        for (int g = 0; g < numParticleGroups; g++) {
-            // 4b.2: Receptor Born radii with ligand screening
-            void* recBornArgs[] = {
-                &receptorRadiiPtr, &receptorSelfHCTPtr, &ligandToReceptorHCTPtr,
-                &numReceptorAtoms, &g, &receptorBornRadiiPtr,
-                &receptorBornRadiiRefPtr, &isActiveRecAtomPtr
+        // 4b.1: Compute ligand→receptor HCT
+        // Skip if fused kernel already computed this in Step 1
+        if (!fusedHCTComputed_) {
+            int ligRecWorkItems = numParticleGroups * numReceptorAtoms;
+            int ligRecBlocks = (ligRecWorkItems + blockSize - 1) / blockSize;
+            void* ligToRecHctArgs[] = {
+                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+                &receptorPosPtr, &receptorRadiiPtr, &groupStartPtr,
+                &numParticleGroups, &numReceptorAtoms, &numAtoms, &cutoffDistance, &ligandToReceptorHCTPtr,
+                &isActiveRecAtomPtr
             };
-            cu.executeKernel(computeReceptorBornRadiiWithLigandKernel, recBornArgs, recNumBlocksSimple * recBlockSize, recBlockSize);
+            cu.executeKernel(computeLigandToReceptorHCTKernel, ligToRecHctArgs, ligRecBlocks * blockSize, blockSize);
+        }
 
-            // 4b.3: Receptor energy → desolvation → accumulate into group energies (all GPU)
-            // Clear receptorEnergy scalar
-            cu.clearBuffer(receptorEnergy);
+        CUdeviceptr receptorDeDRPtr = receptorDeDR.getDevicePointer();
 
-            if (!useLocality) {
-                // Full O(N²) receptor energy (tiled kernel)
+        // 4b.2: Receptor Born radii for ALL groups (single batched launch)
+        int totalBornWork = numParticleGroups * numReceptorAtoms;
+        int bornBlocks = (totalBornWork + recBlockSize - 1) / recBlockSize;
+        CUdeviceptr groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
+        void* recBornArgs[] = {
+            &receptorRadiiPtr, &receptorSelfHCTPtr, &ligandToReceptorHCTPtr,
+            &numReceptorAtoms, &numParticleGroups, &receptorBornRadiiPtr,
+            &receptorBornRadiiRefPtr, &isActiveRecAtomPtr,
+            &globalScalingFactor, &groupScalingFactorsPtr
+        };
+        cu.executeKernel(computeReceptorBornRadiiWithLigandKernel, recBornArgs, bornBlocks * recBlockSize, recBlockSize);
+
+        // 4b.3: Receptor desolvation energy for ALL groups
+        cu.clearBuffer(receptorEnergy);
+
+        if (!useLocality) {
+            // Full O(N²) receptor energy — must still loop per group for tiled kernel
+            for (int g = 0; g < numParticleGroups; g++) {
+                // Point to this group's Born radii via offset pointer
+                CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
+
+                // Use slot 0 of receptorEnergy as scratch (cleared each iteration)
+                cu.clearBuffer(receptorEnergy);
+
                 void* recEnergyArgs[] = {
-                    &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiPtr,
+                    &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
                     &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &numTiles
                 };
                 cu.executeKernel(computeReceptorGBEnergyTiledKernel, recEnergyArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
 
-                // GPU-side: desolvation = receptorEnergy - refEnergy, add to group energies
                 void* accumArgs[] = {
                     &receptorEnergyPtr, &receptorReferenceEnergyValue, &g,
                     &globalScalingFactor, &groupScalingFactorsPtr,
                     &groupEnergiesPtr, &groupDesolvPtr, &groupUnscaledEnergiesPtr
                 };
                 cu.executeKernel(accumulateDesolvationOnGPUKernel, accumArgs, 1, 1);
-            } else {
-                // Delta energy O(|A| * N_rec)
-                void* deltaEnergyArgs[] = {
-                    &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiRefPtr,
-                    &receptorBornRadiiPtr, &isActiveRecAtomPtr,
-                    &numReceptorAtoms, &prefactor, &receptorEnergyPtr
-                };
-                int sharedMemSize = recBlockSize * sizeof(float);
-                cu.executeKernel(computeReceptorEnergyDeltaKernel, deltaEnergyArgs,
-                                 recNumBlocksSimple * recBlockSize, recBlockSize, sharedMemSize);
+            }
+        } else {
+            // Delta energy for ALL groups (single batched launch)
+            void* deltaEnergyArgs[] = {
+                &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiRefPtr,
+                &receptorBornRadiiPtr, &isActiveRecAtomPtr,
+                &numReceptorAtoms, &numParticleGroups, &prefactor, &receptorEnergyPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
+            };
+            cu.executeKernel(computeReceptorEnergyDeltaKernel, deltaEnergyArgs, bornBlocks * recBlockSize, recBlockSize);
 
-                // GPU-side: add delta to group energies
+            // Accumulate all groups' desolvation at once
+            for (int g = 0; g < numParticleGroups; g++) {
+                CUdeviceptr groupEnergyPtr = receptorEnergyPtr + g * sizeof(float);
                 void* accumArgs[] = {
-                    &receptorEnergyPtr, &g,
+                    &groupEnergyPtr, &g,
                     &globalScalingFactor, &groupScalingFactorsPtr,
                     &groupEnergiesPtr, &groupDesolvPtr, &groupUnscaledEnergiesPtr
                 };
                 cu.executeKernel(accumulateDesolvationDeltaOnGPUKernel, accumArgs, 1, 1);
             }
+        }
+
+        // 4b.3b: Receptor dE/dR and desolvation forces for ALL groups (batched)
+        if (includeForces) {
+            if (useLocality) {
+                // Batched dE/dR for all groups
+                void* deDRArgs[] = {
+                    &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiPtr,
+                    &isActiveRecAtomPtr, &numReceptorAtoms, &numParticleGroups, &prefactor, &receptorDeDRPtr
+                };
+                cu.executeKernel(computeReceptorDeDRActiveKernel, deDRArgs, bornBlocks * recBlockSize, recBlockSize);
+            } else {
+                // Non-locality: dE/dR for all groups (batched via computeReceptorDeDRSimple per group)
+                // TODO: batch this too — for now loop per group
+                for (int g = 0; g < numParticleGroups; g++) {
+                    CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
+                    CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(float);
+                    void* deDRArgs[] = {
+                        &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
+                        &numReceptorAtoms, &prefactor, &groupDeDRPtr
+                    };
+                    cu.executeKernel(computeReceptorDeDRSimpleKernel, deDRArgs, recNumBlocksSimple * recBlockSize, recBlockSize);
+                }
+            }
+
+            // Desolvation forces — all groups, reads per-group dE/dR and Born radii
+            void* recDesolvForceArgs[] = {
+                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+                &receptorPosPtr, &receptorRadiiPtr,
+                &receptorSelfHCTPtr, &ligandToReceptorHCTPtr, &receptorBornRadiiPtr, &receptorDeDRPtr,
+                &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
+                &cutoffDistance, &forcePtr, &paddedNumAtoms,
+                &globalScalingFactor, &groupScalingFactorsPtr
+            };
+            cu.executeKernel(computeReceptorDesolvationForcesOptimizedKernel, recDesolvForceArgs, numBlocks * blockSize, blockSize);
         }
 
         // 4b.4: Cross-term energy (all on GPU)
@@ -756,10 +943,6 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             CUdeviceptr ligandToReceptorHCTPtr = ligandToReceptorHCT.getDevicePointer();
             CUdeviceptr receptorBornRadiiPtr = receptorBornRadii.getDevicePointer();
 
-            // Launch parameters for simple O(N) kernels
-            int recBlockSize = 256;
-            int recNumBlocksSimple = (numReceptorAtoms + recBlockSize - 1) / recBlockSize;
-
             // Chain rule for receptor→ligand HCT (how receptor screens ligand Born radii)
             void* receptorChainArgs[] = {
                 &posqPtr, &particleIndicesPtr, &radiiPtr,
@@ -770,38 +953,9 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             };
             cu.executeKernel(computeReceptorHCTPairwiseChainRuleKernel, receptorChainArgs, numBlocks * blockSize, blockSize);
 
-            // Pre-compute dE/dR_born for receptor atoms
-            CUdeviceptr receptorDeDRPtr = receptorDeDR.getDevicePointer();
-            CUdeviceptr isActiveRecAtomPtr2 = (receptorLocalityCutoff > 0.0f) ? isActiveRecAtom.getDevicePointer() : (CUdeviceptr)0;
+            // Receptor desolvation forces were computed in Step 4b.3b (batched)
 
-            if (receptorLocalityCutoff > 0.0f) {
-                // Active atoms only: O(|A| * N_rec), inactive get dE/dR = 0
-                void* deDRArgs[] = {
-                    &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiPtr,
-                    &isActiveRecAtomPtr2, &numReceptorAtoms, &prefactor, &receptorDeDRPtr
-                };
-                cu.executeKernel(computeReceptorDeDRActiveKernel, deDRArgs, recNumBlocksSimple * recBlockSize, recBlockSize);
-            } else {
-                // Full O(N²): all receptor atoms
-                void* deDRArgs[] = {
-                    &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiPtr,
-                    &numReceptorAtoms, &prefactor, &receptorDeDRPtr
-                };
-                cu.executeKernel(computeReceptorDeDRSimpleKernel, deDRArgs, recNumBlocksSimple * recBlockSize, recBlockSize);
-            }
-
-            // Receptor desolvation forces using pre-computed dE/dR (now O(N_lig × N_rec) instead of O(N_lig × N_rec²))
-            void* recDesolvForceArgs[] = {
-                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-                &receptorPosPtr, &receptorRadiiPtr,
-                &receptorSelfHCTPtr, &ligandToReceptorHCTPtr, &receptorBornRadiiPtr, &receptorDeDRPtr,
-                &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
-                &cutoffDistance, &forcePtr, &paddedNumAtoms,
-                &globalScalingFactor, &groupScalingFactorsPtr
-            };
-            cu.executeKernel(computeReceptorDesolvationForcesOptimizedKernel, recDesolvForceArgs, numBlocks * blockSize, blockSize);
-
-            // Cross-term chain rule forces (dE_cross/dR_born through HCT)
+            // Cross-term chain rule forces (all groups, per-group receptor Born radii)
             CUdeviceptr isActiveRecAtomPtr3 = (receptorLocalityCutoff > 0.0f) ? isActiveRecAtom.getDevicePointer() : (CUdeviceptr)0;
             void* crossChainArgs[] = {
                 &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr, &chargesPtr,
@@ -862,6 +1016,9 @@ void CudaCalcIsolatedGBSAForceKernel::updateParametersInContext(ContextImpl& con
     surfaceTension = static_cast<float>(force.getSurfaceTension());
     cutoffDistance = static_cast<float>(force.getCutoffDistance());
     receptorLocalityCutoff = static_cast<float>(force.getReceptorLocalityCutoff());
+
+    // Invalidate locality mask cache (scaling changed, may need new mask)
+    localityMaskValid = false;
 
     // Update alchemical scaling factors
     globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());

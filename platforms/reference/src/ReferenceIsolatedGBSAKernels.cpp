@@ -864,6 +864,8 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
             totalEnergy += desolvation;
 
             // 7d: Cross-term energy (receptor-ligand GB pairs, ALL receptor atoms)
+            // Distance floor prevents singularity when ligand overlaps receptor
+            static constexpr double MIN_CROSS_R2 = 0.01;  // 0.1 nm = 1 Angstrom
             double crossTermEnergy = 0.0;
             for (int i = 0; i < numAtoms; i++) {
                 int pi = particles[i];
@@ -872,6 +874,7 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
                     double dy = posData[pi][1] - receptorPositions[j * 3 + 1];
                     double dz = posData[pi][2] - receptorPositions[j * 3 + 2];
                     double r2 = dx * dx + dy * dy + dz * dz;
+                    if (r2 < MIN_CROSS_R2) continue;
 
                     double D = bornRadiiFull[i] * recBornRadiiWithLig[j];
                     double exp_alpha = exp(-r2 / (4.0 * D));

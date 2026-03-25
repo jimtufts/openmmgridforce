@@ -88,14 +88,30 @@ private:
     OpenMM::CudaArray receptorBornRadiiRef;     // [N_rec] - receptor Born radii without ligand
     OpenMM::CudaArray receptorReferenceEnergy;  // [1] - scalar reference energy
     OpenMM::CudaArray ligandToReceptorHCT;      // [N_rec * numGroups] - per-group ligand screening
-    OpenMM::CudaArray receptorBornRadii;        // [N_rec] - working buffer for Born radii with ligand
-    OpenMM::CudaArray receptorEnergy;           // [1] - working buffer for receptor energy
-    OpenMM::CudaArray receptorDeDR;             // [N_rec] - pre-computed dE/dR_born for receptor atoms
-    OpenMM::CudaArray isActiveRecAtom;           // [N_rec] - int mask: 1=active, 0=inactive (locality cutoff)
+    OpenMM::CudaArray receptorBornRadii;        // [K * N_rec] - per-group Born radii with ligand
+    OpenMM::CudaArray receptorEnergy;           // [K] - per-group receptor energy working buffer
+    OpenMM::CudaArray receptorDeDR;             // [K * N_rec] - per-group dE/dR_born for receptor atoms
+    OpenMM::CudaArray isActiveRecAtom;           // [K * N_rec] - per-group int mask: 1=active, 0=inactive
+    bool fusedHCTComputed_;                       // true if fused kernel already computed ligandToReceptorHCT
+
+    // Fixed-point accumulators for tiled HCT kernel
+    OpenMM::CudaArray hctReceptorFixed;             // [totalParticles] - fixed-point receptor→ligand HCT
+    OpenMM::CudaArray ligToRecHCTFixed;             // [K * N_rec] - fixed-point ligand→receptor HCT
+    bool localityMaskValid;                      // true if cached mask is still valid
+    int localityMaskAge;                         // number of execute() calls since last mask recompute
 
     // Baseline HCT: per-receptor-atom contribution to each ligand atom (locality optimization)
     OpenMM::CudaArray hctReceptorPerAtom;       // [totalParticles * N_rec] - cached per-receptor contributions
+    OpenMM::CudaArray hctReceptorBaselineSum;   // [totalParticles] - sum of all baseline values per ligand atom
     bool hasHctBaseline;                         // true after first execute computes baseline
+
+    // Receptor cell list (spatial hash for fast neighbor lookup)
+    OpenMM::CudaArray cellAtomIndex;            // [N_rec] - receptor atom indices sorted by cell
+    OpenMM::CudaArray cellStart;                // [numCells+1] - start index for each cell in cellAtomIndex
+    int cellNx, cellNy, cellNz;                 // cell grid dimensions
+    float cellOriginX, cellOriginY, cellOriginZ; // cell grid origin
+    float cellSize;                              // cell size (= locality cutoff)
+    bool hasCellList;                            // true after cell list is built
 
     // Device arrays - ligand atom parameters
     OpenMM::CudaArray charges;
@@ -132,7 +148,8 @@ private:
 
     // CUDA kernels
     CUfunction computeReceptorHCTGridKernel;      // Grid interpolation
-    CUfunction computeReceptorHCTPairwiseKernel;  // Pairwise receptor-ligand
+    CUfunction computeReceptorHCTPairwiseKernel;  // Pairwise receptor-ligand (naive)
+    CUfunction computeReceptorHCTPairwiseTiledKernel;  // Pairwise receptor-ligand (tiled, fast)
     CUfunction computeLigandHCTKernel;            // Ligand-ligand pairwise
     CUfunction computeBornRadiiHCTKernel;         // Raw HCT method
     CUfunction computeBornRadiiOBCKernel;         // OBC-II method
@@ -165,7 +182,15 @@ private:
     CUfunction computeReceptorEnergyDeltaKernel;     // Runtime: O(|A|*N) delta energy
     CUfunction computeReceptorDeDRActiveKernel;      // Runtime: dE/dR for active atoms only
     CUfunction computeReceptorHCTPerAtomKernel;      // Init: per-receptor HCT contributions
-    CUfunction reconstructReceptorHCTKernel;         // Runtime: reconstruct HCT from baseline + active
+    CUfunction computeBaselineHCTSumKernel;          // Init: sum baseline per ligand atom
+    CUfunction reconstructReceptorHCTKernel;         // Runtime: reconstruct HCT (old, O(N_rec))
+    CUfunction reconstructReceptorHCTFastKernel;     // Runtime: reconstruct HCT (fast, O(|A|))
+    CUfunction computeReceptorHCTCellListKernel;     // Runtime: receptor HCT via cell list
+    CUfunction reconstructReceptorHCTCellListKernel; // Runtime: reconstruct HCT via cell list
+    CUfunction computeFusedReceptorLigandHCTKernel;  // Runtime: fused bidirectional HCT via warp shuffle
+    CUfunction computeReceptorLigandHCTParallelKernel; // Runtime: receptor-threaded bidirectional HCT
+    CUfunction computeReceptorLigandHCTTiledKernel;   // Runtime: rectangular tiled bidirectional HCT
+    CUfunction convertTiledHCTToFloatKernel;           // Convert fixed-point HCT to float
 
     // GPU-side accumulation (eliminate host-device sync)
     CUfunction accumulateDesolvationOnGPUKernel;
