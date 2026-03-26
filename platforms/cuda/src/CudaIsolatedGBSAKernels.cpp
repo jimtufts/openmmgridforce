@@ -541,12 +541,11 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     // Wall-clock timing for entire execute()
     static int execCallCount = 0;
-    if (execCallCount < 6) {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        cuCtxSynchronize();
-        auto t1 = std::chrono::high_resolution_clock::now();
-        double syncMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        fprintf(stderr, "[WALLCLOCK] pre-execute sync call %d: %.2f ms\n", execCallCount, syncMs);
+    if (execCallCount == 0) {
+        fprintf(stderr, "[INFO] paddedNumAtoms=%d, energyBuffer=%d elements, longForceBuffer=%d elements\n",
+                cu.getPaddedNumAtoms(),
+                (int)cu.getEnergyBuffer().getSize(),
+                (int)cu.getLongForceBuffer().getSize());
     }
     auto tExecStart = std::chrono::high_resolution_clock::now();
 
@@ -849,11 +848,19 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(accumulateDesolvationOnGPUKernel, accumArgs, 1, 1);
         }
 
-        if (doProfiling) {
+        {
             auto tLoopEnd = std::chrono::high_resolution_clock::now();
             double loopMs = std::chrono::duration<double, std::milli>(tLoopEnd - tLoopStart).count();
-            fprintf(stderr, "[PROFILE] 4b3_loop_wallclock: %g ms (%d active groups, %d launches)\n",
-                    loopMs, activeGroupCount, activeGroupCount * 3);
+            // Sync after the batch to measure actual GPU time
+            auto tSyncStart = std::chrono::high_resolution_clock::now();
+            cuCtxSynchronize();
+            auto tSyncEnd = std::chrono::high_resolution_clock::now();
+            double syncMs = std::chrono::duration<double, std::milli>(tSyncEnd - tSyncStart).count();
+            double totalMs = std::chrono::duration<double, std::milli>(tSyncEnd - tLoopStart).count();
+            if (execCallCount < 6) {
+                fprintf(stderr, "[LOOP] call %d: launch=%.2f ms, sync=%.2f ms, total=%.2f ms (%d groups, %d launches)\n",
+                        execCallCount, loopMs, syncMs, totalMs, activeGroupCount, activeGroupCount * 3);
+            }
         }
     profileMark("4b3_rec_energy_and_dedr");
         // 4b.3b: Precompute bornForces per receptor atom
@@ -1046,19 +1053,21 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             totalEnergy += groupEnergiesHost[g];
         }
 
-        if (execCallCount < 6) {
+        {
             auto tExecEnd = std::chrono::high_resolution_clock::now();
             double execMs = std::chrono::duration<double, std::milli>(tExecEnd - tExecStart).count();
-            fprintf(stderr, "[WALLCLOCK] execute() call %d: %.2f ms\n", execCallCount, execMs);
+            fprintf(stderr, "[EXEC] call %d: %.2f ms (E+F=%d%d)\n", execCallCount, execMs,
+                    (int)includeEnergy, (int)includeForces);
         }
         execCallCount++;
         return totalEnergy;
     }
 
-    if (execCallCount < 6) {
+    {
         auto tExecEnd = std::chrono::high_resolution_clock::now();
         double execMs = std::chrono::duration<double, std::milli>(tExecEnd - tExecStart).count();
-        fprintf(stderr, "[WALLCLOCK] execute() call %d (no energy): %.2f ms\n", execCallCount, execMs);
+        fprintf(stderr, "[EXEC] call %d: %.2f ms (E+F=%d%d, no download)\n", execCallCount, execMs,
+                (int)includeEnergy, (int)includeForces);
     }
     execCallCount++;
     return 0.0;
