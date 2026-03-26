@@ -72,13 +72,8 @@ double IsolatedGBSAForceImpl::calcForcesAndEnergy(ContextImpl& context,
             owner.groupReceptorContributions[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupReceptorContribution(g);
             owner.groupReceptorDesolvations[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupReceptorDesolvation(g);
             owner.groupCrossTermEnergies[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupCrossTermEnergy(g);
-            owner.groupBornRadii[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupBornRadii(g);
-            owner.groupAtomEnergies[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupAtomEnergies(g);
-
-            // Get receptor Born radii for PAIRWISE mode
-            if (owner.getReceptorMode() == IsolatedGBSAForce::PAIRWISE) {
-                owner.groupReceptorBornRadii[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getReceptorBornRadii(g);
-            }
+            // Born radii and atom energies: skip expensive GPU downloads during force evaluation.
+            // These are diagnostic arrays — download on-demand via getGroupBornRadii() / getReceptorBornRadii().
         }
 
         return energy;
