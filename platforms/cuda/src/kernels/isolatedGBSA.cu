@@ -276,7 +276,7 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
     const float* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
     float prefactor,
-    float* __restrict__ receptorEnergy,
+    unsigned long long* __restrict__ receptorEnergy,
     int numTiles
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
@@ -406,7 +406,7 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
     }
 
     if (threadIdx.x == 0) {
-        atomicAdd(receptorEnergy, energyBuffer[0]);
+        atomicAdd(receptorEnergy, (unsigned long long)(long long)(energyBuffer[0] * 0x100000000));
     }
 }
 
@@ -421,8 +421,8 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
     const float* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
     float prefactor,
-    float* __restrict__ receptorEnergy,    // [1] scalar output
-    float* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output
+    unsigned long long* __restrict__ receptorEnergy,    // [1] scalar output (fixed-point)
+    unsigned long long* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output (fixed-point)
     int numTiles
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
@@ -456,9 +456,9 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
         unsigned int atom1 = x * TILE_SIZE + tgx;
         unsigned int atom2 = y * TILE_SIZE + tgx;
 
-        // Flush dE/dR if atom1 changed
+        // Flush dE/dR if atom1 changed (fixed-point)
         if ((int)atom1 != prevAtom1 && prevAtom1 >= 0 && prevAtom1 < numReceptorAtoms) {
-            atomicAdd(&receptorDeDR[prevAtom1], myDeDR);
+            atomicAdd(&receptorDeDR[prevAtom1], (unsigned long long)(long long)(myDeDR * 0x100000000));
             myDeDR = 0.0f;
         }
         prevAtom1 = atom1;
@@ -528,7 +528,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
             // Write atom2 dE/dR contributions from shared memory
             __syncwarp();
             if (atom2 < numReceptorAtoms && localData[tbx + tgx].energy != 0.0f) {
-                atomicAdd(&receptorDeDR[atom2], localData[tbx + tgx].energy);
+                atomicAdd(&receptorDeDR[atom2], (unsigned long long)(long long)(localData[tbx + tgx].energy * 0x100000000));
             }
 
         } else {
@@ -563,18 +563,18 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
                 __syncwarp();
             }
 
-            // Write atom2 dE/dR from shared memory
+            // Write atom2 dE/dR from shared memory (fixed-point)
             if (atom2 < numReceptorAtoms && localData[tbx + tgx].energy != 0.0f) {
-                atomicAdd(&receptorDeDR[atom2], localData[tbx + tgx].energy);
+                atomicAdd(&receptorDeDR[atom2], (unsigned long long)(long long)(localData[tbx + tgx].energy * 0x100000000));
             }
         }
 
         pos++;
     }
 
-    // Flush remaining dE/dR
+    // Flush remaining dE/dR (fixed-point)
     if (prevAtom1 >= 0 && prevAtom1 < numReceptorAtoms && myDeDR != 0.0f) {
-        atomicAdd(&receptorDeDR[prevAtom1], myDeDR);
+        atomicAdd(&receptorDeDR[prevAtom1], (unsigned long long)(long long)(myDeDR * 0x100000000));
     }
 
     // Reduce energy within block
@@ -586,7 +586,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
         __syncthreads();
     }
     if (threadIdx.x == 0)
-        atomicAdd(receptorEnergy, energyBuffer[0]);
+        atomicAdd(receptorEnergy, (unsigned long long)(long long)(energyBuffer[0] * 0x100000000));
 }
 
 /**
@@ -1225,8 +1225,8 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
     int numGroups,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor,
-    float* __restrict__ ligandToReceptorHCT
+    unsigned long long* __restrict__ hctReceptor,
+    unsigned long long* __restrict__ ligandToReceptorHCT
 ) {
     // Max ligand atoms we can handle in shared memory
     // 64 atoms × 20 bytes = 1280 bytes — well within shared memory limits
@@ -1357,13 +1357,13 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
             float term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*logf(u/l) + 0.25f*recS*recS*r_inv*(l2-u2);
             if (ligR_off < (recS - r)) term += 2.0f*(1.0f/ligR_off - l);
 
-            // Accumulate into ligand atom's HCT via atomicAdd
-            atomicAdd(&hctReceptor[ligGlobalIdx], term);
+            // Accumulate into ligand atom's HCT via fixed-point atomicAdd
+            atomicAdd(&hctReceptor[ligGlobalIdx], (unsigned long long)(long long)(term * 0x100000000));
         }
     }
 
-    // Direct write: ligand→receptor HCT for this receptor atom
-    ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] = hctLigToRec;
+    // Direct write: ligand→receptor HCT for this receptor atom (fixed-point)
+    ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] = (unsigned long long)(long long)(hctLigToRec * 0x100000000);
 }
 
 /**
@@ -1398,8 +1398,8 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor,
-    float* __restrict__ ligandToReceptorHCT,
+    unsigned long long* __restrict__ hctReceptor,
+    unsigned long long* __restrict__ ligandToReceptorHCT,
     const int* __restrict__ isActiveRecAtom,
     int hasBaseline
 ) {
@@ -1524,14 +1524,14 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
                 // Each thread atomicAdds its ligand→receptor contribution to its own
                 // group's slot. Can't warp-reduce because threads may be in different groups.
                 if (recTerm != 0.0f) {
-                    atomicAdd(&ligandToReceptorHCT[myGroupIdx * numReceptorAtoms + rIdx], recTerm);
+                    atomicAdd(&ligandToReceptorHCT[myGroupIdx * numReceptorAtoms + rIdx], (unsigned long long)(long long)(recTerm * 0x100000000));
                 }
             }
         }
 
-        // Write receptor→ligand HCT
+        // Write receptor→ligand HCT (fixed-point)
         if (validLig) {
-            hctReceptor[ligIdx] = hctLigAccum;
+            hctReceptor[ligIdx] = (unsigned long long)(long long)(hctLigAccum * 0x100000000);
         }
     }
 }
@@ -2101,12 +2101,12 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     int templateNumAtoms,
     float prefactor,
     unsigned long long* __restrict__ forceBuffer,
-    float* __restrict__ groupEnergies,
-    float* __restrict__ groupLigandSelfEnergies,
+    unsigned long long* __restrict__ groupEnergies,
+    unsigned long long* __restrict__ groupLigandSelfEnergies,
     int paddedNumAtoms,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupUnscaledEnergies
+    unsigned long long* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2192,13 +2192,13 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     atomicAdd(&forceBuffer[particleIdx_i + paddedNumAtoms], static_cast<unsigned long long>((long long)(force.y * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_i + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force.z * 0x100000000)));
 
-    // Accumulate scaled energies
-    atomicAdd(&groupEnergies[groupIdx], energy * scale);
-    atomicAdd(&groupLigandSelfEnergies[groupIdx], energy * scale);
+    // Accumulate scaled energies (fixed-point)
+    atomicAdd(&groupEnergies[groupIdx], (unsigned long long)(long long)(energy * scale * 0x100000000));
+    atomicAdd(&groupLigandSelfEnergies[groupIdx], (unsigned long long)(long long)(energy * scale * 0x100000000));
     // Accumulate unscaled energies (no per-group alchemical scaling)
     if (groupUnscaledEnergies != 0) {
         float unscaledScale = globalScalingFactor;  // only global, no group scaling
-        atomicAdd(&groupUnscaledEnergies[groupIdx], energy * unscaledScale);
+        atomicAdd(&groupUnscaledEnergies[groupIdx], (unsigned long long)(long long)(energy * unscaledScale * 0x100000000));
     }
 }
 
@@ -2213,10 +2213,10 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     int templateNumAtoms,
     float surfaceTension,
     float probeRadius,
-    float* __restrict__ groupEnergies,
+    unsigned long long* __restrict__ groupEnergies,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupUnscaledEnergies
+    unsigned long long* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2249,11 +2249,11 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     float area = 4.0f * 3.14159265f * Rsolv * Rsolv * ratio6;
     float saEnergy = surfaceTension * area * scale;
 
-    atomicAdd(&groupEnergies[groupIdx], saEnergy);
+    atomicAdd(&groupEnergies[groupIdx], (unsigned long long)(long long)(saEnergy * 0x100000000));
     // Accumulate unscaled SA energy (no per-group alchemical scaling)
     if (groupUnscaledEnergies != 0) {
         float saEnergyUnscaled = surfaceTension * area * globalScalingFactor;
-        atomicAdd(&groupUnscaledEnergies[groupIdx], saEnergyUnscaled);
+        atomicAdd(&groupUnscaledEnergies[groupIdx], (unsigned long long)(long long)(saEnergyUnscaled * 0x100000000));
     }
 }
 
@@ -2626,7 +2626,98 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseChainRule(
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms
 ) {
-    // Placeholder - to be implemented
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int groupIdx = 0;
+    int atomInGroup = idx;
+    int groupStartIdx = 0;
+    int groupEndIdx = 0;
+
+    for (int g = 0; g < numGroups; g++) {
+        groupStartIdx = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            groupIdx = g;
+            atomInGroup = idx - groupStartIdx;
+            break;
+        }
+    }
+
+    if (idx >= groupEndIdx) return;
+
+    int particleIdx_i = particleIndices[idx];
+    int templateIdx_i = atomInGroup % templateNumAtoms;
+
+    float4 pos_i = posq[particleIdx_i];
+    float R_i = radii[templateIdx_i];
+    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    float bornR_i = bornRadii[idx];
+
+    // Compute bornForces[i] = dE/dR_born * R_born² * obcChain
+    float hctTotal_i = hctReceptor[idx] + hctLigand[idx];
+    float psi_i = 0.5f * R_i_off * hctTotal_i;
+    float psi2_i = psi_i * psi_i;
+
+    float tanhArg_i = OBC_ALPHA * psi_i - OBC_BETA * psi2_i + OBC_GAMMA * psi2_i * psi_i;
+    float tanhVal_i = tanhf(tanhArg_i);
+    float sech2_i = 1.0f - tanhVal_i * tanhVal_i;
+    float dTanhArgDPsi_i = OBC_ALPHA - 2.0f * OBC_BETA * psi_i + 3.0f * OBC_GAMMA * psi2_i;
+    float obcChain_i = R_i_off * dTanhArgDPsi_i * sech2_i / R_i;
+
+    float bornForces_i = dE_dR[idx] * bornR_i * bornR_i * obcChain_i;
+
+    float3 force_i = make_float3(0.0f, 0.0f, 0.0f);
+    float cutoff2 = cutoffDistance * cutoffDistance;
+    bool useCutoff = (cutoffDistance > 0.0f);
+
+    // Loop over all receptor atoms: receptor atom j screens ligand atom i
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        float3 recPos = receptorPositions[j];
+        float recR = receptorRadii[j];
+        float recR_off = recR - DIELECTRIC_OFFSET;
+        float S_j = recR_off * receptorScaleFactors[j];
+
+        float dx = pos_i.x - recPos.x;
+        float dy = pos_i.y - recPos.y;
+        float dz = pos_i.z - recPos.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+
+        if (useCutoff && r2 > cutoff2) continue;
+
+        float invR = rsqrtf(r2);
+        float r = r2 * invR;
+        if (r < 1e-6f) continue;
+
+        float r_inv = 1.0f / r;
+        float r2_inv = r_inv * r_inv;
+
+        // HCT chain rule: receptor atom j screens ligand atom i
+        float r_plus_Sj = r + S_j;
+        if (R_i_off < r_plus_Sj) {
+            float r_minus_Sj = fabsf(r - S_j);
+            float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+            float u_ij = 1.0f / r_plus_Sj;
+
+            float l_ij2 = l_ij * l_ij;
+            float u_ij2 = u_ij * u_ij;
+            float S_j2 = S_j * S_j;
+
+            float t3 = 0.125f * (1.0f + S_j2 * r2_inv) * (l_ij2 - u_ij2)
+                     + 0.25f * logf(u_ij / l_ij) * r2_inv;
+
+            float de = bornForces_i * t3 * r_inv;
+
+            // Force on ligand atom i (receptor is fixed — no Newton's 3rd law)
+            force_i.x += de * dx;
+            force_i.y += de * dy;
+            force_i.z += de * dz;
+        }
+    }
+
+    // Accumulate force on ligand atom i
+    atomicAdd(&forceBuffer[particleIdx_i], static_cast<unsigned long long>((long long)(force_i.x * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx_i + paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.y * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx_i + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.z * 0x100000000)));
 }
 
 // =============================================================================
@@ -2744,7 +2835,7 @@ extern "C" __global__ void computeReceptorReferenceEnergy(
     const float* __restrict__ receptorBornRadiiRef,
     int numReceptorAtoms,
     float prefactor,
-    float* __restrict__ receptorReferenceEnergy
+    unsigned long long* __restrict__ receptorReferenceEnergy
 ) {
     extern __shared__ float sdata[];
 
@@ -2795,7 +2886,7 @@ extern "C" __global__ void computeReceptorReferenceEnergy(
     }
 
     if (tid == 0) {
-        atomicAdd(receptorReferenceEnergy, sdata[0]);
+        atomicAdd(receptorReferenceEnergy, (unsigned long long)(long long)(sdata[0] * 0x100000000));
     }
 }
 
@@ -2968,7 +3059,7 @@ extern "C" __global__ void computeReceptorGBEnergy(
     const float* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
     float prefactor,
-    float* __restrict__ receptorEnergy
+    unsigned long long* __restrict__ receptorEnergy
 ) {
     extern __shared__ float sdata[];
 
@@ -3019,7 +3110,7 @@ extern "C" __global__ void computeReceptorGBEnergy(
     }
 
     if (tid == 0) {
-        atomicAdd(receptorEnergy, sdata[0]);
+        atomicAdd(receptorEnergy, (unsigned long long)(long long)(sdata[0] * 0x100000000));
     }
 }
 
@@ -3040,7 +3131,7 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     int numReceptorAtoms,
     int templateNumAtoms,
     float prefactor,
-    float* __restrict__ crossTermEnergies,
+    unsigned long long* __restrict__ crossTermEnergies,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     float globalScalingFactor,
@@ -3117,8 +3208,8 @@ extern "C" __global__ void computeCrossTermGBEnergy(
         force_lig.z += dEdR * dz * invR;
     }
 
-    // Accumulate scaled cross-term energy
-    atomicAdd(&crossTermEnergies[groupIdx], energy * scale);
+    // Accumulate scaled cross-term energy (fixed-point)
+    atomicAdd(&crossTermEnergies[groupIdx], (unsigned long long)(long long)(energy * scale * 0x100000000));
 
     // Accumulate forces
     atomicAdd(&forceBuffer[particleIdx_lig], static_cast<unsigned long long>((long long)(force_lig.x * 0x100000000)));
@@ -3890,24 +3981,25 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
  * applies scaling, and adds to groupEnergies/groupDesolvations/groupUnscaledEnergies.
  */
 extern "C" __global__ void accumulateDesolvationOnGPU(
-    const float* __restrict__ receptorEnergy,
+    const unsigned long long* __restrict__ receptorEnergy,
     float referenceEnergy,
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupEnergies,
+    unsigned long long* __restrict__ groupEnergies,
     float* __restrict__ groupReceptorDesolvations,
-    float* __restrict__ groupUnscaledEnergies
+    unsigned long long* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    float desolvation = receptorEnergy[0] - referenceEnergy;
+    float recE = (float)((long long)receptorEnergy[0] / (double)0x100000000);
+    float desolvation = recE - referenceEnergy;
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     groupReceptorDesolvations[groupIdx] = desolvation * scale;
-    groupEnergies[groupIdx] += desolvation * scale;
+    groupEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * scale * 0x100000000);
     if (groupUnscaledEnergies != 0) {
-        groupUnscaledEnergies[groupIdx] += desolvation * globalScalingFactor;
+        groupUnscaledEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * globalScalingFactor * 0x100000000);
     }
 }
 
@@ -3920,9 +4012,9 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupEnergies,
+    unsigned long long* __restrict__ groupEnergies,
     float* __restrict__ groupReceptorDesolvations,
-    float* __restrict__ groupUnscaledEnergies
+    unsigned long long* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -3930,9 +4022,9 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     groupReceptorDesolvations[groupIdx] = desolvation * scale;
-    groupEnergies[groupIdx] += desolvation * scale;
+    groupEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * scale * 0x100000000);
     if (groupUnscaledEnergies != 0) {
-        groupUnscaledEnergies[groupIdx] += desolvation * globalScalingFactor;
+        groupUnscaledEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * globalScalingFactor * 0x100000000);
     }
 }
 
@@ -3941,12 +4033,12 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
  * Single-thread kernel, handles all groups.
  */
 extern "C" __global__ void accumulateCrossTermOnGPU(
-    const float* __restrict__ crossTermEnergies,
+    const unsigned long long* __restrict__ crossTermEnergies,
     int numGroups,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupEnergies,
-    float* __restrict__ groupUnscaledEnergies
+    unsigned long long* __restrict__ groupEnergies,
+    unsigned long long* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -3955,7 +4047,8 @@ extern "C" __global__ void accumulateCrossTermOnGPU(
         if (groupUnscaledEnergies != 0) {
             float groupScale = groupScalingFactors[g];
             if (groupScale != 0.0f) {
-                groupUnscaledEnergies[g] += crossTermEnergies[g] / groupScale;
+                float crossE = (float)((long long)crossTermEnergies[g] / (double)0x100000000);
+                groupUnscaledEnergies[g] += (unsigned long long)(long long)(crossE / groupScale * 0x100000000);
             }
         }
     }
@@ -4353,7 +4446,7 @@ extern "C" __global__ void computeReceptorEnergyDelta(
     int numReceptorAtoms,
     int numGroups,
     float prefactor,
-    float* __restrict__ energyDelta,
+    unsigned long long* __restrict__ energyDelta,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -4412,7 +4505,7 @@ extern "C" __global__ void computeReceptorEnergyDelta(
             delta += E_new - E_ref;
         }
 
-        atomicAdd(&energyDelta[groupIdx], delta);
+        atomicAdd(&energyDelta[groupIdx], (unsigned long long)(long long)(delta * 0x100000000));
     }
 }
 
@@ -4426,7 +4519,7 @@ extern "C" __global__ void computeReceptorEnergyDeltaLegacy(
     int numReceptorAtoms,
     int groupIdx,
     float prefactor,
-    float* __restrict__ energyDelta
+    unsigned long long* __restrict__ energyDelta
 ) {
     extern __shared__ float sdata[];
     int tid = threadIdx.x;
@@ -4462,7 +4555,7 @@ extern "C" __global__ void computeReceptorEnergyDeltaLegacy(
     }
 
     if (tid == 0) {
-        atomicAdd(energyDelta, sdata[0]);
+        atomicAdd(energyDelta, (unsigned long long)(long long)(sdata[0] * 0x100000000));
     }
 }
 
@@ -4572,7 +4665,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
-    float* __restrict__ crossTermEnergies,            // [numGroups]
+    unsigned long long* __restrict__ crossTermEnergies,            // [numGroups] fixed-point
     unsigned long long* __restrict__ dEdR_crossTerm,  // [totalParticles] fixed-point
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
@@ -4739,9 +4832,9 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             atomicAdd(&dEdR_crossTerm[ligGlobal], static_cast<unsigned long long>((long long)(dEdR_lig * 0x100000000)));
         }
 
-        // Write cross-term energy (per-group, scaled)
+        // Write cross-term energy (per-group, scaled, fixed-point)
         if (validRec) {
-            atomicAdd(&crossTermEnergies[groupIdx], crossEnergy * scale);
+            atomicAdd(&crossTermEnergies[groupIdx], (unsigned long long)(long long)(crossEnergy * scale * 0x100000000));
         }
 
         // Cache per-tile cross-term energy (warp reduction) for tile-skip reconstruction
@@ -4774,7 +4867,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     int numRecBlocks,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ crossTermEnergies            // [numGroups] — add to existing
+    unsigned long long* __restrict__ crossTermEnergies            // [numGroups] — add to existing (fixed-point)
 ) {
     int tileIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int totalTiles = numGroups * numRecBlocks;
@@ -4805,7 +4898,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     if (!anyClose) {
         float cached = crossTermBlockCache[groupIdx * numRecBlocks + b];
         if (cached != 0.0f) {
-            atomicAdd(&crossTermEnergies[groupIdx], cached);
+            atomicAdd(&crossTermEnergies[groupIdx], (unsigned long long)(long long)(cached * 0x100000000));
         }
     }
 }

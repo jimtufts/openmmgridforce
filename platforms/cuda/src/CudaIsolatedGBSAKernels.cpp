@@ -210,7 +210,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         // Allocate constant receptor buffers (per-group buffers allocated after groups are known)
         receptorSelfHCT.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorSelfHCT");
         receptorBornRadiiRef.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorBornRadiiRef");
-        receptorReferenceEnergy.initialize<float>(cu, 1, "isolatedGbsaReceptorReferenceEnergy");
+        receptorReferenceEnergy.initialize<unsigned long long>(cu, 1, "isolatedGbsaReceptorReferenceEnergy");
     }
 
     // Process particle groups
@@ -273,12 +273,12 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     }
 
     // Allocate per-group energy buffers
-    groupEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupEnergies");
-    groupLigandSelfEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupLigandSelfEnergies");
+    groupEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupEnergies");
+    groupLigandSelfEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupLigandSelfEnergies");
     groupReceptorContributions.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorContributions");
     groupReceptorDesolvations.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorDesolvations");
-    groupCrossTermEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupCrossTermEnergies");
-    groupUnscaledEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupUnscaledEnergies");
+    groupCrossTermEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupCrossTermEnergies");
+    groupUnscaledEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupUnscaledEnergies");
 
     groupEnergiesHost.resize(numParticleGroups);
     groupLigandSelfEnergiesHost.resize(numParticleGroups);
@@ -292,9 +292,11 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     // Allocate per-group receptor buffers for PAIRWISE mode (now that K is known)
     if (receptorMode == IsolatedGBSAForce::PAIRWISE && numReceptorAtoms > 0) {
         ligandToReceptorHCT.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaLigandToReceptorHCT");
+        ligandToReceptorHCTFixed.initialize<unsigned long long>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaLigandToReceptorHCTFixed");
         receptorBornRadii.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornRadii");
-        receptorEnergy.initialize<float>(cu, numParticleGroups, "isolatedGbsaReceptorEnergy");
-        receptorDeDR.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDR");
+        receptorEnergy.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaReceptorEnergy");
+        receptorDeDR.initialize<unsigned long long>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDR");
+        receptorDeDRFloat.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDRFloat");
         receptorBornForces.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornForces");
 
         // Fixed-point accumulators for tiled HCT kernel
@@ -412,8 +414,8 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         };
         cu.executeKernel(computeReceptorBornRadiiReferenceKernel, bornRefArgs, convertBlocks * recBlockSize, recBlockSize);
 
-        // Step 3: Compute receptor reference energy using TILED kernel
-        vector<float> zeroEnergy(1, 0.0f);
+        // Step 3: Compute receptor reference energy using TILED kernel (fixed-point)
+        vector<unsigned long long> zeroEnergy(1, 0ULL);
         receptorReferenceEnergy.upload(zeroEnergy);
 
         void* refEnergyTiledArgs[] = {
@@ -422,10 +424,10 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         };
         cu.executeKernel(computeReceptorGBEnergyTiledKernel, refEnergyTiledArgs, recNumBlocks * recBlockSize, recBlockSize);
 
-        // Download and cache reference energy
-        vector<float> refEnergy(1);
-        receptorReferenceEnergy.download(refEnergy);
-        receptorReferenceEnergyValue = refEnergy[0];
+        // Download and cache reference energy (convert from fixed-point)
+        vector<unsigned long long> refEnergyFixed(1);
+        receptorReferenceEnergy.download(refEnergyFixed);
+        receptorReferenceEnergyValue = (float)((long long)refEnergyFixed[0] / (double)0x100000000);
     }
 
     hasInitializedKernel = true;
@@ -724,7 +726,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             activeGroupCount++;
 
             CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
-            CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(float);
+            CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(unsigned long long);
             cu.clearBuffer(receptorEnergy);
 
             if (includeForces) {
@@ -767,13 +769,20 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             }
         }
     profileMark("4b3_rec_energy_and_dedr");
-        // 4b.3b: Precompute bornForces per receptor atom
+        // 4b.3b: Convert receptorDeDR from fixed-point to float, then precompute bornForces
         if (includeForces) {
+            // Convert fixed-point dE/dR to float
+            CUdeviceptr receptorDeDRFloatPtr = receptorDeDRFloat.getDevicePointer();
+            int convTotal = numParticleGroups * numReceptorAtoms;
+            int convBlocks3 = (convTotal + blockSize - 1) / blockSize;
+            void* convArgs3[] = { &receptorDeDRPtr, &receptorDeDRFloatPtr, &convTotal };
+            cu.executeKernel(convertTiledHCTToFloatKernel, convArgs3, convBlocks3 * blockSize, blockSize);
+
             CUdeviceptr bornForcesRecPtr = receptorBornForces.getDevicePointer();
             int bfBlocks = (numParticleGroups * numReceptorAtoms + blockSize - 1) / blockSize;
             void* bfArgs[] = {
                 &receptorRadiiPtr, &receptorSelfHCTPtr, &ligandToReceptorHCTPtr,
-                &receptorBornRadiiPtr, &receptorDeDRPtr,
+                &receptorBornRadiiPtr, &receptorDeDRFloatPtr,
                 &numReceptorAtoms, &numParticleGroups, &bornForcesRecPtr,
                 &globalScalingFactor, &groupScalingFactorsPtr
             };
@@ -980,13 +989,25 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     // Download group energies only when energy is needed to avoid sync barriers
     if (includeEnergy && !skipGroupEnergyDownload_) {
-        groupEnergies.download(groupEnergiesHost);
-        groupLigandSelfEnergies.download(groupLigandSelfEnergiesHost);
-        groupUnscaledEnergies.download(groupUnscaledEnergiesHost);
+        // Download fixed-point energy buffers and convert to float
+        {
+            std::vector<unsigned long long> fixedBuf(numParticleGroups);
+            groupEnergies.download(fixedBuf);
+            for (int g = 0; g < numParticleGroups; g++)
+                groupEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
+            groupLigandSelfEnergies.download(fixedBuf);
+            for (int g = 0; g < numParticleGroups; g++)
+                groupLigandSelfEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
+            groupUnscaledEnergies.download(fixedBuf);
+            for (int g = 0; g < numParticleGroups; g++)
+                groupUnscaledEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
 
-        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
-            groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
+            if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
+                groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
+                groupCrossTermEnergies.download(fixedBuf);
+                for (int g = 0; g < numParticleGroups; g++)
+                    groupCrossTermEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
+            }
         }
 
         // Sum total energy
