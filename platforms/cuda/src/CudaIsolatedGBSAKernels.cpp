@@ -362,6 +362,8 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         computePairwiseGBForceTiledKernel = cu.getKernel(module, "computePairwiseGBForceTiled");
         reduceLigandBornForceKernel = cu.getKernel(module, "reduceLigandBornForce");
         computePairwiseChainRuleTiledKernel = cu.getKernel(module, "computePairwiseChainRuleTiled");
+        addCrossTermToDEdRKernel = cu.getKernel(module, "addCrossTermToDEdR");
+        computeFusedPairwiseChainRuleForcesKernel = cu.getKernel(module, "computeFusedPairwiseChainRuleForces");
 
         // GPU-side accumulation kernels (eliminate host-device sync)
         accumulateDesolvationOnGPUKernel = cu.getKernel(module, "accumulateDesolvationOnGPU");
@@ -863,30 +865,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         cu.executeKernel(accumulateCrossTermOnGPUKernel, crossAccumArgs, 1, 1);
 
     profileMark("4b4_tiled_force_pass1");
-        // === REDUCE: dE/dR_born_lig → bornForceLig ===
-        int reduceBlocks = (totalParticles + blockSize - 1) / blockSize;
-        void* reduceArgs[] = {
-            &dEdRCrossTermPtr, &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr,
-            &radiiPtr, &groupStartPtr, &numParticleGroups, &totalParticles, &numAtoms,
-            &globalScalingFactor, &groupScalingFactorsPtr, &bornForceLigPtr
-        };
-        cu.executeKernel(reduceLigandBornForceKernel, reduceArgs, reduceBlocks * blockSize, blockSize);
-
-    profileMark("4b5_reduce_born_force_lig");
-        // === TILED FORCE PASS 2: cross-term HCT chain rule ===
-        // Pass 2 has no energy — tile-skip freely when locality cutoff is set
-        float chainTileSkipCutoff = (receptorLocalityCutoff > 0.0f) ? receptorLocalityCutoff : -1.0f;
-        CUdeviceptr groupScalingFactorsPtr3 = groupScalingFactorsBuffer.getDevicePointer();
-        void* tiledChainArgs[] = {
-            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-            &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
-            &bornForceLigPtr,
-            &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
-            &cutoffDistance, &forcePtr, &paddedNumAtoms, &numRecBlocks2,
-            &recBlockBoundsPtr2, &chainTileSkipCutoff,
-            &globalScalingFactor, &groupScalingFactorsPtr3
-        };
-        cu.executeKernel(computePairwiseChainRuleTiledKernel, tiledChainArgs, forceBlocks2 * blockSize, blockSize);
+        // Cross-term chain rule (pass 2) removed — now combined with self chain rule
+        // in Step 6 via addCrossTermToDEdR for proper force cancellation.
     }
 
     profileMark("4b6_tiled_force_pass2");
@@ -907,13 +887,21 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     if (includeForces) {
         CUdeviceptr dE_dRPtr = dE_dR.getDevicePointer();
 
-        // Accumulate dE/dR_born (scaled by alchemical factors)
+        // Accumulate dE/dR_born from self-energy (scaled by alchemical factors)
         void* bornDerivArgs[] = {
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
             &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor, &dE_dRPtr,
             &globalScalingFactor, &groupScalingFactorsPtr
         };
         cu.executeKernel(accumulateBornRadiiDerivativesKernel, bornDerivArgs, numBlocks * blockSize, blockSize);
+
+        // Combine cross-term dE/dR into self dE/dR BEFORE chain rule
+        // This ensures proper cancellation between self and cross-term forces
+        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
+            CUdeviceptr dEdRCrossCombinePtr = dEdR_crossTerm.getDevicePointer();
+            void* combineArgs[] = { &dE_dRPtr, &dEdRCrossCombinePtr, &totalParticles };
+            cu.executeKernel(addCrossTermToDEdRKernel, combineArgs, numBlocks * blockSize, blockSize);
+        }
 
         if (includeSurfaceArea) {
             float probe = (receptorMode == IsolatedGBSAForce::GRID) ? probeRadius : 0.14f;
@@ -925,16 +913,35 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(accumulateSADerivativesKernel, saDerivArgs, numBlocks * blockSize, blockSize);
         }
 
-        // Ligand-ligand HCT chain rule forces (scaling propagates via dE_dR)
-        void* hctChainArgs[] = {
-            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-            &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
-            &groupStartPtr, &numParticleGroups, &numAtoms, &cutoffDistance,
-            &forcePtr, &paddedNumAtoms
-        };
-        cu.executeKernel(computeHCTChainRuleForcesKernel, hctChainArgs, numBlocks * blockSize, blockSize);
+        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
+            // Fused chain rule: lig-lig + rec→lig + lig→rec in single pass
+            CUdeviceptr receptorPosPtr = receptorPositions.getDevicePointer();
+            CUdeviceptr receptorRadiiPtr = receptorRadii.getDevicePointer();
+            CUdeviceptr receptorScalesPtr = receptorScaleFactors.getDevicePointer();
+            CUdeviceptr bornForcesRecPtr2 = receptorBornForces.getDevicePointer();
+            CUdeviceptr groupScalingFactorsPtr4 = groupScalingFactorsBuffer.getDevicePointer();
+            void* fusedChainArgs[] = {
+                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+                &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
+                &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
+                &bornForcesRecPtr2, &numReceptorAtoms,
+                &groupStartPtr, &numParticleGroups, &numAtoms, &cutoffDistance,
+                &forcePtr, &paddedNumAtoms,
+                &globalScalingFactor, &groupScalingFactorsPtr4
+            };
+            cu.executeKernel(computeFusedPairwiseChainRuleForcesKernel, fusedChainArgs, numBlocks * blockSize, blockSize);
+        } else {
+            // Non-PAIRWISE: ligand-ligand chain rule only
+            void* hctChainArgs[] = {
+                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+                &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
+                &groupStartPtr, &numParticleGroups, &numAtoms, &cutoffDistance,
+                &forcePtr, &paddedNumAtoms
+            };
+            cu.executeKernel(computeHCTChainRuleForcesKernel, hctChainArgs, numBlocks * blockSize, blockSize);
+        }
 
-        // Receptor contribution forces
+        // Receptor contribution forces (GRID mode only — PAIRWISE handled above)
         if (receptorMode == IsolatedGBSAForce::GRID) {
             CUdeviceptr gridCountsPtr = gridCounts.getDevicePointer();
             CUdeviceptr gridHctProbePtr = gridHctProbe.getDevicePointer();
@@ -957,25 +964,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(computeReceptorHCTGradientForceKernel, receptorGradArgs, numBlocks * blockSize, blockSize);
 
         } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            CUdeviceptr receptorPosPtr = receptorPositions.getDevicePointer();
-            CUdeviceptr receptorRadiiPtr = receptorRadii.getDevicePointer();
-            CUdeviceptr receptorScalesPtr = receptorScaleFactors.getDevicePointer();
-            CUdeviceptr receptorChargesPtr = receptorCharges.getDevicePointer();
-            CUdeviceptr receptorSelfHCTPtr = receptorSelfHCT.getDevicePointer();
-            CUdeviceptr ligandToReceptorHCTPtr = ligandToReceptorHCT.getDevicePointer();
-            CUdeviceptr receptorBornRadiiPtr = receptorBornRadii.getDevicePointer();
-
-            // Chain rule for receptor→ligand HCT (how receptor screens ligand Born radii)
-            void* receptorChainArgs[] = {
-                &posqPtr, &particleIndicesPtr, &radiiPtr,
-                &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
-                &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
-                &numReceptorAtoms, &groupStartPtr, &numParticleGroups,
-                &totalParticles, &numAtoms, &cutoffDistance, &forcePtr, &paddedNumAtoms
-            };
-            cu.executeKernel(computeReceptorHCTPairwiseChainRuleKernel, receptorChainArgs, numBlocks * blockSize, blockSize);
-
-            // Desolvation + cross-term forces handled by tiled kernels in Step 4b
+            // All PAIRWISE chain rule forces handled by fused kernel above
         }
     }
 

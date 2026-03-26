@@ -176,6 +176,8 @@ private:
     CUfunction addDistantHCTFromCacheKernel;          // Reconstruct distant HCT from cache
     CUfunction restoreDistantLigToRecHCTKernel;       // Restore cached lig→rec HCT for distant atoms
     CUfunction addDistantCrossTermFromCacheKernel;    // Reconstruct distant cross-term energy
+    CUfunction addCrossTermToDEdRKernel;              // Combine self + cross dE/dR before chain rule
+    CUfunction computeFusedPairwiseChainRuleForcesKernel; // Fused lig-lig + rec→lig + lig→rec chain rule
 
     // GPU-side accumulation (eliminate host-device sync)
     CUfunction accumulateDesolvationOnGPUKernel;
