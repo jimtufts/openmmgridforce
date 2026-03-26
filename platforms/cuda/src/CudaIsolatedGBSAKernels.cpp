@@ -321,7 +321,9 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
             int numRecBlocks = (numReceptorAtoms + 31) / 32;
             hctRecBlockCache.initialize<float>(cu, totalParticles * numRecBlocks, "hctRecBlockCache");
             ligToRecHCTCache.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "ligToRecHCTCache");
+            crossTermBlockCache.initialize<float>(cu, numParticleGroups * numRecBlocks, "crossTermBlockCache");
             hasTileCache = false;
+            hasCrossTermCache = false;
         }
     }
 
@@ -357,6 +359,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         convertTiledHCTToFloatKernel = cu.getKernel(module, "convertTiledHCTToFloat");
         addDistantHCTFromCacheKernel = cu.getKernel(module, "addDistantHCTFromCache");
         restoreDistantLigToRecHCTKernel = cu.getKernel(module, "restoreDistantLigToRecHCT");
+        addDistantCrossTermFromCacheKernel = cu.getKernel(module, "addDistantCrossTermFromCache");
         computeReceptorHCTPairwiseChainRuleKernel = cu.getKernel(module, "computeIsolatedReceptorHCTPairwiseChainRule");
 
         // PAIRWISE mode: receptor desolvation kernels (both old and tiled versions)
@@ -892,7 +895,19 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         int forceBlocks2 = (forceThreads + blockSize - 1) / blockSize;
 
         CUdeviceptr recBlockBoundsPtr2 = recBlockBounds.getDevicePointer();
-        float forceTileSkipCutoff = -1.0f;  // force tile-skip disabled for now (energy accuracy)
+        bool useForceTileSkip = (receptorLocalityCutoff > 0.0f && crossTermBlockCache.isInitialized());
+
+        // Force tile-skip: first call = no skip + cache write, subsequent = skip + reconstruct
+        float forceTileSkipCutoff = -1.0f;
+        CUdeviceptr crossCachePtr = (CUdeviceptr)0;
+
+        if (useForceTileSkip && !hasCrossTermCache) {
+            forceTileSkipCutoff = -1.0f;  // no skip, compute all
+            crossCachePtr = crossTermBlockCache.getDevicePointer();  // write cache
+        } else if (useForceTileSkip && hasCrossTermCache) {
+            forceTileSkipCutoff = receptorLocalityCutoff;  // enable tile-skip
+            crossCachePtr = (CUdeviceptr)0;  // don't overwrite cache
+        }
 
         void* tiledForceArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr, &chargesPtr,
@@ -903,9 +918,31 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &prefactor, &cutoffDistance, &forcePtr, &paddedNumAtoms,
             &groupCrossTermPtr, &dEdRCrossTermPtr,
             &globalScalingFactor, &groupScalingFactorsPtr, &numRecBlocks2,
-            &recBlockBoundsPtr2, &forceTileSkipCutoff
+            &recBlockBoundsPtr2, &forceTileSkipCutoff, &crossCachePtr
         };
         cu.executeKernel(computePairwiseGBForceTiledKernel, tiledForceArgs, forceBlocks2 * blockSize, blockSize);
+
+        // For tile-skip mode: add cached cross-term energy for distant blocks
+        if (useForceTileSkip && hasCrossTermCache) {
+            float locCut = receptorLocalityCutoff;
+            void* distCrossArgs[] = {
+                &crossCachePtr, &posqPtr, &particleIndicesPtr,
+                &recBlockBoundsPtr2, &locCut, &groupStartPtr,
+                &numParticleGroups, &numRecBlocks2,
+                &globalScalingFactor, &groupScalingFactorsPtr, &groupCrossTermPtr
+            };
+            // Need to pass the actual cache pointer for reading
+            CUdeviceptr crossCacheReadPtr = crossTermBlockCache.getDevicePointer();
+            distCrossArgs[0] = &crossCacheReadPtr;
+            int totalCrossTiles = numParticleGroups * numRecBlocks2;
+            int crossBlocks = (totalCrossTiles + blockSize - 1) / blockSize;
+            cu.executeKernel(addDistantCrossTermFromCacheKernel, distCrossArgs, crossBlocks * blockSize, blockSize);
+        }
+
+        // First call: mark cross-term cache as built
+        if (useForceTileSkip && !hasCrossTermCache) {
+            hasCrossTermCache = true;
+        }
 
         // Add cross-term to group energies
         void* crossAccumArgs[] = {
@@ -927,13 +964,15 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     profileMark("4b5_reduce_born_force_lig");
         // === TILED FORCE PASS 2: cross-term HCT chain rule ===
+        // Pass 2 has no energy — tile-skip freely when locality cutoff is set
+        float chainTileSkipCutoff = (receptorLocalityCutoff > 0.0f) ? receptorLocalityCutoff : -1.0f;
         void* tiledChainArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
             &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
             &bornForceLigPtr,
             &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
             &cutoffDistance, &forcePtr, &paddedNumAtoms, &numRecBlocks2,
-            &recBlockBoundsPtr2, &forceTileSkipCutoff
+            &recBlockBoundsPtr2, &chainTileSkipCutoff
         };
         cu.executeKernel(computePairwiseChainRuleTiledKernel, tiledChainArgs, forceBlocks2 * blockSize, blockSize);
     }

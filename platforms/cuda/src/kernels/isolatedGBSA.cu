@@ -4572,7 +4572,8 @@ extern "C" __global__ void computePairwiseGBForceTiled(
     const float* __restrict__ groupScalingFactors,
     int numRecBlocks,
     const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius)
-    float localityCutoff                              // tile-skip cutoff (-1 = no skip)
+    float localityCutoff,                             // tile-skip cutoff (-1 = no skip)
+    float* __restrict__ crossTermBlockCache           // [numGroups * numRecBlocks] or NULL
 ) {
     // Max ligand atoms in shared memory
     const int MAX_LIG = 64;
@@ -4737,7 +4738,69 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             atomicAdd(&crossTermEnergies[groupIdx], crossEnergy * scale);
         }
 
+        // Cache per-tile cross-term energy (warp reduction) for tile-skip reconstruction
+        if (crossTermBlockCache != NULL) {
+            // Warp-reduce crossEnergy * scale across 32 threads
+            float tileEnergy = crossEnergy * scale;
+            for (int offset = TILE_SIZE/2; offset > 0; offset >>= 1)
+                tileEnergy += __shfl_down_sync(0xFFFFFFFF, tileEnergy, offset);
+            if (tgx == 0)
+                crossTermBlockCache[groupIdx * numRecBlocks + recBlock] = tileEnergy;
+        }
+
         __syncwarp();
+    }
+}
+
+/**
+ * Add cached cross-term energy for distant receptor blocks (skipped by tile-skip).
+ * Parallelized: one thread per (group, recBlock) tile. Each thread checks nearness
+ * and adds cached energy if the tile was distant.
+ */
+extern "C" __global__ void addDistantCrossTermFromCache(
+    const float* __restrict__ crossTermBlockCache,  // [numGroups * numRecBlocks]
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float4* __restrict__ recBlockBounds,
+    float localityCutoff,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int numRecBlocks,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ crossTermEnergies            // [numGroups] — add to existing
+) {
+    int tileIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalTiles = numGroups * numRecBlocks;
+    if (tileIdx >= totalTiles) return;
+
+    int groupIdx = tileIdx / numRecBlocks;
+    int b = tileIdx % numRecBlocks;
+
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+    if (scale < 0.05f) return;
+
+    float4 bounds = recBlockBounds[b];
+    float threshold = localityCutoff + bounds.w;
+    float threshold2 = threshold * threshold;
+
+    int gs = groupStart[groupIdx];
+    int ge = groupStart[groupIdx + 1];
+    bool anyClose = false;
+    for (int li = gs; li < ge && !anyClose; li++) {
+        int particleIdx = particleIndices[li];
+        float4 p = posq[particleIdx];
+        float dx = p.x - bounds.x;
+        float dy = p.y - bounds.y;
+        float dz = p.z - bounds.z;
+        if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
+    }
+
+    if (!anyClose) {
+        float cached = crossTermBlockCache[groupIdx * numRecBlocks + b];
+        if (cached != 0.0f) {
+            atomicAdd(&crossTermEnergies[groupIdx], cached);
+        }
     }
 }
 

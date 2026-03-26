@@ -105,7 +105,9 @@ private:
     // Tile-skip cache (locality cutoff optimization)
     OpenMM::CudaArray hctRecBlockCache;             // [totalParticles * numRecBlocks] - per-block rec→lig HCT
     OpenMM::CudaArray ligToRecHCTCache;             // [K * N_rec] - cached lig→rec HCT
+    OpenMM::CudaArray crossTermBlockCache;          // [K * numRecBlocks] - per-tile cross-term energy
     bool hasTileCache;                              // true after first call builds cache
+    bool hasCrossTermCache;                         // true after first call builds cross-term cache
     bool localityMaskValid;                      // true if cached mask is still valid
     int localityMaskAge;                         // number of execute() calls since last mask recompute
 
@@ -209,6 +211,7 @@ private:
     CUfunction convertTiledHCTToFloatKernel;           // Convert fixed-point HCT to float
     CUfunction addDistantHCTFromCacheKernel;          // Reconstruct distant HCT from cache
     CUfunction restoreDistantLigToRecHCTKernel;       // Restore cached lig→rec HCT for distant atoms
+    CUfunction addDistantCrossTermFromCacheKernel;    // Reconstruct distant cross-term energy
 
     // GPU-side accumulation (eliminate host-device sync)
     CUfunction accumulateDesolvationOnGPUKernel;
