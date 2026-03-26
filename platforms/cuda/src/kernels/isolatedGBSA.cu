@@ -936,7 +936,9 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
     const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius) or NULL
     float localityCutoff,                             // tile-skip cutoff (-1 = no skip)
     float* __restrict__ hctRecBlockCache,             // [totalParticles * numRecBlocks] or NULL
-    int numRecBlocks                                  // for cache indexing
+    int numRecBlocks,                                 // for cache indexing
+    float globalScalingFactor,                        // alchemical scaling
+    const float* __restrict__ groupScalingFactors     // per-group scaling
 ) {
     const int tgx = threadIdx.x & (TILE_SIZE - 1);
     const int tbx = threadIdx.x - tgx;
@@ -960,6 +962,10 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
         int tilesInGroup = tileIdx / numGroups;  // wrong - should be tileIdx % numTilesPerGroup
         int groupIdx = tileIdx / numTilesPerGroup;
         int tileInGroup = tileIdx % numTilesPerGroup;
+
+        // Skip zero-scaled groups
+        float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+        if (scale < 0.05f) continue;
 
         int gs = groupStart[groupIdx];
         int ge = groupStart[groupIdx + 1];
@@ -4887,7 +4893,9 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
     int paddedNumAtoms,
     int numRecBlocks,
     const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius)
-    float localityCutoff                              // tile-skip cutoff (-1 = no skip)
+    float localityCutoff,                             // tile-skip cutoff (-1 = no skip)
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     const int MAX_LIG = 64;
 
@@ -4910,6 +4918,10 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
     for (int tileIdx = warp; tileIdx < totalTiles; tileIdx += totalWarps) {
         int groupIdx = tileIdx / numRecBlocks;
         int recBlock = tileIdx % numRecBlocks;
+
+        // Skip zero-scaled groups
+        float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+        if (scale < 0.05f) continue;
 
         int gs = groupStart[groupIdx];
         int ge = groupStart[groupIdx + 1];

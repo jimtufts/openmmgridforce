@@ -560,6 +560,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             hctCachePtr = (CUdeviceptr)0;  // don't overwrite cache
         }
 
+        CUdeviceptr groupScalingFactorsPtr2 = groupScalingFactorsBuffer.getDevicePointer();
         void* tiledArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
             &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
@@ -567,7 +568,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &numAtoms, &cutoffDistance,
             &hctRecFixedPtr, &ligToRecFixedPtr, &tilesPerGroup,
             &recBlockBoundsPtr, &localityCutoffVal,
-            &hctCachePtr, &numRecBlocks
+            &hctCachePtr, &numRecBlocks,
+            &globalScalingFactor, &groupScalingFactorsPtr2
         };
         cu.executeKernel(computeReceptorLigandHCTTiledKernel, tiledArgs, tiledBlocks * tiledBlockSize, tiledBlockSize);
 
@@ -865,13 +867,15 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         // === TILED FORCE PASS 2: cross-term HCT chain rule ===
         // Pass 2 has no energy — tile-skip freely when locality cutoff is set
         float chainTileSkipCutoff = (receptorLocalityCutoff > 0.0f) ? receptorLocalityCutoff : -1.0f;
+        CUdeviceptr groupScalingFactorsPtr3 = groupScalingFactorsBuffer.getDevicePointer();
         void* tiledChainArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
             &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
             &bornForceLigPtr,
             &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
             &cutoffDistance, &forcePtr, &paddedNumAtoms, &numRecBlocks2,
-            &recBlockBoundsPtr2, &chainTileSkipCutoff
+            &recBlockBoundsPtr2, &chainTileSkipCutoff,
+            &globalScalingFactor, &groupScalingFactorsPtr3
         };
         cu.executeKernel(computePairwiseChainRuleTiledKernel, tiledChainArgs, forceBlocks2 * blockSize, blockSize);
     }
