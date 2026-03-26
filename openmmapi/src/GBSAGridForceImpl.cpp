@@ -51,7 +51,8 @@ double GBSAGridForceImpl::calcForcesAndEnergy(ContextImpl& context,
         for (int g = 0; g < numGroups; g++) {
             owner.groupEnergies[g] = kernel.getAs<CalcGBSAGridForceKernel>().getGroupEnergy(g);
             owner.groupLigandEnergies[g] = kernel.getAs<CalcGBSAGridForceKernel>().getGroupLigandDesolvationEnergy(g);
-            owner.groupBornRadii[g] = kernel.getAs<CalcGBSAGridForceKernel>().getGroupBornRadii(g);
+            // Born radii: skip expensive GPU download during force evaluation.
+            // Available on-demand via getGroupBornRadii().
         }
 
         return energy;
