@@ -366,6 +366,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         computeReceptorBornRadiiReferenceKernel = cu.getKernel(module, "computeReceptorBornRadiiReference");
         computeReceptorReferenceEnergyKernel = cu.getKernel(module, "computeReceptorReferenceEnergy");
         computeReceptorGBEnergyTiledKernel = cu.getKernel(module, "computeReceptorGBEnergyTiled");
+        computeReceptorGBEnergyAndDeDRTiledKernel = cu.getKernel(module, "computeReceptorGBEnergyAndDeDRTiled");
         computeLigandToReceptorHCTKernel = cu.getKernel(module, "computeLigandToReceptorHCT");
         computeReceptorBornRadiiWithLigandKernel = cu.getKernel(module, "computeReceptorBornRadiiWithLigand");
         computeReceptorGBEnergyKernel = cu.getKernel(module, "computeReceptorGBEnergy");
@@ -537,6 +538,17 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     int totalParticles = particleIndices.getSize();
     if (totalParticles == 0) return 0.0;
+
+    // Wall-clock timing for entire execute()
+    static int execCallCount = 0;
+    if (execCallCount < 6) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        cuCtxSynchronize();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double syncMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        fprintf(stderr, "[WALLCLOCK] pre-execute sync call %d: %.2f ms\n", execCallCount, syncMs);
+    }
+    auto tExecStart = std::chrono::high_resolution_clock::now();
 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
 
@@ -795,22 +807,39 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         cu.executeKernel(computeReceptorBornRadiiWithLigandKernel, recBornArgs, bornBlocks * recBlockSize, recBlockSize);
 
     profileMark("4b2_rec_born_radii");
-        // 4b.3: Receptor desolvation energy for ALL groups
-        // Always use full tiled O(N²) receptor energy (fast due to shared memory tiling)
+        // 4b.3: Fused receptor energy + dE/dR per group (single tiled O(N²) pass)
         cu.clearBuffer(receptorEnergy);
+        if (includeForces) {
+            cu.clearBuffer(receptorDeDR);  // clear ALL groups' dE/dR at once (async)
+        }
 
+        int activeGroupCount = 0;
+        auto tLoopStart = std::chrono::high_resolution_clock::now();
         for (int g = 0; g < numParticleGroups; g++) {
             float gScale = globalScalingFactor * groupScalingFactorsHostCopy[g];
-            if (gScale < 0.05f) continue;  // skip zero-scaled groups
+            if (gScale < 0.05f) continue;
+            activeGroupCount++;
 
             CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
+            CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(float);
             cu.clearBuffer(receptorEnergy);
 
-            void* recEnergyArgs[] = {
-                &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
-                &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &numTiles
-            };
-            cu.executeKernel(computeReceptorGBEnergyTiledKernel, recEnergyArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
+            if (includeForces) {
+
+                // Fused energy + dE/dR in single tiled pass
+                void* fusedArgs[] = {
+                    &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
+                    &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &groupDeDRPtr, &numTiles
+                };
+                cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel, fusedArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
+            } else {
+                // Energy only
+                void* recEnergyArgs[] = {
+                    &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
+                    &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &numTiles
+                };
+                cu.executeKernel(computeReceptorGBEnergyTiledKernel, recEnergyArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
+            }
 
             void* accumArgs[] = {
                 &receptorEnergyPtr, &receptorReferenceEnergyValue, &g,
@@ -820,24 +849,15 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(accumulateDesolvationOnGPUKernel, accumArgs, 1, 1);
         }
 
-    profileMark("4b3_rec_desolv_energy");
-        // 4b.3b: Receptor dE/dR and desolvation forces for ALL groups
+        if (doProfiling) {
+            auto tLoopEnd = std::chrono::high_resolution_clock::now();
+            double loopMs = std::chrono::duration<double, std::milli>(tLoopEnd - tLoopStart).count();
+            fprintf(stderr, "[PROFILE] 4b3_loop_wallclock: %g ms (%d active groups, %d launches)\n",
+                    loopMs, activeGroupCount, activeGroupCount * 3);
+        }
+    profileMark("4b3_rec_energy_and_dedr");
+        // 4b.3b: Precompute bornForces per receptor atom
         if (includeForces) {
-            // dE/dR per group (simple O(N²) per group, same path for cutoff and no-cutoff)
-            for (int g = 0; g < numParticleGroups; g++) {
-                float gScale = globalScalingFactor * groupScalingFactorsHostCopy[g];
-                if (gScale < 0.05f) continue;
-
-                CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
-                CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(float);
-                void* deDRArgs[] = {
-                    &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
-                    &numReceptorAtoms, &prefactor, &groupDeDRPtr
-                };
-                cu.executeKernel(computeReceptorDeDRSimpleKernel, deDRArgs, recNumBlocksSimple * recBlockSize, recBlockSize);
-            }
-
-            // Precompute bornForces per receptor atom (removes tanh from force inner loop)
             CUdeviceptr bornForcesRecPtr = receptorBornForces.getDevicePointer();
             int bfBlocks = (numParticleGroups * numReceptorAtoms + blockSize - 1) / blockSize;
             void* bfArgs[] = {
@@ -849,7 +869,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(precomputeReceptorBornForcesKernel, bfArgs, bfBlocks * blockSize, blockSize);
         }
 
-    profileMark("4b3b_dedr_bornforces");
+    profileMark("4b3b_bornforces");
         // === TILED FORCE PASS 1: cross-term energy + direct forces + dE/dR_lig + desolv chain rule ===
         CUdeviceptr receptorChargesPtr2 = receptorCharges.getDevicePointer();
         CUdeviceptr bornForcesRecPtr2 = receptorBornForces.getDevicePointer();
@@ -1002,6 +1022,13 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     }
 
     profileMark("step6_chain_rule");
+    if (doProfiling) {
+        cuCtxSynchronize();
+        auto tBeforeDownload = std::chrono::high_resolution_clock::now();
+        fprintf(stderr, "[PROFILE] total_kernels: %g ms\n",
+            std::chrono::duration<double, std::milli>(tBeforeDownload.time_since_epoch()).count() - tPrev);
+    }
+
     // Download group energies only when energy is needed to avoid sync barriers
     if (includeEnergy && !skipGroupEnergyDownload_) {
         groupEnergies.download(groupEnergiesHost);
@@ -1018,9 +1045,22 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         for (int g = 0; g < numParticleGroups; g++) {
             totalEnergy += groupEnergiesHost[g];
         }
+
+        if (execCallCount < 6) {
+            auto tExecEnd = std::chrono::high_resolution_clock::now();
+            double execMs = std::chrono::duration<double, std::milli>(tExecEnd - tExecStart).count();
+            fprintf(stderr, "[WALLCLOCK] execute() call %d: %.2f ms\n", execCallCount, execMs);
+        }
+        execCallCount++;
         return totalEnergy;
     }
 
+    if (execCallCount < 6) {
+        auto tExecEnd = std::chrono::high_resolution_clock::now();
+        double execMs = std::chrono::duration<double, std::milli>(tExecEnd - tExecStart).count();
+        fprintf(stderr, "[WALLCLOCK] execute() call %d (no energy): %.2f ms\n", execCallCount, execMs);
+    }
+    execCallCount++;
     return 0.0;
 }
 

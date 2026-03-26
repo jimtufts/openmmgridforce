@@ -411,6 +411,185 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
 }
 
 /**
+ * Fused tiled computation of receptor GB energy AND dE/dR_born.
+ * Single pass over all receptor-receptor pairs computes both quantities,
+ * eliminating the separate O(N²) dE/dR kernel.
+ */
+extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,
+    int numReceptorAtoms,
+    float prefactor,
+    float* __restrict__ receptorEnergy,    // [1] scalar output
+    float* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output
+    int numTiles
+) {
+    const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
+    const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / TILE_SIZE;
+    const int tgx = threadIdx.x & (TILE_SIZE - 1);
+    const int tbx = threadIdx.x - tgx;
+
+    __shared__ TiledAtomDataGB localData[256];
+    __shared__ float energyBuffer[256];
+
+    const int NUM_BLOCKS = (numReceptorAtoms + TILE_SIZE - 1) / TILE_SIZE;
+
+    float energy = 0.0f;
+    float myDeDR = 0.0f;  // dE/dR for atom1 (this thread's atom)
+
+    int pos = (int)(((long long)warp * numTiles) / totalWarps);
+    int end = (int)(((long long)(warp + 1) * numTiles) / totalWarps);
+
+    // Track which atom this thread represents across tiles
+    // (changes per tile, so we flush dE/dR when atom1 changes)
+    int prevAtom1 = -1;
+
+    while (pos < end) {
+        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrtf((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
+        int x = pos - y * NUM_BLOCKS + y * (y + 1) / 2;
+        if (x < y || x >= NUM_BLOCKS) {
+            y += (x < y ? -1 : 1);
+            x = pos - y * NUM_BLOCKS + y * (y + 1) / 2;
+        }
+
+        unsigned int atom1 = x * TILE_SIZE + tgx;
+        unsigned int atom2 = y * TILE_SIZE + tgx;
+
+        // Flush dE/dR if atom1 changed
+        if ((int)atom1 != prevAtom1 && prevAtom1 >= 0 && prevAtom1 < numReceptorAtoms) {
+            atomicAdd(&receptorDeDR[prevAtom1], myDeDR);
+            myDeDR = 0.0f;
+        }
+        prevAtom1 = atom1;
+
+        // Load atom1
+        float3 pos1 = make_float3(0, 0, 0);
+        float q1 = 0, R1 = 1.0f;
+        if (atom1 < numReceptorAtoms) {
+            pos1 = receptorPositions[atom1];
+            q1 = receptorCharges[atom1];
+            R1 = receptorBornRadii[atom1];
+        }
+
+        // Load atom2 into shared memory
+        if (atom2 < numReceptorAtoms) {
+            float3 pos2 = receptorPositions[atom2];
+            localData[tbx + tgx].x = pos2.x;
+            localData[tbx + tgx].y = pos2.y;
+            localData[tbx + tgx].z = pos2.z;
+            localData[tbx + tgx].charge = receptorCharges[atom2];
+            localData[tbx + tgx].bornRadius = receptorBornRadii[atom2];
+        } else {
+            localData[tbx + tgx].x = 0;
+            localData[tbx + tgx].y = 0;
+            localData[tbx + tgx].z = 0;
+            localData[tbx + tgx].charge = 0;
+            localData[tbx + tgx].bornRadius = 1.0f;
+        }
+        localData[tbx + tgx].energy = 0.0f;  // used for atom2 dE/dR accumulation
+        __syncwarp();
+
+        if (x == y) {
+            // Diagonal tile: self term + upper triangle
+            if (atom1 < numReceptorAtoms) {
+                energy += 0.5f * prefactor * q1 * q1 / R1;
+                myDeDR += -0.5f * prefactor * q1 * q1 / (R1 * R1);
+            }
+
+            for (int j = tgx + 1; j < TILE_SIZE; j++) {
+                int atom2_j = y * TILE_SIZE + j;
+                if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
+                    float dx = localData[tbx + j].x - pos1.x;
+                    float dy = localData[tbx + j].y - pos1.y;
+                    float dz = localData[tbx + j].z - pos1.z;
+                    float r2 = dx*dx + dy*dy + dz*dz;
+
+                    float q2 = localData[tbx + j].charge;
+                    float R2 = localData[tbx + j].bornRadius;
+                    float RiRj = R1 * R2;
+                    float expArg = -r2 / (4.0f * RiRj);
+                    float expTerm = expf(expArg);
+                    float f_gb2 = r2 + RiRj * expTerm;
+                    float f_gb = sqrtf(f_gb2);
+                    float invFgb2 = 1.0f / f_gb2;
+
+                    energy += prefactor * q1 * q2 / f_gb;
+
+                    // dE/dR_born_i from pair (i,j)
+                    float factor = -prefactor * q1 * q2 * invFgb2 / f_gb;
+                    float dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    float dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    myDeDR += factor * dFgbDR1;
+                    localData[tbx + j].energy += factor * dFgbDR2;
+                }
+            }
+
+            // Write atom2 dE/dR contributions from shared memory
+            __syncwarp();
+            if (atom2 < numReceptorAtoms && localData[tbx + tgx].energy != 0.0f) {
+                atomicAdd(&receptorDeDR[atom2], localData[tbx + tgx].energy);
+            }
+
+        } else {
+            // Off-diagonal tile
+            unsigned int tj = tgx;
+            for (int j = 0; j < TILE_SIZE; j++) {
+                int atom2_j = y * TILE_SIZE + tj;
+                if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
+                    float dx = localData[tbx + tj].x - pos1.x;
+                    float dy = localData[tbx + tj].y - pos1.y;
+                    float dz = localData[tbx + tj].z - pos1.z;
+                    float r2 = dx*dx + dy*dy + dz*dz;
+
+                    float q2 = localData[tbx + tj].charge;
+                    float R2 = localData[tbx + tj].bornRadius;
+                    float RiRj = R1 * R2;
+                    float expArg = -r2 / (4.0f * RiRj);
+                    float expTerm = expf(expArg);
+                    float f_gb2 = r2 + RiRj * expTerm;
+                    float f_gb = sqrtf(f_gb2);
+                    float invFgb2 = 1.0f / f_gb2;
+
+                    energy += prefactor * q1 * q2 / f_gb;
+
+                    float factor = -prefactor * q1 * q2 * invFgb2 / f_gb;
+                    float dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    float dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    myDeDR += factor * dFgbDR1;
+                    localData[tbx + tj].energy += factor * dFgbDR2;
+                }
+                tj = (tj + 1) & (TILE_SIZE - 1);
+                __syncwarp();
+            }
+
+            // Write atom2 dE/dR from shared memory
+            if (atom2 < numReceptorAtoms && localData[tbx + tgx].energy != 0.0f) {
+                atomicAdd(&receptorDeDR[atom2], localData[tbx + tgx].energy);
+            }
+        }
+
+        pos++;
+    }
+
+    // Flush remaining dE/dR
+    if (prevAtom1 >= 0 && prevAtom1 < numReceptorAtoms && myDeDR != 0.0f) {
+        atomicAdd(&receptorDeDR[prevAtom1], myDeDR);
+    }
+
+    // Reduce energy within block
+    energyBuffer[threadIdx.x] = energy;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            energyBuffer[threadIdx.x] += energyBuffer[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(receptorEnergy, energyBuffer[0]);
+}
+
+/**
  * Tiled computation of dE/dR_born for all receptor atoms.
  * Pre-computes receptor derivatives for use in force calculations.
  * Uses fixed-point atomicAdd for accumulation.

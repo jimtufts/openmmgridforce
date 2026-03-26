@@ -178,6 +178,7 @@ private:
     CUfunction computeReceptorBornRadiiReferenceKernel; // Init: receptor Born radii (no ligand)
     CUfunction computeReceptorReferenceEnergyKernel;   // Init: receptor energy (no ligand)
     CUfunction computeReceptorGBEnergyTiledKernel;     // Init/Runtime: receptor energy (tiled, fast)
+    CUfunction computeReceptorGBEnergyAndDeDRTiledKernel; // Fused energy + dE/dR (tiled)
     CUfunction computeLigandToReceptorHCTKernel;       // Runtime: ligand screens receptor
     CUfunction computeReceptorBornRadiiWithLigandKernel; // Runtime: receptor Born radii (with ligand)
     CUfunction computeReceptorGBEnergyKernel;          // Runtime: receptor energy (old, slow)
