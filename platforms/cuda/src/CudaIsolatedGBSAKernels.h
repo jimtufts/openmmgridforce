@@ -95,7 +95,6 @@ private:
     OpenMM::CudaArray receptorBornForces;       // [K * N_rec] - precomputed bornForces per receptor per group
     OpenMM::CudaArray dEdR_crossTerm;           // [totalParticles] - fixed-point dE_cross/dR_born_lig
     OpenMM::CudaArray bornForceLig;             // [totalParticles] - precomputed bornForce for ligand atoms
-    OpenMM::CudaArray isActiveRecAtom;           // [K * N_rec] - per-group int mask: 1=active, 0=inactive
     bool fusedHCTComputed_;                       // true if fused kernel already computed ligandToReceptorHCT
 
     // Fixed-point accumulators for tiled HCT kernel
@@ -108,21 +107,6 @@ private:
     OpenMM::CudaArray crossTermBlockCache;          // [K * numRecBlocks] - per-tile cross-term energy
     bool hasTileCache;                              // true after first call builds cache
     bool hasCrossTermCache;                         // true after first call builds cross-term cache
-    bool localityMaskValid;                      // true if cached mask is still valid
-    int localityMaskAge;                         // number of execute() calls since last mask recompute
-
-    // Baseline HCT: per-receptor-atom contribution to each ligand atom (locality optimization)
-    OpenMM::CudaArray hctReceptorPerAtom;       // [totalParticles * N_rec] - cached per-receptor contributions
-    OpenMM::CudaArray hctReceptorBaselineSum;   // [totalParticles] - sum of all baseline values per ligand atom
-    bool hasHctBaseline;                         // true after first execute computes baseline
-
-    // Receptor cell list (spatial hash for fast neighbor lookup)
-    OpenMM::CudaArray cellAtomIndex;            // [N_rec] - receptor atom indices sorted by cell
-    OpenMM::CudaArray cellStart;                // [numCells+1] - start index for each cell in cellAtomIndex
-    int cellNx, cellNy, cellNz;                 // cell grid dimensions
-    float cellOriginX, cellOriginY, cellOriginZ; // cell grid origin
-    float cellSize;                              // cell size (= locality cutoff)
-    bool hasCellList;                            // true after cell list is built
 
     // Device arrays - ligand atom parameters
     OpenMM::CudaArray charges;
@@ -174,39 +158,17 @@ private:
     CUfunction computeReceptorHCTPairwiseChainRuleKernel;
 
     // PAIRWISE mode kernels - tiled versions for O(N²) efficiency
-    CUfunction computeReceptorSelfHCTKernel;           // Init: receptor-receptor HCT (old, slow)
     CUfunction computeReceptorSelfHCTTiledKernel;      // Init: receptor-receptor HCT (tiled, fast)
     CUfunction convertHCTToFloatKernel;                // Convert fixed-point HCT to float
     CUfunction computeReceptorBornRadiiReferenceKernel; // Init: receptor Born radii (no ligand)
-    CUfunction computeReceptorReferenceEnergyKernel;   // Init: receptor energy (no ligand)
     CUfunction computeReceptorGBEnergyTiledKernel;     // Init/Runtime: receptor energy (tiled, fast)
     CUfunction computeReceptorGBEnergyAndDeDRTiledKernel; // Fused energy + dE/dR (tiled)
-    CUfunction computeLigandToReceptorHCTKernel;       // Runtime: ligand screens receptor
     CUfunction computeReceptorBornRadiiWithLigandKernel; // Runtime: receptor Born radii (with ligand)
-    CUfunction computeReceptorGBEnergyKernel;          // Runtime: receptor energy (old, slow)
-    CUfunction computeReceptorDeDRSimpleKernel;        // Runtime: compute dE/dR_born for receptors
-    CUfunction computeCrossTermGBEnergyKernel;         // Runtime: receptor-ligand GB pairs
-    CUfunction computeReceptorDesolvationForcesKernel; // Runtime: forces from receptor desolv (old, slow)
-    CUfunction computeReceptorDesolvationForcesOptimizedKernel; // Runtime: forces with pre-computed bornForces
     CUfunction precomputeReceptorBornForcesKernel;    // Runtime: precompute bornForces per receptor
     CUfunction computeFusedReceptorForcesKernel;     // Runtime: fused desolv + cross-term forces (legacy)
     CUfunction computePairwiseGBForceTiledKernel;   // Runtime: tiled pass 1 (cross-term + desolv + dEdR)
     CUfunction reduceLigandBornForceKernel;          // Runtime: dEdR → bornForceLig
     CUfunction computePairwiseChainRuleTiledKernel;  // Runtime: tiled pass 2 (chain rule)
-    CUfunction computeCrossTermChainRuleForcesKernel;  // Runtime: forces from cross-term chain rule
-
-    // Locality cutoff kernels
-    CUfunction computeActiveReceptorAtomsKernel;     // Runtime: build active atom mask
-    CUfunction computeReceptorEnergyDeltaKernel;     // Runtime: O(|A|*N) delta energy
-    CUfunction computeReceptorDeDRActiveKernel;      // Runtime: dE/dR for active atoms only
-    CUfunction computeReceptorHCTPerAtomKernel;      // Init: per-receptor HCT contributions
-    CUfunction computeBaselineHCTSumKernel;          // Init: sum baseline per ligand atom
-    CUfunction reconstructReceptorHCTKernel;         // Runtime: reconstruct HCT (old, O(N_rec))
-    CUfunction reconstructReceptorHCTFastKernel;     // Runtime: reconstruct HCT (fast, O(|A|))
-    CUfunction computeReceptorHCTCellListKernel;     // Runtime: receptor HCT via cell list
-    CUfunction reconstructReceptorHCTCellListKernel; // Runtime: reconstruct HCT via cell list
-    CUfunction computeFusedReceptorLigandHCTKernel;  // Runtime: fused bidirectional HCT via warp shuffle
-    CUfunction computeReceptorLigandHCTParallelKernel; // Runtime: receptor-threaded bidirectional HCT
     CUfunction computeReceptorLigandHCTTiledKernel;   // Runtime: rectangular tiled bidirectional HCT
     CUfunction convertTiledHCTToFloatKernel;           // Convert fixed-point HCT to float
     CUfunction addDistantHCTFromCacheKernel;          // Reconstruct distant HCT from cache
@@ -215,7 +177,6 @@ private:
 
     // GPU-side accumulation (eliminate host-device sync)
     CUfunction accumulateDesolvationOnGPUKernel;
-    CUfunction accumulateDesolvationDeltaOnGPUKernel;
     CUfunction accumulateCrossTermOnGPUKernel;
 
     CUfunction computeHessianKernel;

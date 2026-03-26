@@ -37,17 +37,6 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       computeHCTChainRuleForcesKernel(nullptr),
       computeReceptorHCTGradientForceKernel(nullptr),
       computeReceptorHCTPairwiseChainRuleKernel(nullptr),
-      computeReceptorSelfHCTKernel(nullptr),
-      computeReceptorBornRadiiReferenceKernel(nullptr),
-      computeReceptorReferenceEnergyKernel(nullptr),
-      computeLigandToReceptorHCTKernel(nullptr),
-      computeReceptorBornRadiiWithLigandKernel(nullptr),
-      computeReceptorGBEnergyKernel(nullptr),
-      computeReceptorDeDRSimpleKernel(nullptr),
-      computeCrossTermGBEnergyKernel(nullptr),
-      computeReceptorDesolvationForcesKernel(nullptr),
-      computeReceptorDesolvationForcesOptimizedKernel(nullptr),
-      computeCrossTermChainRuleForcesKernel(nullptr),
       computeHessianKernel(nullptr) {
 }
 
@@ -353,8 +342,6 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
         computeReceptorHCTPairwiseKernel = cu.getKernel(module, "computeIsolatedReceptorHCTPairwise");
         computeReceptorHCTPairwiseTiledKernel = cu.getKernel(module, "computeIsolatedReceptorHCTPairwiseTiled");
-        computeFusedReceptorLigandHCTKernel = cu.getKernel(module, "computeFusedReceptorLigandHCT");
-        computeReceptorLigandHCTParallelKernel = cu.getKernel(module, "computeReceptorLigandHCTParallel");
         computeReceptorLigandHCTTiledKernel = cu.getKernel(module, "computeReceptorLigandHCTTiled");
         convertTiledHCTToFloatKernel = cu.getKernel(module, "convertTiledHCTToFloat");
         addDistantHCTFromCacheKernel = cu.getKernel(module, "addDistantHCTFromCache");
@@ -362,112 +349,24 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         addDistantCrossTermFromCacheKernel = cu.getKernel(module, "addDistantCrossTermFromCache");
         computeReceptorHCTPairwiseChainRuleKernel = cu.getKernel(module, "computeIsolatedReceptorHCTPairwiseChainRule");
 
-        // PAIRWISE mode: receptor desolvation kernels (both old and tiled versions)
-        computeReceptorSelfHCTKernel = cu.getKernel(module, "computeReceptorSelfHCT");
+        // PAIRWISE mode: receptor desolvation kernels
         computeReceptorSelfHCTTiledKernel = cu.getKernel(module, "computeReceptorSelfHCTTiled");
         convertHCTToFloatKernel = cu.getKernel(module, "convertHCTToFloat");
         computeReceptorBornRadiiReferenceKernel = cu.getKernel(module, "computeReceptorBornRadiiReference");
-        computeReceptorReferenceEnergyKernel = cu.getKernel(module, "computeReceptorReferenceEnergy");
         computeReceptorGBEnergyTiledKernel = cu.getKernel(module, "computeReceptorGBEnergyTiled");
         computeReceptorGBEnergyAndDeDRTiledKernel = cu.getKernel(module, "computeReceptorGBEnergyAndDeDRTiled");
-        computeLigandToReceptorHCTKernel = cu.getKernel(module, "computeLigandToReceptorHCT");
         computeReceptorBornRadiiWithLigandKernel = cu.getKernel(module, "computeReceptorBornRadiiWithLigand");
-        computeReceptorGBEnergyKernel = cu.getKernel(module, "computeReceptorGBEnergy");
-        computeReceptorDeDRSimpleKernel = cu.getKernel(module, "computeReceptorDeDRSimple");
-        computeCrossTermGBEnergyKernel = cu.getKernel(module, "computeCrossTermGBEnergy");
-        computeReceptorDesolvationForcesKernel = cu.getKernel(module, "computeReceptorDesolvationForces");
-        computeReceptorDesolvationForcesOptimizedKernel = cu.getKernel(module, "computeReceptorDesolvationForcesOptimized");
         precomputeReceptorBornForcesKernel = cu.getKernel(module, "precomputeReceptorBornForces");
         computePairwiseGBForceTiledKernel = cu.getKernel(module, "computePairwiseGBForceTiled");
         reduceLigandBornForceKernel = cu.getKernel(module, "reduceLigandBornForce");
         computePairwiseChainRuleTiledKernel = cu.getKernel(module, "computePairwiseChainRuleTiled");
-        computeCrossTermChainRuleForcesKernel = cu.getKernel(module, "computeCrossTermChainRuleForces");
 
         // GPU-side accumulation kernels (eliminate host-device sync)
         accumulateDesolvationOnGPUKernel = cu.getKernel(module, "accumulateDesolvationOnGPU");
-        accumulateDesolvationDeltaOnGPUKernel = cu.getKernel(module, "accumulateDesolvationDeltaOnGPU");
         accumulateCrossTermOnGPUKernel = cu.getKernel(module, "accumulateCrossTermOnGPU");
 
         // Allocate fixed-point buffer for tiled HCT computation
         receptorSelfHCTFixed.initialize<unsigned long long>(cu, numReceptorAtoms, "receptorSelfHCTFixed");
-
-        // Locality cutoff: allocate active atom mask and load kernels
-        if (receptorLocalityCutoff > 0.0f) {
-            isActiveRecAtom.initialize<int>(cu, numParticleGroups * numReceptorAtoms, "isActiveRecAtom");
-            computeActiveReceptorAtomsKernel = cu.getKernel(module, "computeActiveReceptorAtoms");
-            computeReceptorEnergyDeltaKernel = cu.getKernel(module, "computeReceptorEnergyDelta");
-            computeReceptorDeDRActiveKernel = cu.getKernel(module, "computeReceptorDeDRActive");
-
-            // Per-receptor-atom HCT baseline for frozen inactive contributions
-            localityMaskValid = false;
-            localityMaskAge = 0;
-
-            hctReceptorPerAtom.initialize<float>(cu, totalParticles * numReceptorAtoms, "hctReceptorPerAtom");
-            hctReceptorBaselineSum.initialize<float>(cu, totalParticles, "hctReceptorBaselineSum");
-            hasHctBaseline = false;
-            computeReceptorHCTPerAtomKernel = cu.getKernel(module, "computeReceptorHCTPerAtom");
-            computeBaselineHCTSumKernel = cu.getKernel(module, "computeBaselineHCTSum");
-            reconstructReceptorHCTKernel = cu.getKernel(module, "reconstructReceptorHCT");
-            reconstructReceptorHCTFastKernel = cu.getKernel(module, "reconstructReceptorHCTFast");
-
-            // Build receptor cell list for spatial neighbor lookup
-            // Cell size = locality cutoff. Each cell contains receptor atoms in that region.
-            const auto& recPos = force.getReceptorPositions();
-            float3 recMin = make_float3(1e30f, 1e30f, 1e30f);
-            float3 recMax = make_float3(-1e30f, -1e30f, -1e30f);
-            for (int i = 0; i < numReceptorAtoms; i++) {
-                float x = static_cast<float>(recPos[i*3]);
-                float y = static_cast<float>(recPos[i*3+1]);
-                float z = static_cast<float>(recPos[i*3+2]);
-                recMin.x = std::min(recMin.x, x); recMax.x = std::max(recMax.x, x);
-                recMin.y = std::min(recMin.y, y); recMax.y = std::max(recMax.y, y);
-                recMin.z = std::min(recMin.z, z); recMax.z = std::max(recMax.z, z);
-            }
-            // Pad by cutoff so ligand atoms near edges still find neighbors
-            float pad = receptorLocalityCutoff;
-            cellOriginX = recMin.x - pad;
-            cellOriginY = recMin.y - pad;
-            cellOriginZ = recMin.z - pad;
-            cellSize = receptorLocalityCutoff;
-            cellNx = std::max(1, (int)ceilf((recMax.x + pad - cellOriginX) / cellSize));
-            cellNy = std::max(1, (int)ceilf((recMax.y + pad - cellOriginY) / cellSize));
-            cellNz = std::max(1, (int)ceilf((recMax.z + pad - cellOriginZ) / cellSize));
-            int numCells = cellNx * cellNy * cellNz;
-
-            // Count atoms per cell
-            std::vector<int> cellCount(numCells, 0);
-            std::vector<int> atomCell(numReceptorAtoms);
-            for (int i = 0; i < numReceptorAtoms; i++) {
-                int cx = std::min(cellNx-1, std::max(0, (int)((recPos[i*3] - cellOriginX) / cellSize)));
-                int cy = std::min(cellNy-1, std::max(0, (int)((recPos[i*3+1] - cellOriginY) / cellSize)));
-                int cz = std::min(cellNz-1, std::max(0, (int)((recPos[i*3+2] - cellOriginZ) / cellSize)));
-                int cell = cx * cellNy * cellNz + cy * cellNz + cz;
-                atomCell[i] = cell;
-                cellCount[cell]++;
-            }
-            // Build cell start array (prefix sum)
-            std::vector<int> cellStartHost(numCells + 1, 0);
-            for (int c = 0; c < numCells; c++)
-                cellStartHost[c + 1] = cellStartHost[c] + cellCount[c];
-            // Build sorted atom index
-            std::vector<int> atomIndexHost(numReceptorAtoms);
-            std::vector<int> cellFill(numCells, 0);
-            for (int i = 0; i < numReceptorAtoms; i++) {
-                int c = atomCell[i];
-                atomIndexHost[cellStartHost[c] + cellFill[c]] = i;
-                cellFill[c]++;
-            }
-            // Upload to GPU
-            cellAtomIndex.initialize<int>(cu, numReceptorAtoms, "cellAtomIndex");
-            cellAtomIndex.upload(atomIndexHost);
-            cellStart.initialize<int>(cu, numCells + 1, "cellStart");
-            cellStart.upload(cellStartHost);
-            hasCellList = true;
-
-            // Load cell-list-based HCT kernel
-            computeReceptorHCTCellListKernel = cu.getKernel(module, "computeIsolatedReceptorHCTCellList");
-            reconstructReceptorHCTCellListKernel = cu.getKernel(module, "reconstructReceptorHCTCellList");
-        }
 
         // Compute receptor self-HCT using TILED kernel for O(N²) efficiency
         const int TILE_SIZE = 32;
@@ -1136,9 +1035,6 @@ void CudaCalcIsolatedGBSAForceKernel::updateParametersInContext(ContextImpl& con
     surfaceTension = static_cast<float>(force.getSurfaceTension());
     cutoffDistance = static_cast<float>(force.getCutoffDistance());
     receptorLocalityCutoff = static_cast<float>(force.getReceptorLocalityCutoff());
-
-    // Invalidate locality mask cache (scaling changed, may need new mask)
-    localityMaskValid = false;
 
     // Update alchemical scaling factors
     globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
