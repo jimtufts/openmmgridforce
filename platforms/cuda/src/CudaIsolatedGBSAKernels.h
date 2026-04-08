@@ -88,12 +88,10 @@ private:
     OpenMM::CudaArray receptorSelfHCTFixed;     // [N_rec] - receptor-receptor HCT (fixed-point for tiled kernel)
     OpenMM::CudaArray receptorBornRadiiRef;     // [N_rec] - receptor Born radii without ligand
     OpenMM::CudaArray receptorReferenceEnergy;  // [1] - scalar reference energy
-    OpenMM::CudaArray ligandToReceptorHCT;      // [N_rec * numGroups] - per-group ligand screening (float)
-    OpenMM::CudaArray ligandToReceptorHCTFixed; // [N_rec * numGroups] - fixed-point accumulator
+    OpenMM::CudaArray ligandToReceptorHCT;      // [N_rec * numGroups] - per-group ligand screening
     OpenMM::CudaArray receptorBornRadii;        // [K * N_rec] - per-group Born radii with ligand
-    OpenMM::CudaArray receptorEnergy;           // [K] - per-group receptor energy (fixed-point)
-    OpenMM::CudaArray receptorDeDR;             // [K * N_rec] - per-group dE/dR_born (fixed-point)
-    OpenMM::CudaArray receptorDeDRFloat;        // [K * N_rec] - float version for downstream consumers
+    OpenMM::CudaArray receptorEnergy;           // [K] - per-group receptor energy working buffer
+    OpenMM::CudaArray receptorDeDR;             // [K * N_rec] - per-group dE/dR_born for receptor atoms
     OpenMM::CudaArray receptorBornForces;       // [K * N_rec] - precomputed bornForces per receptor per group
     OpenMM::CudaArray dEdR_crossTerm;           // [totalParticles] - fixed-point dE_cross/dR_born_lig
     OpenMM::CudaArray bornForceLig;             // [totalParticles] - precomputed bornForce for ligand atoms
@@ -176,8 +174,6 @@ private:
     CUfunction addDistantHCTFromCacheKernel;          // Reconstruct distant HCT from cache
     CUfunction restoreDistantLigToRecHCTKernel;       // Restore cached lig→rec HCT for distant atoms
     CUfunction addDistantCrossTermFromCacheKernel;    // Reconstruct distant cross-term energy
-    CUfunction addCrossTermToDEdRKernel;              // Combine self + cross dE/dR before chain rule
-    CUfunction computeFusedPairwiseChainRuleForcesKernel; // Fused lig-lig + rec→lig + lig→rec chain rule
 
     // GPU-side accumulation (eliminate host-device sync)
     CUfunction accumulateDesolvationOnGPUKernel;
@@ -198,13 +194,8 @@ private:
 
     bool skipGroupEnergyDownload_ = false;
 
-    // Profiling
-    bool profilingEnabled_ = true;
-    int profilingCallCount_ = 0;
-    static constexpr int PROFILE_CALLS = 3;
 public:
     void setSkipGroupEnergyDownload(bool skip) override { skipGroupEnergyDownload_ = skip; }
-    void enableProfiling(bool enable) { profilingEnabled_ = enable; }
     void* getGroupEnergyDevicePointer() override {
         return groupEnergies.isInitialized()
             ? (void*)groupEnergies.getDevicePointer() : nullptr;

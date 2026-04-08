@@ -523,7 +523,22 @@ extern "C" __global__ void computeGridForce(
                 else vppp = 0.0f;
             }
 
-            // Perform trilinear interpolation (in transformed space if RUNTIME mode)
+            // Apply runtime tanh cap PER CORNER before interpolation.
+            // This preserves gradients near clash boundaries (matching AlGDock's
+            // pre-capped grid approach) instead of capping the interpolated value
+            // which kills the gradient when the interpolated value >> cap.
+            if (effectiveCap > 0.0f) {
+                vmmm = effectiveCap * tanhf(vmmm / effectiveCap);
+                vmmp = effectiveCap * tanhf(vmmp / effectiveCap);
+                vmpm = effectiveCap * tanhf(vmpm / effectiveCap);
+                vmpp = effectiveCap * tanhf(vmpp / effectiveCap);
+                vpmm = effectiveCap * tanhf(vpmm / effectiveCap);
+                vpmp = effectiveCap * tanhf(vpmp / effectiveCap);
+                vppm = effectiveCap * tanhf(vppm / effectiveCap);
+                vppp = effectiveCap * tanhf(vppp / effectiveCap);
+            }
+
+            // Perform trilinear interpolation (in transformed/capped space)
             float vmm = oz * vmmm + fz * vmmp;
             float vmp = oz * vmpm + fz * vmpp;
             float vpm = oz * vpmm + fz * vpmp;
@@ -534,7 +549,7 @@ extern "C" __global__ void computeGridForce(
 
             interpolated = ox * vm + fx * vp;
 
-            // Calculate forces (gradients in transformed space)
+            // Calculate forces (gradients in capped space — natural from capped corners)
             // NOTE: Do NOT divide by spacing yet - must apply chain rule first!
             dx = (vp - vm);
             dy = (ox * (vmp - vmm) + fx * (vpp - vpm));
@@ -577,16 +592,7 @@ extern "C" __global__ void computeGridForce(
             atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
         }
 
-        // Apply runtime tanh cap: f(v) = C * tanh(v/C), bounded by ±C
-        // Gradient factor: sech²(v/C) = 1 - tanh²(v/C)
-        if (effectiveCap > 0.0f) {
-            float t = tanhf(interpolated / effectiveCap);
-            float gradFactor = 1.0f - t * t;
-            interpolated = effectiveCap * t;
-            dx *= gradFactor;
-            dy *= gradFactor;
-            dz *= gradFactor;
-        }
+        // (tanh cap applied per-corner before interpolation)
 
         // Now convert gradients to forces by dividing by spacing
         dx /= gridSpacing[0];

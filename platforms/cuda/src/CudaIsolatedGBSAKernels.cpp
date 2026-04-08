@@ -10,7 +10,6 @@
 #include "openmm/OpenMMException.h"
 #include <cmath>
 #include <iostream>
-#include <chrono>
 
 using namespace GridForcePlugin;
 using namespace OpenMM;
@@ -210,7 +209,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         // Allocate constant receptor buffers (per-group buffers allocated after groups are known)
         receptorSelfHCT.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorSelfHCT");
         receptorBornRadiiRef.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorBornRadiiRef");
-        receptorReferenceEnergy.initialize<unsigned long long>(cu, 1, "isolatedGbsaReceptorReferenceEnergy");
+        receptorReferenceEnergy.initialize<float>(cu, 1, "isolatedGbsaReceptorReferenceEnergy");
     }
 
     // Process particle groups
@@ -273,12 +272,12 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     }
 
     // Allocate per-group energy buffers
-    groupEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupEnergies");
-    groupLigandSelfEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupLigandSelfEnergies");
+    groupEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupEnergies");
+    groupLigandSelfEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupLigandSelfEnergies");
     groupReceptorContributions.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorContributions");
     groupReceptorDesolvations.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorDesolvations");
-    groupCrossTermEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupCrossTermEnergies");
-    groupUnscaledEnergies.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaGroupUnscaledEnergies");
+    groupCrossTermEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupCrossTermEnergies");
+    groupUnscaledEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupUnscaledEnergies");
 
     groupEnergiesHost.resize(numParticleGroups);
     groupLigandSelfEnergiesHost.resize(numParticleGroups);
@@ -292,11 +291,9 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     // Allocate per-group receptor buffers for PAIRWISE mode (now that K is known)
     if (receptorMode == IsolatedGBSAForce::PAIRWISE && numReceptorAtoms > 0) {
         ligandToReceptorHCT.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaLigandToReceptorHCT");
-        ligandToReceptorHCTFixed.initialize<unsigned long long>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaLigandToReceptorHCTFixed");
         receptorBornRadii.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornRadii");
-        receptorEnergy.initialize<unsigned long long>(cu, numParticleGroups, "isolatedGbsaReceptorEnergy");
-        receptorDeDR.initialize<unsigned long long>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDR");
-        receptorDeDRFloat.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDRFloat");
+        receptorEnergy.initialize<float>(cu, numParticleGroups, "isolatedGbsaReceptorEnergy");
+        receptorDeDR.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDR");
         receptorBornForces.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornForces");
 
         // Fixed-point accumulators for tiled HCT kernel
@@ -362,8 +359,6 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         computePairwiseGBForceTiledKernel = cu.getKernel(module, "computePairwiseGBForceTiled");
         reduceLigandBornForceKernel = cu.getKernel(module, "reduceLigandBornForce");
         computePairwiseChainRuleTiledKernel = cu.getKernel(module, "computePairwiseChainRuleTiled");
-        addCrossTermToDEdRKernel = cu.getKernel(module, "addCrossTermToDEdR");
-        computeFusedPairwiseChainRuleForcesKernel = cu.getKernel(module, "computeFusedPairwiseChainRuleForces");
 
         // GPU-side accumulation kernels (eliminate host-device sync)
         accumulateDesolvationOnGPUKernel = cu.getKernel(module, "accumulateDesolvationOnGPU");
@@ -416,8 +411,8 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         };
         cu.executeKernel(computeReceptorBornRadiiReferenceKernel, bornRefArgs, convertBlocks * recBlockSize, recBlockSize);
 
-        // Step 3: Compute receptor reference energy using TILED kernel (fixed-point)
-        vector<unsigned long long> zeroEnergy(1, 0ULL);
+        // Step 3: Compute receptor reference energy using TILED kernel
+        vector<float> zeroEnergy(1, 0.0f);
         receptorReferenceEnergy.upload(zeroEnergy);
 
         void* refEnergyTiledArgs[] = {
@@ -426,10 +421,10 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         };
         cu.executeKernel(computeReceptorGBEnergyTiledKernel, refEnergyTiledArgs, recNumBlocks * recBlockSize, recBlockSize);
 
-        // Download and cache reference energy (convert from fixed-point)
-        vector<unsigned long long> refEnergyFixed(1);
-        receptorReferenceEnergy.download(refEnergyFixed);
-        receptorReferenceEnergyValue = (float)((long long)refEnergyFixed[0] / (double)0x100000000);
+        // Download and cache reference energy
+        vector<float> refEnergy(1);
+        receptorReferenceEnergy.download(refEnergy);
+        receptorReferenceEnergyValue = refEnergy[0];
     }
 
     hasInitializedKernel = true;
@@ -445,16 +440,6 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     int totalParticles = particleIndices.getSize();
     if (totalParticles == 0) return 0.0;
 
-    // Wall-clock timing for entire execute()
-    static int execCallCount = 0;
-    if (execCallCount == 0) {
-        fprintf(stderr, "[INFO] paddedNumAtoms=%d, energyBuffer=%d elements, longForceBuffer=%d elements\n",
-                cu.getPaddedNumAtoms(),
-                (int)cu.getEnergyBuffer().getSize(),
-                (int)cu.getLongForceBuffer().getSize());
-    }
-    auto tExecStart = std::chrono::high_resolution_clock::now();
-
     int paddedNumAtoms = cu.getPaddedNumAtoms();
 
     // Clear energy and intermediate buffers (async GPU clears — no CPU-GPU sync)
@@ -466,24 +451,6 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     cu.clearBuffer(groupCrossTermEnergies);
     cu.clearBuffer(hctReceptor);
     cu.clearBuffer(hctLigand);
-
-    // Profiling
-    bool doProfiling = profilingEnabled_ && (profilingCallCount_ < PROFILE_CALLS);
-    auto profileSync = [&]() -> double {
-        if (!doProfiling) return 0.0;
-        cuCtxSynchronize();
-        return std::chrono::duration<double, std::milli>(
-            std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-    };
-    double tPrev = profileSync();
-    auto profileMark = [&](const char* label) {
-        if (!doProfiling) return;
-        double tNow = profileSync();
-        fprintf(stderr, "[PROFILE] %s: %g ms\n", label, tNow - tPrev);
-        fflush(stderr);
-        tPrev = tNow;
-    };
-    if (doProfiling) profilingCallCount_++;
 
     // Get device pointers
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
@@ -504,7 +471,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     int blockSize = 256;
     int numBlocks = (totalParticles + blockSize - 1) / blockSize;
 
-    profileMark("clear_buffers");
+
     // Step 0: (tile-skipping replaces active mask — no per-atom mask needed)
     // Step 1: Compute receptor HCT (if receptor mode is enabled)
     if (receptorMode == IsolatedGBSAForce::GRID) {
@@ -626,7 +593,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         fusedHCTComputed_ = true;
     }
 
-    profileMark("step1_receptor_hct");
+
     // Step 2: Compute ligand-ligand HCT
     void* ligandArgs[] = {
         &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
@@ -634,7 +601,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     };
     cu.executeKernel(computeLigandHCTKernel, ligandArgs, numBlocks * blockSize, blockSize);
 
-    profileMark("step2_ligand_hct");
+
     // Step 3: Compute Born radii
     int gbMethodInt = static_cast<int>(gbMethod);
     if (gbMethod == IsolatedGBSAForce::HCT) {
@@ -655,7 +622,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     CUdeviceptr groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
     CUdeviceptr groupUnscaledEnergiesPtr = groupUnscaledEnergies.getDevicePointer();
 
-    profileMark("step3_born_radii");
+
     // Step 4: Compute GB energy and forces
     void* energyArgs[] = {
         &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
@@ -665,7 +632,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     };
     cu.executeKernel(computeGBEnergyKernel, energyArgs, numBlocks * blockSize, blockSize);
 
-    profileMark("step4_gb_energy");
+
     // Step 4b: PAIRWISE mode - receptor desolvation and cross-term energy
     // All accumulation done on GPU to avoid host-device sync points.
     if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
@@ -694,13 +661,13 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
         CUdeviceptr isActiveRecAtomPtr = (CUdeviceptr)0;  // no longer used for active mask
 
-    profileMark("4b_setup");
+
         // 4b.1: Ligand→receptor HCT already computed by tiled kernel in Step 1
         // (fusedHCTComputed_ is always true now)
 
         CUdeviceptr receptorDeDRPtr = receptorDeDR.getDevicePointer();
 
-    profileMark("4b1_lig_to_rec_hct");
+
         // 4b.2: Receptor Born radii for ALL groups (single batched launch)
         int totalBornWork = numParticleGroups * numReceptorAtoms;
         int bornBlocks = (totalBornWork + recBlockSize - 1) / recBlockSize;
@@ -713,22 +680,19 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         };
         cu.executeKernel(computeReceptorBornRadiiWithLigandKernel, recBornArgs, bornBlocks * recBlockSize, recBlockSize);
 
-    profileMark("4b2_rec_born_radii");
+
         // 4b.3: Fused receptor energy + dE/dR per group (single tiled O(N²) pass)
         cu.clearBuffer(receptorEnergy);
         if (includeForces) {
             cu.clearBuffer(receptorDeDR);  // clear ALL groups' dE/dR at once (async)
         }
 
-        int activeGroupCount = 0;
-        auto tLoopStart = std::chrono::high_resolution_clock::now();
         for (int g = 0; g < numParticleGroups; g++) {
             float gScale = globalScalingFactor * groupScalingFactorsHostCopy[g];
             if (gScale < 0.05f) continue;
-            activeGroupCount++;
 
             CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
-            CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(unsigned long long);
+            CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(float);
             cu.clearBuffer(receptorEnergy);
 
             if (includeForces) {
@@ -756,42 +720,20 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(accumulateDesolvationOnGPUKernel, accumArgs, 1, 1);
         }
 
-        {
-            auto tLoopEnd = std::chrono::high_resolution_clock::now();
-            double loopMs = std::chrono::duration<double, std::milli>(tLoopEnd - tLoopStart).count();
-            // Sync after the batch to measure actual GPU time
-            auto tSyncStart = std::chrono::high_resolution_clock::now();
-            cuCtxSynchronize();
-            auto tSyncEnd = std::chrono::high_resolution_clock::now();
-            double syncMs = std::chrono::duration<double, std::milli>(tSyncEnd - tSyncStart).count();
-            double totalMs = std::chrono::duration<double, std::milli>(tSyncEnd - tLoopStart).count();
-            if (execCallCount < 6) {
-                fprintf(stderr, "[LOOP] call %d: launch=%.2f ms, sync=%.2f ms, total=%.2f ms (%d groups, %d launches)\n",
-                        execCallCount, loopMs, syncMs, totalMs, activeGroupCount, activeGroupCount * 3);
-            }
-        }
-    profileMark("4b3_rec_energy_and_dedr");
-        // 4b.3b: Convert receptorDeDR from fixed-point to float, then precompute bornForces
+        // 4b.3b: Precompute bornForces per receptor atom
         if (includeForces) {
-            // Convert fixed-point dE/dR to float
-            CUdeviceptr receptorDeDRFloatPtr = receptorDeDRFloat.getDevicePointer();
-            int convTotal = numParticleGroups * numReceptorAtoms;
-            int convBlocks3 = (convTotal + blockSize - 1) / blockSize;
-            void* convArgs3[] = { &receptorDeDRPtr, &receptorDeDRFloatPtr, &convTotal };
-            cu.executeKernel(convertTiledHCTToFloatKernel, convArgs3, convBlocks3 * blockSize, blockSize);
-
             CUdeviceptr bornForcesRecPtr = receptorBornForces.getDevicePointer();
             int bfBlocks = (numParticleGroups * numReceptorAtoms + blockSize - 1) / blockSize;
             void* bfArgs[] = {
                 &receptorRadiiPtr, &receptorSelfHCTPtr, &ligandToReceptorHCTPtr,
-                &receptorBornRadiiPtr, &receptorDeDRFloatPtr,
+                &receptorBornRadiiPtr, &receptorDeDRPtr,
                 &numReceptorAtoms, &numParticleGroups, &bornForcesRecPtr,
                 &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(precomputeReceptorBornForcesKernel, bfArgs, bfBlocks * blockSize, blockSize);
         }
 
-    profileMark("4b3b_bornforces");
+
         // === TILED FORCE PASS 1: cross-term energy + direct forces + dE/dR_lig + desolv chain rule ===
         CUdeviceptr receptorChargesPtr2 = receptorCharges.getDevicePointer();
         CUdeviceptr bornForcesRecPtr2 = receptorBornForces.getDevicePointer();
@@ -864,12 +806,34 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         };
         cu.executeKernel(accumulateCrossTermOnGPUKernel, crossAccumArgs, 1, 1);
 
-    profileMark("4b4_tiled_force_pass1");
-        // Cross-term chain rule (pass 2) removed — now combined with self chain rule
-        // in Step 6 via addCrossTermToDEdR for proper force cancellation.
+
+        // === REDUCE: dE/dR_born_lig → bornForceLig ===
+        int reduceBlocks = (totalParticles + blockSize - 1) / blockSize;
+        void* reduceArgs[] = {
+            &dEdRCrossTermPtr, &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr,
+            &radiiPtr, &groupStartPtr, &numParticleGroups, &totalParticles, &numAtoms,
+            &globalScalingFactor, &groupScalingFactorsPtr, &bornForceLigPtr
+        };
+        cu.executeKernel(reduceLigandBornForceKernel, reduceArgs, reduceBlocks * blockSize, blockSize);
+
+
+        // === TILED FORCE PASS 2: cross-term HCT chain rule ===
+        // Pass 2 has no energy — tile-skip freely when locality cutoff is set
+        float chainTileSkipCutoff = (receptorLocalityCutoff > 0.0f) ? receptorLocalityCutoff : -1.0f;
+        CUdeviceptr groupScalingFactorsPtr3 = groupScalingFactorsBuffer.getDevicePointer();
+        void* tiledChainArgs[] = {
+            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+            &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
+            &bornForceLigPtr,
+            &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
+            &cutoffDistance, &forcePtr, &paddedNumAtoms, &numRecBlocks2,
+            &recBlockBoundsPtr2, &chainTileSkipCutoff,
+            &globalScalingFactor, &groupScalingFactorsPtr3
+        };
+        cu.executeKernel(computePairwiseChainRuleTiledKernel, tiledChainArgs, forceBlocks2 * blockSize, blockSize);
     }
 
-    profileMark("4b6_tiled_force_pass2");
+
     // Step 5: Optional surface area term
     if (includeSurfaceArea) {
         float probe = (receptorMode == IsolatedGBSAForce::GRID) ? probeRadius : 0.14f;
@@ -882,26 +846,18 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         cu.executeKernel(computeSAEnergyKernel, saArgs, numBlocks * blockSize, blockSize);
     }
 
-    profileMark("step5_sa");
+
     // Step 6: Chain rule forces through Born radii
     if (includeForces) {
         CUdeviceptr dE_dRPtr = dE_dR.getDevicePointer();
 
-        // Accumulate dE/dR_born from self-energy (scaled by alchemical factors)
+        // Accumulate dE/dR_born (scaled by alchemical factors)
         void* bornDerivArgs[] = {
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
             &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor, &dE_dRPtr,
             &globalScalingFactor, &groupScalingFactorsPtr
         };
         cu.executeKernel(accumulateBornRadiiDerivativesKernel, bornDerivArgs, numBlocks * blockSize, blockSize);
-
-        // Combine cross-term dE/dR into self dE/dR BEFORE chain rule
-        // This ensures proper cancellation between self and cross-term forces
-        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            CUdeviceptr dEdRCrossCombinePtr = dEdR_crossTerm.getDevicePointer();
-            void* combineArgs[] = { &dE_dRPtr, &dEdRCrossCombinePtr, &totalParticles };
-            cu.executeKernel(addCrossTermToDEdRKernel, combineArgs, numBlocks * blockSize, blockSize);
-        }
 
         if (includeSurfaceArea) {
             float probe = (receptorMode == IsolatedGBSAForce::GRID) ? probeRadius : 0.14f;
@@ -913,35 +869,16 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(accumulateSADerivativesKernel, saDerivArgs, numBlocks * blockSize, blockSize);
         }
 
-        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            // Fused chain rule: lig-lig + rec→lig + lig→rec in single pass
-            CUdeviceptr receptorPosPtr = receptorPositions.getDevicePointer();
-            CUdeviceptr receptorRadiiPtr = receptorRadii.getDevicePointer();
-            CUdeviceptr receptorScalesPtr = receptorScaleFactors.getDevicePointer();
-            CUdeviceptr bornForcesRecPtr2 = receptorBornForces.getDevicePointer();
-            CUdeviceptr groupScalingFactorsPtr4 = groupScalingFactorsBuffer.getDevicePointer();
-            void* fusedChainArgs[] = {
-                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-                &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
-                &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
-                &bornForcesRecPtr2, &numReceptorAtoms,
-                &groupStartPtr, &numParticleGroups, &numAtoms, &cutoffDistance,
-                &forcePtr, &paddedNumAtoms,
-                &globalScalingFactor, &groupScalingFactorsPtr4
-            };
-            cu.executeKernel(computeFusedPairwiseChainRuleForcesKernel, fusedChainArgs, numBlocks * blockSize, blockSize);
-        } else {
-            // Non-PAIRWISE: ligand-ligand chain rule only
-            void* hctChainArgs[] = {
-                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-                &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
-                &groupStartPtr, &numParticleGroups, &numAtoms, &cutoffDistance,
-                &forcePtr, &paddedNumAtoms
-            };
-            cu.executeKernel(computeHCTChainRuleForcesKernel, hctChainArgs, numBlocks * blockSize, blockSize);
-        }
+        // Ligand-ligand HCT chain rule forces (scaling propagates via dE_dR)
+        void* hctChainArgs[] = {
+            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+            &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
+            &groupStartPtr, &numParticleGroups, &numAtoms, &cutoffDistance,
+            &forcePtr, &paddedNumAtoms
+        };
+        cu.executeKernel(computeHCTChainRuleForcesKernel, hctChainArgs, numBlocks * blockSize, blockSize);
 
-        // Receptor contribution forces (GRID mode only — PAIRWISE handled above)
+        // Receptor contribution forces
         if (receptorMode == IsolatedGBSAForce::GRID) {
             CUdeviceptr gridCountsPtr = gridCounts.getDevicePointer();
             CUdeviceptr gridHctProbePtr = gridHctProbe.getDevicePointer();
@@ -964,39 +901,37 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(computeReceptorHCTGradientForceKernel, receptorGradArgs, numBlocks * blockSize, blockSize);
 
         } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            // All PAIRWISE chain rule forces handled by fused kernel above
-        }
-    }
+            CUdeviceptr receptorPosPtr = receptorPositions.getDevicePointer();
+            CUdeviceptr receptorRadiiPtr = receptorRadii.getDevicePointer();
+            CUdeviceptr receptorScalesPtr = receptorScaleFactors.getDevicePointer();
+            CUdeviceptr receptorChargesPtr = receptorCharges.getDevicePointer();
+            CUdeviceptr receptorSelfHCTPtr = receptorSelfHCT.getDevicePointer();
+            CUdeviceptr ligandToReceptorHCTPtr = ligandToReceptorHCT.getDevicePointer();
+            CUdeviceptr receptorBornRadiiPtr = receptorBornRadii.getDevicePointer();
 
-    profileMark("step6_chain_rule");
-    if (doProfiling) {
-        cuCtxSynchronize();
-        auto tBeforeDownload = std::chrono::high_resolution_clock::now();
-        fprintf(stderr, "[PROFILE] total_kernels: %g ms\n",
-            std::chrono::duration<double, std::milli>(tBeforeDownload.time_since_epoch()).count() - tPrev);
+            // Chain rule for receptor→ligand HCT (how receptor screens ligand Born radii)
+            void* receptorChainArgs[] = {
+                &posqPtr, &particleIndicesPtr, &radiiPtr,
+                &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr, &dE_dRPtr,
+                &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
+                &numReceptorAtoms, &groupStartPtr, &numParticleGroups,
+                &totalParticles, &numAtoms, &cutoffDistance, &forcePtr, &paddedNumAtoms
+            };
+            cu.executeKernel(computeReceptorHCTPairwiseChainRuleKernel, receptorChainArgs, numBlocks * blockSize, blockSize);
+
+            // Desolvation + cross-term forces handled by tiled kernels in Step 4b
+        }
     }
 
     // Download group energies only when energy is needed to avoid sync barriers
     if (includeEnergy && !skipGroupEnergyDownload_) {
-        // Download fixed-point energy buffers and convert to float
-        {
-            std::vector<unsigned long long> fixedBuf(numParticleGroups);
-            groupEnergies.download(fixedBuf);
-            for (int g = 0; g < numParticleGroups; g++)
-                groupEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
-            groupLigandSelfEnergies.download(fixedBuf);
-            for (int g = 0; g < numParticleGroups; g++)
-                groupLigandSelfEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
-            groupUnscaledEnergies.download(fixedBuf);
-            for (int g = 0; g < numParticleGroups; g++)
-                groupUnscaledEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
+        groupEnergies.download(groupEnergiesHost);
+        groupLigandSelfEnergies.download(groupLigandSelfEnergiesHost);
+        groupUnscaledEnergies.download(groupUnscaledEnergiesHost);
 
-            if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-                groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
-                groupCrossTermEnergies.download(fixedBuf);
-                for (int g = 0; g < numParticleGroups; g++)
-                    groupCrossTermEnergiesHost[g] = (float)((long long)fixedBuf[g] / (double)0x100000000);
-            }
+        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
+            groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
+            groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
         }
 
         // Sum total energy
@@ -1005,23 +940,9 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             totalEnergy += groupEnergiesHost[g];
         }
 
-        {
-            auto tExecEnd = std::chrono::high_resolution_clock::now();
-            double execMs = std::chrono::duration<double, std::milli>(tExecEnd - tExecStart).count();
-            fprintf(stderr, "[EXEC] call %d: %.2f ms (E+F=%d%d)\n", execCallCount, execMs,
-                    (int)includeEnergy, (int)includeForces);
-        }
-        execCallCount++;
         return totalEnergy;
     }
 
-    {
-        auto tExecEnd = std::chrono::high_resolution_clock::now();
-        double execMs = std::chrono::duration<double, std::milli>(tExecEnd - tExecStart).count();
-        fprintf(stderr, "[EXEC] call %d: %.2f ms (E+F=%d%d, no download)\n", execCallCount, execMs,
-                (int)includeEnergy, (int)includeForces);
-    }
-    execCallCount++;
     return 0.0;
 }
 

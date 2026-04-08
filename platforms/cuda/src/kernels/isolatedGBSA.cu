@@ -276,7 +276,7 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
     const float* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
     float prefactor,
-    unsigned long long* __restrict__ receptorEnergy,
+    float* __restrict__ receptorEnergy,
     int numTiles
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
@@ -406,7 +406,7 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
     }
 
     if (threadIdx.x == 0) {
-        atomicAdd(receptorEnergy, (unsigned long long)(long long)(energyBuffer[0] * 0x100000000));
+        atomicAdd(receptorEnergy, energyBuffer[0]);
     }
 }
 
@@ -421,8 +421,8 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
     const float* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
     float prefactor,
-    unsigned long long* __restrict__ receptorEnergy,    // [1] scalar output (fixed-point)
-    unsigned long long* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output (fixed-point)
+    float* __restrict__ receptorEnergy,    // [1] scalar output
+    float* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output
     int numTiles
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
@@ -456,9 +456,9 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
         unsigned int atom1 = x * TILE_SIZE + tgx;
         unsigned int atom2 = y * TILE_SIZE + tgx;
 
-        // Flush dE/dR if atom1 changed (fixed-point)
+        // Flush dE/dR if atom1 changed
         if ((int)atom1 != prevAtom1 && prevAtom1 >= 0 && prevAtom1 < numReceptorAtoms) {
-            atomicAdd(&receptorDeDR[prevAtom1], (unsigned long long)(long long)(myDeDR * 0x100000000));
+            atomicAdd(&receptorDeDR[prevAtom1], myDeDR);
             myDeDR = 0.0f;
         }
         prevAtom1 = atom1;
@@ -528,7 +528,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
             // Write atom2 dE/dR contributions from shared memory
             __syncwarp();
             if (atom2 < numReceptorAtoms && localData[tbx + tgx].energy != 0.0f) {
-                atomicAdd(&receptorDeDR[atom2], (unsigned long long)(long long)(localData[tbx + tgx].energy * 0x100000000));
+                atomicAdd(&receptorDeDR[atom2], localData[tbx + tgx].energy);
             }
 
         } else {
@@ -563,18 +563,18 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
                 __syncwarp();
             }
 
-            // Write atom2 dE/dR from shared memory (fixed-point)
+            // Write atom2 dE/dR from shared memory
             if (atom2 < numReceptorAtoms && localData[tbx + tgx].energy != 0.0f) {
-                atomicAdd(&receptorDeDR[atom2], (unsigned long long)(long long)(localData[tbx + tgx].energy * 0x100000000));
+                atomicAdd(&receptorDeDR[atom2], localData[tbx + tgx].energy);
             }
         }
 
         pos++;
     }
 
-    // Flush remaining dE/dR (fixed-point)
+    // Flush remaining dE/dR
     if (prevAtom1 >= 0 && prevAtom1 < numReceptorAtoms && myDeDR != 0.0f) {
-        atomicAdd(&receptorDeDR[prevAtom1], (unsigned long long)(long long)(myDeDR * 0x100000000));
+        atomicAdd(&receptorDeDR[prevAtom1], myDeDR);
     }
 
     // Reduce energy within block
@@ -586,7 +586,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
         __syncthreads();
     }
     if (threadIdx.x == 0)
-        atomicAdd(receptorEnergy, (unsigned long long)(long long)(energyBuffer[0] * 0x100000000));
+        atomicAdd(receptorEnergy, energyBuffer[0]);
 }
 
 /**
@@ -1199,21 +1199,6 @@ extern "C" __global__ void convertTiledHCTToFloat(
 }
 
 /**
- * Add fixed-point cross-term dE/dR_born to float self-energy dE/dR_born.
- * This combines both contributions before the chain rule, ensuring proper
- * cancellation between self and cross-term forces.
- */
-extern "C" __global__ void addCrossTermToDEdR(
-    float* __restrict__ dE_dR,
-    const unsigned long long* __restrict__ dEdR_crossTerm,
-    int numAtoms
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numAtoms) return;
-    dE_dR[i] += (float)((long long)dEdR_crossTerm[i] / (double)0x100000000);
-}
-
-/**
  * Receptor-threaded HCT kernel.
  *
  * Parallelizes over (group × receptor_atom) = K * N_rec threads.
@@ -1240,8 +1225,8 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
     int numGroups,
     int templateNumAtoms,
     float cutoffDistance,
-    unsigned long long* __restrict__ hctReceptor,
-    unsigned long long* __restrict__ ligandToReceptorHCT
+    float* __restrict__ hctReceptor,
+    float* __restrict__ ligandToReceptorHCT
 ) {
     // Max ligand atoms we can handle in shared memory
     // 64 atoms × 20 bytes = 1280 bytes — well within shared memory limits
@@ -1372,13 +1357,13 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
             float term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*logf(u/l) + 0.25f*recS*recS*r_inv*(l2-u2);
             if (ligR_off < (recS - r)) term += 2.0f*(1.0f/ligR_off - l);
 
-            // Accumulate into ligand atom's HCT via fixed-point atomicAdd
-            atomicAdd(&hctReceptor[ligGlobalIdx], (unsigned long long)(long long)(term * 0x100000000));
+            // Accumulate into ligand atom's HCT via atomicAdd
+            atomicAdd(&hctReceptor[ligGlobalIdx], term);
         }
     }
 
-    // Direct write: ligand→receptor HCT for this receptor atom (fixed-point)
-    ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] = (unsigned long long)(long long)(hctLigToRec * 0x100000000);
+    // Direct write: ligand→receptor HCT for this receptor atom
+    ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] = hctLigToRec;
 }
 
 /**
@@ -1413,8 +1398,8 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    unsigned long long* __restrict__ hctReceptor,
-    unsigned long long* __restrict__ ligandToReceptorHCT,
+    float* __restrict__ hctReceptor,
+    float* __restrict__ ligandToReceptorHCT,
     const int* __restrict__ isActiveRecAtom,
     int hasBaseline
 ) {
@@ -1539,14 +1524,14 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
                 // Each thread atomicAdds its ligand→receptor contribution to its own
                 // group's slot. Can't warp-reduce because threads may be in different groups.
                 if (recTerm != 0.0f) {
-                    atomicAdd(&ligandToReceptorHCT[myGroupIdx * numReceptorAtoms + rIdx], (unsigned long long)(long long)(recTerm * 0x100000000));
+                    atomicAdd(&ligandToReceptorHCT[myGroupIdx * numReceptorAtoms + rIdx], recTerm);
                 }
             }
         }
 
-        // Write receptor→ligand HCT (fixed-point)
+        // Write receptor→ligand HCT
         if (validLig) {
-            hctReceptor[ligIdx] = (unsigned long long)(long long)(hctLigAccum * 0x100000000);
+            hctReceptor[ligIdx] = hctLigAccum;
         }
     }
 }
@@ -2082,24 +2067,24 @@ extern "C" __global__ void computeBornRadiiOBC(
     if (idx >= numAtoms) return;
 
     int templateIdx = idx % templateNumAtoms;
-    double R_i = (double)radii[templateIdx];
-    double R_i_off = R_i - (double)DIELECTRIC_OFFSET;
+    float R_i = radii[templateIdx];
+    float R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    // Use double for OBC-II to avoid precision loss with large HCT sums
-    double hctTotal = (double)hctReceptor[idx] + (double)hctLigand[idx];
-    double psi = 0.5 * R_i_off * hctTotal;
+    float hctTotal = hctReceptor[idx] + hctLigand[idx];
+    float psi = 0.5f * R_i_off * hctTotal;
 
-    double psi2 = psi * psi;
-    double psi3 = psi2 * psi;
-    double tanhArg = (double)OBC_ALPHA * psi - (double)OBC_BETA * psi2 + (double)OBC_GAMMA * psi3;
-    double tanhVal = tanh(tanhArg);
+    // OBC-II tanh correction
+    float psi2 = psi * psi;
+    float psi3 = psi2 * psi;
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    float tanhVal = tanhf(tanhArg);
 
-    double denom = 1.0 / R_i_off - tanhVal / R_i;
-    double bornRadius = (denom > 0.0) ? (1.0 / denom) : R_i;
+    float denom = 1.0f / R_i_off - tanhVal / R_i;
+    float bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
 
-    bornRadius = fmin(bornRadius, 50.0);
+    bornRadius = fminf(bornRadius, 50.0f);
 
-    bornRadii[idx] = (float)bornRadius;
+    bornRadii[idx] = bornRadius;
 }
 
 /**
@@ -2116,12 +2101,12 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     int templateNumAtoms,
     float prefactor,
     unsigned long long* __restrict__ forceBuffer,
-    unsigned long long* __restrict__ groupEnergies,
-    unsigned long long* __restrict__ groupLigandSelfEnergies,
+    float* __restrict__ groupEnergies,
+    float* __restrict__ groupLigandSelfEnergies,
     int paddedNumAtoms,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    unsigned long long* __restrict__ groupUnscaledEnergies
+    float* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2207,13 +2192,13 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     atomicAdd(&forceBuffer[particleIdx_i + paddedNumAtoms], static_cast<unsigned long long>((long long)(force.y * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_i + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force.z * 0x100000000)));
 
-    // Accumulate scaled energies (fixed-point)
-    atomicAdd(&groupEnergies[groupIdx], (unsigned long long)(long long)(energy * scale * 0x100000000));
-    atomicAdd(&groupLigandSelfEnergies[groupIdx], (unsigned long long)(long long)(energy * scale * 0x100000000));
+    // Accumulate scaled energies
+    atomicAdd(&groupEnergies[groupIdx], energy * scale);
+    atomicAdd(&groupLigandSelfEnergies[groupIdx], energy * scale);
     // Accumulate unscaled energies (no per-group alchemical scaling)
     if (groupUnscaledEnergies != 0) {
         float unscaledScale = globalScalingFactor;  // only global, no group scaling
-        atomicAdd(&groupUnscaledEnergies[groupIdx], (unsigned long long)(long long)(energy * unscaledScale * 0x100000000));
+        atomicAdd(&groupUnscaledEnergies[groupIdx], energy * unscaledScale);
     }
 }
 
@@ -2228,10 +2213,10 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     int templateNumAtoms,
     float surfaceTension,
     float probeRadius,
-    unsigned long long* __restrict__ groupEnergies,
+    float* __restrict__ groupEnergies,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    unsigned long long* __restrict__ groupUnscaledEnergies
+    float* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2264,11 +2249,11 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     float area = 4.0f * 3.14159265f * Rsolv * Rsolv * ratio6;
     float saEnergy = surfaceTension * area * scale;
 
-    atomicAdd(&groupEnergies[groupIdx], (unsigned long long)(long long)(saEnergy * 0x100000000));
+    atomicAdd(&groupEnergies[groupIdx], saEnergy);
     // Accumulate unscaled SA energy (no per-group alchemical scaling)
     if (groupUnscaledEnergies != 0) {
         float saEnergyUnscaled = surfaceTension * area * globalScalingFactor;
-        atomicAdd(&groupUnscaledEnergies[groupIdx], (unsigned long long)(long long)(saEnergyUnscaled * 0x100000000));
+        atomicAdd(&groupUnscaledEnergies[groupIdx], saEnergyUnscaled);
     }
 }
 
@@ -2466,18 +2451,22 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
     float bornR_i = bornRadii[idx];
 
     // Compute bornForces[i] = dE/dR_born * R_born² * obcChain (OpenMM style)
-    // Use double for OBC chain to match Born radii precision
-    double hctTotal_i = (double)hctReceptor[idx] + (double)hctLigand[idx];
-    double psi_i = 0.5 * (double)R_i_off * hctTotal_i;
-    double psi2_i = psi_i * psi_i;
+    // obcChain = R_off * (α - 2β*ψ + 3γ*ψ²) * sech²(arg) / R
+    float hctTotal_i = hctReceptor[idx] + hctLigand[idx];
+    float psi_i = 0.5f * R_i_off * hctTotal_i;
+    float psi2_i = psi_i * psi_i;
+    float psi3_i = psi2_i * psi_i;
 
-    double tanhArg_i = (double)OBC_ALPHA * psi_i - (double)OBC_BETA * psi2_i + (double)OBC_GAMMA * psi2_i * psi_i;
-    double tanhVal_i = tanh(tanhArg_i);
-    double sech2_i = 1.0 - tanhVal_i * tanhVal_i;
-    double dTanhArgDPsi_i = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi_i + 3.0 * (double)OBC_GAMMA * psi2_i;
-    double obcChain_i = (double)R_i_off * dTanhArgDPsi_i * sech2_i / (double)R_i;
+    float tanhArg_i = OBC_ALPHA * psi_i - OBC_BETA * psi2_i + OBC_GAMMA * psi3_i;
+    float tanhVal_i = tanhf(tanhArg_i);
+    float sech2_i = 1.0f - tanhVal_i * tanhVal_i;
+    float dTanhArgDPsi_i = OBC_ALPHA - 2.0f * OBC_BETA * psi_i + 3.0f * OBC_GAMMA * psi2_i;
 
-    float bornForces_i = (float)((double)dE_dR[idx] * (double)bornR_i * (double)bornR_i * obcChain_i);
+    // obcChain[i] = R_off * (α - 2β*ψ + 3γ*ψ²) * sech²(arg) / R
+    float obcChain_i = R_i_off * dTanhArgDPsi_i * sech2_i / R_i;
+
+    // bornForces[i] = dE/dR_born * R_born² * obcChain
+    float bornForces_i = dE_dR[idx] * bornR_i * bornR_i * obcChain_i;
 
     float3 force_i = make_float3(0.0f, 0.0f, 0.0f);
     float cutoff2 = cutoffDistance * cutoffDistance;
@@ -2551,201 +2540,6 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
     }
 
     // Accumulate force on atom i
-    atomicAdd(&forceBuffer[particleIdx_i], static_cast<unsigned long long>((long long)(force_i.x * 0x100000000)));
-    atomicAdd(&forceBuffer[particleIdx_i + paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.y * 0x100000000)));
-    atomicAdd(&forceBuffer[particleIdx_i + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.z * 0x100000000)));
-}
-
-/**
- * Fused chain rule kernel for PAIRWISE mode.
- *
- * Combines ALL chain rule force contributions in a single pass per ligand atom:
- * 1. Ligand-ligand HCT chain rule (other lig atoms screening this one)
- * 2. Receptor→ligand HCT chain rule (receptor atoms screening this one)
- * 3. Ligand→receptor HCT chain rule (this lig screening receptor, Newton's 3rd law)
- *
- * Uses combined dE_dR (self + cross) for contributions 1-2, and precomputed
- * receptor Born forces for contribution 3. Computing all in one pass ensures
- * exact cancellation between opposing force contributions.
- */
-extern "C" __global__ void computeFusedPairwiseChainRuleForces(
-    const float4* __restrict__ posq,
-    const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float* __restrict__ scaleFactors,
-    const float* __restrict__ bornRadii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
-    const float* __restrict__ dE_dR,           // combined self + cross dE/dR_born
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
-    const float* __restrict__ bornForcesRec,   // precomputed receptor Born forces [K * N_rec]
-    int numReceptorAtoms,
-    const int* __restrict__ groupStart,
-    int numGroups,
-    int templateNumAtoms,
-    float cutoffDistance,
-    unsigned long long* __restrict__ forceBuffer,
-    int paddedNumAtoms,
-    float globalScalingFactor,
-    const float* __restrict__ groupScalingFactors
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    int groupIdx = 0;
-    int atomInGroup = idx;
-    int groupStartIdx = 0;
-    int groupEndIdx = 0;
-
-    for (int g = 0; g < numGroups; g++) {
-        groupStartIdx = groupStart[g];
-        groupEndIdx = groupStart[g + 1];
-        if (idx >= groupStartIdx && idx < groupEndIdx) {
-            groupIdx = g;
-            atomInGroup = idx - groupStartIdx;
-            break;
-        }
-    }
-
-    if (idx >= groupEndIdx) return;
-
-    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-    int particleIdx_i = particleIndices[idx];
-    int templateIdx_i = atomInGroup % templateNumAtoms;
-
-    float4 pos_i = posq[particleIdx_i];
-    float R_i = radii[templateIdx_i];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
-    float S_i = R_i_off * scaleFactors[templateIdx_i];
-    float bornR_i = bornRadii[idx];
-
-    // Compute bornForces[i] from combined dE/dR using double OBC chain
-    double hctTotal_i = (double)hctReceptor[idx] + (double)hctLigand[idx];
-    double psi_i = 0.5 * (double)R_i_off * hctTotal_i;
-    double psi2_i = psi_i * psi_i;
-    double tanhArg_i = (double)OBC_ALPHA * psi_i - (double)OBC_BETA * psi2_i + (double)OBC_GAMMA * psi2_i * psi_i;
-    double tanhVal_i = tanh(tanhArg_i);
-    double sech2_i = 1.0 - tanhVal_i * tanhVal_i;
-    double dTanhArgDPsi_i = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi_i + 3.0 * (double)OBC_GAMMA * psi2_i;
-    double obcChain_i = (double)R_i_off * dTanhArgDPsi_i * sech2_i / (double)R_i;
-    float bornForces_i = (float)((double)dE_dR[idx] * (double)bornR_i * (double)bornR_i * obcChain_i);
-
-    float3 force_i = make_float3(0.0f, 0.0f, 0.0f);
-    float cutoff2 = cutoffDistance * cutoffDistance;
-    bool useCutoff = (cutoffDistance > 0.0f);
-
-    // === Part 1: Ligand-ligand HCT chain rule ===
-    int groupSize = groupEndIdx - groupStartIdx;
-    for (int jLocal = 0; jLocal < groupSize; jLocal++) {
-        if (jLocal == atomInGroup) continue;
-
-        int j = groupStartIdx + jLocal;
-        int templateIdx_j = jLocal % templateNumAtoms;
-        int particleIdx_j = particleIndices[j];
-
-        float4 pos_j = posq[particleIdx_j];
-        float R_j = radii[templateIdx_j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * scaleFactors[templateIdx_j];
-
-        float dx = pos_i.x - pos_j.x;
-        float dy = pos_i.y - pos_j.y;
-        float dz = pos_i.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-
-        if (useCutoff && r2 > cutoff2) continue;
-
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
-        if (r < 1e-6f) continue;
-
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
-
-        // j screens i
-        float r_plus_Sj = r + S_j;
-        if (R_i_off < r_plus_Sj) {
-            float r_minus_Sj = fabsf(r - S_j);
-            float l = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-            float u = 1.0f / r_plus_Sj;
-            float l2 = l*l, u2 = u*u;
-
-            float t3 = 0.125f * (1.0f + S_j*S_j*r2_inv) * (l2 - u2)
-                     + 0.25f * logf(u / l) * r2_inv;
-            float de = bornForces_i * t3 * r_inv;
-
-            force_i.x += de * dx;
-            force_i.y += de * dy;
-            force_i.z += de * dz;
-
-            atomicAdd(&forceBuffer[particleIdx_j], static_cast<unsigned long long>((long long)(-de * dx * 0x100000000)));
-            atomicAdd(&forceBuffer[particleIdx_j + paddedNumAtoms], static_cast<unsigned long long>((long long)(-de * dy * 0x100000000)));
-            atomicAdd(&forceBuffer[particleIdx_j + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(-de * dz * 0x100000000)));
-        }
-    }
-
-    // === Part 2 & 3: Receptor interactions ===
-    for (int j = 0; j < numReceptorAtoms; j++) {
-        float3 recPos = receptorPositions[j];
-        float recR = receptorRadii[j];
-        float recR_off = recR - DIELECTRIC_OFFSET;
-        float recS = recR_off * receptorScaleFactors[j];
-
-        float dx = pos_i.x - recPos.x;
-        float dy = pos_i.y - recPos.y;
-        float dz = pos_i.z - recPos.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-
-        if (useCutoff && r2 > cutoff2) continue;
-
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
-        if (r < 1e-6f) continue;
-
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
-
-        // Part 2: Receptor j screens ligand i → force on i
-        float r_plus_Srec = r + recS;
-        if (R_i_off < r_plus_Srec) {
-            float r_minus_Srec = fabsf(r - recS);
-            float l = (R_i_off > r_minus_Srec) ? (1.0f / R_i_off) : (1.0f / r_minus_Srec);
-            float u = 1.0f / r_plus_Srec;
-            float l2 = l*l, u2 = u*u;
-
-            float t3 = 0.125f * (1.0f + recS*recS*r2_inv) * (l2 - u2)
-                     + 0.25f * logf(u / l) * r2_inv;
-            float de = bornForces_i * t3 * r_inv;
-
-            force_i.x += de * dx;
-            force_i.y += de * dy;
-            force_i.z += de * dz;
-        }
-
-        // Part 3: Ligand i screens receptor j → force on i (Newton's 3rd law)
-        float r_plus_Si = r + S_i;
-        if (recR_off < r_plus_Si) {
-            float r_minus_Si = fabsf(r - S_i);
-            float l = (recR_off > r_minus_Si) ? (1.0f / recR_off) : (1.0f / r_minus_Si);
-            float u = 1.0f / r_plus_Si;
-            float l2 = l*l, u2 = u*u;
-
-            float t3 = 0.125f * (1.0f + S_i*S_i*r2_inv) * (l2 - u2)
-                     + 0.25f * logf(u / l) * r2_inv;
-
-            // recBF is the receptor Born force for this group (unscaled — apply scale here)
-            float recBF = bornForcesRec[groupIdx * numReceptorAtoms + j];
-            float de = recBF * t3 * r_inv * scale;
-
-            // Newton's 3rd law: force on ligand i is OPPOSITE to force on receptor j
-            // Receptor j would get +de*dx, so ligand i gets -de*dx
-            force_i.x -= de * dx;
-            force_i.y -= de * dy;
-            force_i.z -= de * dz;
-        }
-    }
-
     atomicAdd(&forceBuffer[particleIdx_i], static_cast<unsigned long long>((long long)(force_i.x * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_i + paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.y * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_i + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.z * 0x100000000)));
@@ -2832,99 +2626,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseChainRule(
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    int groupIdx = 0;
-    int atomInGroup = idx;
-    int groupStartIdx = 0;
-    int groupEndIdx = 0;
-
-    for (int g = 0; g < numGroups; g++) {
-        groupStartIdx = groupStart[g];
-        groupEndIdx = groupStart[g + 1];
-        if (idx >= groupStartIdx && idx < groupEndIdx) {
-            groupIdx = g;
-            atomInGroup = idx - groupStartIdx;
-            break;
-        }
-    }
-
-    if (idx >= groupEndIdx) return;
-
-    int particleIdx_i = particleIndices[idx];
-    int templateIdx_i = atomInGroup % templateNumAtoms;
-
-    float4 pos_i = posq[particleIdx_i];
-    float R_i = radii[templateIdx_i];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
-    float bornR_i = bornRadii[idx];
-
-    // Compute bornForces[i] = dE/dR_born * R_born² * obcChain
-    // Use double for OBC chain to match Born radii precision
-    double hctTotal_i = (double)hctReceptor[idx] + (double)hctLigand[idx];
-    double psi_i = 0.5 * (double)R_i_off * hctTotal_i;
-    double psi2_i = psi_i * psi_i;
-
-    double tanhArg_i = (double)OBC_ALPHA * psi_i - (double)OBC_BETA * psi2_i + (double)OBC_GAMMA * psi2_i * psi_i;
-    double tanhVal_i = tanh(tanhArg_i);
-    double sech2_i = 1.0 - tanhVal_i * tanhVal_i;
-    double dTanhArgDPsi_i = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi_i + 3.0 * (double)OBC_GAMMA * psi2_i;
-    double obcChain_i = (double)R_i_off * dTanhArgDPsi_i * sech2_i / (double)R_i;
-
-    float bornForces_i = (float)((double)dE_dR[idx] * (double)bornR_i * (double)bornR_i * obcChain_i);
-
-    float3 force_i = make_float3(0.0f, 0.0f, 0.0f);
-    float cutoff2 = cutoffDistance * cutoffDistance;
-    bool useCutoff = (cutoffDistance > 0.0f);
-
-    // Loop over all receptor atoms: receptor atom j screens ligand atom i
-    for (int j = 0; j < numReceptorAtoms; j++) {
-        float3 recPos = receptorPositions[j];
-        float recR = receptorRadii[j];
-        float recR_off = recR - DIELECTRIC_OFFSET;
-        float S_j = recR_off * receptorScaleFactors[j];
-
-        float dx = pos_i.x - recPos.x;
-        float dy = pos_i.y - recPos.y;
-        float dz = pos_i.z - recPos.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-
-        if (useCutoff && r2 > cutoff2) continue;
-
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
-        if (r < 1e-6f) continue;
-
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
-
-        // HCT chain rule: receptor atom j screens ligand atom i
-        float r_plus_Sj = r + S_j;
-        if (R_i_off < r_plus_Sj) {
-            float r_minus_Sj = fabsf(r - S_j);
-            float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-            float u_ij = 1.0f / r_plus_Sj;
-
-            float l_ij2 = l_ij * l_ij;
-            float u_ij2 = u_ij * u_ij;
-            float S_j2 = S_j * S_j;
-
-            float t3 = 0.125f * (1.0f + S_j2 * r2_inv) * (l_ij2 - u_ij2)
-                     + 0.25f * logf(u_ij / l_ij) * r2_inv;
-
-            float de = bornForces_i * t3 * r_inv;
-
-            // Force on ligand atom i (receptor is fixed — no Newton's 3rd law)
-            force_i.x += de * dx;
-            force_i.y += de * dy;
-            force_i.z += de * dz;
-        }
-    }
-
-    // Accumulate force on ligand atom i
-    atomicAdd(&forceBuffer[particleIdx_i], static_cast<unsigned long long>((long long)(force_i.x * 0x100000000)));
-    atomicAdd(&forceBuffer[particleIdx_i + paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.y * 0x100000000)));
-    atomicAdd(&forceBuffer[particleIdx_i + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force_i.z * 0x100000000)));
+    // Placeholder - to be implemented
 }
 
 // =============================================================================
@@ -3017,16 +2719,16 @@ extern "C" __global__ void computeReceptorBornRadiiReference(
     float R_i_off = R_i - DIELECTRIC_OFFSET;
     float hct = receptorSelfHCT[i];
 
-    // OBC-II formula — double precision
-    double psi = 0.5 * (double)R_i_off * (double)hct;
-    double psi2 = psi * psi;
-    double psi3 = psi2 * psi;
+    // OBC-II formula
+    float psi = 0.5f * R_i_off * hct;
+    float psi2 = psi * psi;
+    float psi3 = psi2 * psi;
 
-    double tanhArg = (double)OBC_ALPHA * psi - (double)OBC_BETA * psi2 + (double)OBC_GAMMA * psi3;
-    double tanhVal = tanh(tanhArg);
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    float tanhVal = tanhf(tanhArg);
 
-    double denom = 1.0 / (double)R_i_off - tanhVal / (double)R_i;
-    float bornRadius = (denom > 0.0) ? (float)(1.0 / denom) : R_i;
+    float denom = 1.0f / R_i_off - tanhVal / R_i;
+    float bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
     bornRadius = fminf(bornRadius, 50.0f);
 
     receptorBornRadiiRef[i] = bornRadius;
@@ -3042,7 +2744,7 @@ extern "C" __global__ void computeReceptorReferenceEnergy(
     const float* __restrict__ receptorBornRadiiRef,
     int numReceptorAtoms,
     float prefactor,
-    unsigned long long* __restrict__ receptorReferenceEnergy
+    float* __restrict__ receptorReferenceEnergy
 ) {
     extern __shared__ float sdata[];
 
@@ -3093,7 +2795,7 @@ extern "C" __global__ void computeReceptorReferenceEnergy(
     }
 
     if (tid == 0) {
-        atomicAdd(receptorReferenceEnergy, (unsigned long long)(long long)(sdata[0] * 0x100000000));
+        atomicAdd(receptorReferenceEnergy, sdata[0]);
     }
 }
 
@@ -3238,18 +2940,18 @@ extern "C" __global__ void computeReceptorBornRadiiWithLigand(
         float R_i = receptorRadii[i];
         float R_i_off = R_i - DIELECTRIC_OFFSET;
 
-        double hctTotal = (double)receptorSelfHCT[i] + (double)ligandToReceptorHCT[groupIdx * numReceptorAtoms + i];
+        float hctTotal = receptorSelfHCT[i] + ligandToReceptorHCT[groupIdx * numReceptorAtoms + i];
 
-    // OBC-II formula — double precision
-    double psi = 0.5 * (double)R_i_off * hctTotal;
-    double psi2 = psi * psi;
-    double psi3 = psi2 * psi;
+    // OBC-II formula
+    float psi = 0.5f * R_i_off * hctTotal;
+    float psi2 = psi * psi;
+    float psi3 = psi2 * psi;
 
-    double tanhArg = (double)OBC_ALPHA * psi - (double)OBC_BETA * psi2 + (double)OBC_GAMMA * psi3;
-    double tanhVal = tanh(tanhArg);
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    float tanhVal = tanhf(tanhArg);
 
-        double denom = 1.0 / (double)R_i_off - tanhVal / (double)R_i;
-        float bornRadius = (denom > 0.0) ? (float)(1.0 / denom) : R_i;
+        float denom = 1.0f / R_i_off - tanhVal / R_i;
+        float bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
         bornRadius = fminf(bornRadius, 50.0f);
 
         receptorBornRadii[groupIdx * numReceptorAtoms + i] = bornRadius;
@@ -3266,7 +2968,7 @@ extern "C" __global__ void computeReceptorGBEnergy(
     const float* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
     float prefactor,
-    unsigned long long* __restrict__ receptorEnergy
+    float* __restrict__ receptorEnergy
 ) {
     extern __shared__ float sdata[];
 
@@ -3317,7 +3019,7 @@ extern "C" __global__ void computeReceptorGBEnergy(
     }
 
     if (tid == 0) {
-        atomicAdd(receptorEnergy, (unsigned long long)(long long)(sdata[0] * 0x100000000));
+        atomicAdd(receptorEnergy, sdata[0]);
     }
 }
 
@@ -3338,7 +3040,7 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     int numReceptorAtoms,
     int templateNumAtoms,
     float prefactor,
-    unsigned long long* __restrict__ crossTermEnergies,
+    float* __restrict__ crossTermEnergies,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     float globalScalingFactor,
@@ -3415,8 +3117,8 @@ extern "C" __global__ void computeCrossTermGBEnergy(
         force_lig.z += dEdR * dz * invR;
     }
 
-    // Accumulate scaled cross-term energy (fixed-point)
-    atomicAdd(&crossTermEnergies[groupIdx], (unsigned long long)(long long)(energy * scale * 0x100000000));
+    // Accumulate scaled cross-term energy
+    atomicAdd(&crossTermEnergies[groupIdx], energy * scale);
 
     // Accumulate forces
     atomicAdd(&forceBuffer[particleIdx_lig], static_cast<unsigned long long>((long long)(force_lig.x * 0x100000000)));
@@ -3543,18 +3245,21 @@ extern "C" __global__ void computeReceptorDesolvationForces(
             dEdR_rec += -prefactor * q_rec * q_j / (f_gb * f_gb) * dFgbDRi;
         }
 
-        // OBC chain rule: dR_born/dHCT — use double for precision
-        double hctTotal_rec = (double)receptorSelfHCT[recIdx] + (double)ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx];
-        double psi_rec = 0.5 * (double)R_rec_off * hctTotal_rec;
-        double psi2_rec = psi_rec * psi_rec;
+        // OBC chain rule: dR_born/dHCT
+        float hctTotal_rec = receptorSelfHCT[recIdx] + ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx];
+        float psi_rec = 0.5f * R_rec_off * hctTotal_rec;
+        float psi2_rec = psi_rec * psi_rec;
 
-        double tanhArg_rec = (double)OBC_ALPHA * psi_rec - (double)OBC_BETA * psi2_rec + (double)OBC_GAMMA * psi2_rec * psi_rec;
-        double tanhVal_rec = tanh(tanhArg_rec);
-        double sech2_rec = 1.0 - tanhVal_rec * tanhVal_rec;
-        double dTanhArgDPsi_rec = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi_rec + 3.0 * (double)OBC_GAMMA * psi2_rec;
-        double obcChain_rec = (double)R_rec_off * dTanhArgDPsi_rec * sech2_rec / (double)R_rec;
+        float tanhArg_rec = OBC_ALPHA * psi_rec - OBC_BETA * psi2_rec + OBC_GAMMA * psi2_rec * psi_rec;
+        float tanhVal_rec = tanhf(tanhArg_rec);
+        float sech2_rec = 1.0f - tanhVal_rec * tanhVal_rec;
+        float dTanhArgDPsi_rec = OBC_ALPHA - 2.0f * OBC_BETA * psi_rec + 3.0f * OBC_GAMMA * psi2_rec;
 
-        float bornForces_rec = (float)((double)dEdR_rec * (double)bornR_rec * (double)bornR_rec * obcChain_rec);
+        // obcChain = R_off * (dTanhArg/dPsi) * sech² / R
+        float obcChain_rec = R_rec_off * dTanhArgDPsi_rec * sech2_rec / R_rec;
+
+        // bornForces = dE/dR_born * R_born² * obcChain
+        float bornForces_rec = dEdR_rec * bornR_rec * bornR_rec * obcChain_rec;
 
         // HCT gradient: OpenMM simplified formula
         float l_ij2 = l_ij * l_ij;
@@ -3629,18 +3334,17 @@ extern "C" __global__ void precomputeReceptorBornForces(
         float bornR_rec = receptorBornRadii[gOffset];
         float dEdR_rec = receptorDeDR[gOffset];
 
-        // Use double for OBC chain precision
-        double hctTotal = (double)receptorSelfHCT[recIdx] + (double)ligandToReceptorHCT[gOffset];
-        double psi = 0.5 * (double)R_rec_off * hctTotal;
-        double psi2 = psi * psi;
+        float hctTotal = receptorSelfHCT[recIdx] + ligandToReceptorHCT[gOffset];
+        float psi = 0.5f * R_rec_off * hctTotal;
+        float psi2 = psi * psi;
 
-        double tanhArg = (double)OBC_ALPHA * psi - (double)OBC_BETA * psi2 + (double)OBC_GAMMA * psi2 * psi;
-        double tanhVal = tanh(tanhArg);
-        double sech2 = 1.0 - tanhVal * tanhVal;
-        double dTanhArgDPsi = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi + 3.0 * (double)OBC_GAMMA * psi2;
-        double obcChain = (double)R_rec_off * dTanhArgDPsi * sech2 / (double)R_rec;
+        float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+        float tanhVal = tanhf(tanhArg);
+        float sech2 = 1.0f - tanhVal * tanhVal;
+        float dTanhArgDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
 
-        bornForcesRec[gOffset] = (float)((double)dEdR_rec * (double)bornR_rec * (double)bornR_rec * obcChain);
+        float obcChain = R_rec_off * dTanhArgDPsi * sech2 / R_rec;
+        bornForcesRec[gOffset] = dEdR_rec * bornR_rec * bornR_rec * obcChain;
     }
 }
 
@@ -3768,16 +3472,15 @@ extern "C" __global__ void computeFusedReceptorForces(
     }
 
     // ===== Between passes: compute bornForces_lig =====
-    // Use double for OBC chain to match Born radii precision
-    double hctTotal_lig = (double)hctReceptor[idx] + (double)hctLigand[idx];
-    double psi = 0.5 * (double)R_lig_off * hctTotal_lig;
-    double psi2 = psi * psi;
-    double tanhArg = (double)OBC_ALPHA * psi - (double)OBC_BETA * psi2 + (double)OBC_GAMMA * psi2 * psi;
-    double tanhVal = tanh(tanhArg);
-    double sech2 = 1.0 - tanhVal * tanhVal;
-    double dTanhDPsi = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi + 3.0 * (double)OBC_GAMMA * psi2;
-    double obcChain = (double)R_lig_off * dTanhDPsi * sech2 / (double)R_lig;
-    float bornForces_lig = (float)((double)dEdR_lig * (double)bornR_lig * (double)bornR_lig * obcChain * (double)scale);
+    float hctTotal_lig = hctReceptor[idx] + hctLigand[idx];
+    float psi = 0.5f * R_lig_off * hctTotal_lig;
+    float psi2 = psi * psi;
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+    float tanhVal = tanhf(tanhArg);
+    float sech2 = 1.0f - tanhVal * tanhVal;
+    float dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    float obcChain = R_lig_off * dTanhDPsi * sech2 / R_lig;
+    float bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain * scale;
 
     // ===== PASS 2: Cross-term chain rule forces =====
 
@@ -4065,18 +3768,18 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
         dEdR_lig += -prefactor * q_lig * q_rec / (f_gb * f_gb) * dFgbDRlig;
     }
 
-    // OBC chain rule for ligand — use double for precision
-    double hctTotal_lig2 = (double)hctReceptor[idx] + (double)hctLigand[idx];
-    double psi_lig = 0.5 * (double)R_lig_off * hctTotal_lig2;
-    double psi2_lig = psi_lig * psi_lig;
+    // OBC chain rule for ligand
+    float hctTotal_lig = hctReceptor[idx] + hctLigand[idx];
+    float psi_lig = 0.5f * R_lig_off * hctTotal_lig;
+    float psi2_lig = psi_lig * psi_lig;
 
-    double tanhArg_lig = (double)OBC_ALPHA * psi_lig - (double)OBC_BETA * psi2_lig + (double)OBC_GAMMA * psi2_lig * psi_lig;
-    double tanhVal_lig = tanh(tanhArg_lig);
-    double sech2_lig = 1.0 - tanhVal_lig * tanhVal_lig;
-    double dTanhArgDPsi_lig = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi_lig + 3.0 * (double)OBC_GAMMA * psi2_lig;
-    double obcChain_lig = (double)R_lig_off * dTanhArgDPsi_lig * sech2_lig / (double)R_lig;
+    float tanhArg_lig = OBC_ALPHA * psi_lig - OBC_BETA * psi2_lig + OBC_GAMMA * psi2_lig * psi_lig;
+    float tanhVal_lig = tanhf(tanhArg_lig);
+    float sech2_lig = 1.0f - tanhVal_lig * tanhVal_lig;
+    float dTanhArgDPsi_lig = OBC_ALPHA - 2.0f * OBC_BETA * psi_lig + 3.0f * OBC_GAMMA * psi2_lig;
 
-    float bornForces_lig = (float)((double)dEdR_lig * (double)bornR_lig * (double)bornR_lig * obcChain_lig * (double)scale);
+    float obcChain_lig = R_lig_off * dTanhArgDPsi_lig * sech2_lig / R_lig;
+    float bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain_lig * scale;
 
     // Chain through ligand-ligand HCT (other ligand atoms screening this one)
     int groupSize = groupEndIdx - groupStartIdx;
@@ -4187,25 +3890,24 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
  * applies scaling, and adds to groupEnergies/groupDesolvations/groupUnscaledEnergies.
  */
 extern "C" __global__ void accumulateDesolvationOnGPU(
-    const unsigned long long* __restrict__ receptorEnergy,
+    const float* __restrict__ receptorEnergy,
     float referenceEnergy,
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    unsigned long long* __restrict__ groupEnergies,
+    float* __restrict__ groupEnergies,
     float* __restrict__ groupReceptorDesolvations,
-    unsigned long long* __restrict__ groupUnscaledEnergies
+    float* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    float recE = (float)((long long)receptorEnergy[0] / (double)0x100000000);
-    float desolvation = recE - referenceEnergy;
+    float desolvation = receptorEnergy[0] - referenceEnergy;
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     groupReceptorDesolvations[groupIdx] = desolvation * scale;
-    groupEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * scale * 0x100000000);
+    groupEnergies[groupIdx] += desolvation * scale;
     if (groupUnscaledEnergies != 0) {
-        groupUnscaledEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * globalScalingFactor * 0x100000000);
+        groupUnscaledEnergies[groupIdx] += desolvation * globalScalingFactor;
     }
 }
 
@@ -4218,9 +3920,9 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    unsigned long long* __restrict__ groupEnergies,
+    float* __restrict__ groupEnergies,
     float* __restrict__ groupReceptorDesolvations,
-    unsigned long long* __restrict__ groupUnscaledEnergies
+    float* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -4228,9 +3930,9 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     groupReceptorDesolvations[groupIdx] = desolvation * scale;
-    groupEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * scale * 0x100000000);
+    groupEnergies[groupIdx] += desolvation * scale;
     if (groupUnscaledEnergies != 0) {
-        groupUnscaledEnergies[groupIdx] += (unsigned long long)(long long)(desolvation * globalScalingFactor * 0x100000000);
+        groupUnscaledEnergies[groupIdx] += desolvation * globalScalingFactor;
     }
 }
 
@@ -4239,12 +3941,12 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
  * Single-thread kernel, handles all groups.
  */
 extern "C" __global__ void accumulateCrossTermOnGPU(
-    const unsigned long long* __restrict__ crossTermEnergies,
+    const float* __restrict__ crossTermEnergies,
     int numGroups,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    unsigned long long* __restrict__ groupEnergies,
-    unsigned long long* __restrict__ groupUnscaledEnergies
+    float* __restrict__ groupEnergies,
+    float* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -4253,8 +3955,7 @@ extern "C" __global__ void accumulateCrossTermOnGPU(
         if (groupUnscaledEnergies != 0) {
             float groupScale = groupScalingFactors[g];
             if (groupScale != 0.0f) {
-                float crossE = (float)((long long)crossTermEnergies[g] / (double)0x100000000);
-                groupUnscaledEnergies[g] += (unsigned long long)(long long)(crossE / groupScale * 0x100000000);
+                groupUnscaledEnergies[g] += crossTermEnergies[g] / groupScale;
             }
         }
     }
@@ -4652,7 +4353,7 @@ extern "C" __global__ void computeReceptorEnergyDelta(
     int numReceptorAtoms,
     int numGroups,
     float prefactor,
-    unsigned long long* __restrict__ energyDelta,
+    float* __restrict__ energyDelta,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -4711,7 +4412,7 @@ extern "C" __global__ void computeReceptorEnergyDelta(
             delta += E_new - E_ref;
         }
 
-        atomicAdd(&energyDelta[groupIdx], (unsigned long long)(long long)(delta * 0x100000000));
+        atomicAdd(&energyDelta[groupIdx], delta);
     }
 }
 
@@ -4725,7 +4426,7 @@ extern "C" __global__ void computeReceptorEnergyDeltaLegacy(
     int numReceptorAtoms,
     int groupIdx,
     float prefactor,
-    unsigned long long* __restrict__ energyDelta
+    float* __restrict__ energyDelta
 ) {
     extern __shared__ float sdata[];
     int tid = threadIdx.x;
@@ -4761,7 +4462,7 @@ extern "C" __global__ void computeReceptorEnergyDeltaLegacy(
     }
 
     if (tid == 0) {
-        atomicAdd(energyDelta, (unsigned long long)(long long)(sdata[0] * 0x100000000));
+        atomicAdd(energyDelta, sdata[0]);
     }
 }
 
@@ -4871,7 +4572,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
-    unsigned long long* __restrict__ crossTermEnergies,            // [numGroups] fixed-point
+    float* __restrict__ crossTermEnergies,            // [numGroups]
     unsigned long long* __restrict__ dEdR_crossTerm,  // [totalParticles] fixed-point
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
@@ -5009,8 +4710,23 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             float dFgbDRlig = (recBornR * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
             float dEdR_lig = -prefactor * lQ * recQ * invFgb * invFgb * dFgbDRlig;
 
-            // Desolvation chain rule moved to computeFusedPairwiseChainRuleForces
-            // for proper cancellation with self/cross chain rule forces.
+            // === Desolvation chain rule: ligand screens receptor ===
+            float r_plus_Slig = r + lS;
+            if (recR_off < r_plus_Slig) {
+                float r_minus_Slig = fabsf(r - lS);
+                float l = (recR_off > r_minus_Slig) ? (1.0f/recR_off) : (1.0f/r_minus_Slig);
+                float u = 1.0f / r_plus_Slig;
+                float l2 = l*l, u2 = u*u;
+                float r2_inv = invR * invR;
+
+                float t3 = 0.125f * (1.0f + lS*lS*r2_inv) * (l2 - u2)
+                         + 0.25f * logf(u/l) * r2_inv;
+
+                float de_desolv = recBF * t3 * invR * scale;
+                fx -= de_desolv * dx;
+                fy -= de_desolv * dy;
+                fz -= de_desolv * dz;
+            }
 
             // Write forces on ligand atom via atomicAdd
             int ligGlobal = gs + li;
@@ -5023,9 +4739,9 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             atomicAdd(&dEdR_crossTerm[ligGlobal], static_cast<unsigned long long>((long long)(dEdR_lig * 0x100000000)));
         }
 
-        // Write cross-term energy (per-group, scaled, fixed-point)
+        // Write cross-term energy (per-group, scaled)
         if (validRec) {
-            atomicAdd(&crossTermEnergies[groupIdx], (unsigned long long)(long long)(crossEnergy * scale * 0x100000000));
+            atomicAdd(&crossTermEnergies[groupIdx], crossEnergy * scale);
         }
 
         // Cache per-tile cross-term energy (warp reduction) for tile-skip reconstruction
@@ -5058,7 +4774,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     int numRecBlocks,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    unsigned long long* __restrict__ crossTermEnergies            // [numGroups] — add to existing (fixed-point)
+    float* __restrict__ crossTermEnergies            // [numGroups] — add to existing
 ) {
     int tileIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int totalTiles = numGroups * numRecBlocks;
@@ -5089,7 +4805,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     if (!anyClose) {
         float cached = crossTermBlockCache[groupIdx * numRecBlocks + b];
         if (cached != 0.0f) {
-            atomicAdd(&crossTermEnergies[groupIdx], (unsigned long long)(long long)(cached * 0x100000000));
+            atomicAdd(&crossTermEnergies[groupIdx], cached);
         }
     }
 }
@@ -5136,19 +4852,18 @@ extern "C" __global__ void reduceLigandBornForce(
 
     // OBC chain rule
     float R = ligandRadii[templateIdx];
-    double R_off = (double)R - (double)DIELECTRIC_OFFSET;
+    float R_off = R - DIELECTRIC_OFFSET;
     float bornR = ligandBornRadii[idx];
-    // Use double for OBC chain to match Born radii precision
-    double hctTotal = (double)hctReceptor[idx] + (double)hctLigand[idx];
-    double psi = 0.5 * R_off * hctTotal;
-    double psi2 = psi * psi;
-    double tanhArg = (double)OBC_ALPHA * psi - (double)OBC_BETA * psi2 + (double)OBC_GAMMA * psi2 * psi;
-    double tanhVal = tanh(tanhArg);
-    double sech2 = 1.0 - tanhVal * tanhVal;
-    double dTanhDPsi = (double)OBC_ALPHA - 2.0 * (double)OBC_BETA * psi + 3.0 * (double)OBC_GAMMA * psi2;
-    double obcChain = R_off * dTanhDPsi * sech2 / (double)R;
+    float hctTotal = hctReceptor[idx] + hctLigand[idx];
+    float psi = 0.5f * R_off * hctTotal;
+    float psi2 = psi * psi;
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+    float tanhVal = tanhf(tanhArg);
+    float sech2 = 1.0f - tanhVal * tanhVal;
+    float dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    float obcChain = R_off * dTanhDPsi * sech2 / R;
 
-    bornForceLig[idx] = (float)((double)dEdR_lig * (double)bornR * (double)bornR * obcChain * (double)scale);
+    bornForceLig[idx] = dEdR_lig * bornR * bornR * obcChain * scale;
 }
 
 /**

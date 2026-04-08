@@ -67,7 +67,8 @@ __device__ void trilinearInterpolateTiled(
     float spacingX, float spacingY, float spacingZ,
     int tileWithOverlap,  // Total tile dimension including overlap
     float invPower,       // inv_power value
-    int invPowerMode      // 0=NONE, 1=RUNTIME, 2=STORED
+    int invPowerMode,     // 0=NONE, 1=RUNTIME, 2=STORED
+    float effectiveCap    // Per-corner tanh cap (0=disabled)
 ) {
     // Get 8 corner values from tile
     float v000 = tileValues[tileIndex(localX, localY, localZ, tileWithOverlap)];
@@ -91,6 +92,18 @@ __device__ void trilinearInterpolateTiled(
         v101 = invPowerForwardTransform(v101, invN);
         v110 = invPowerForwardTransform(v110, invN);
         v111 = invPowerForwardTransform(v111, invN);
+    }
+
+    // Apply tanh cap per corner before interpolation
+    if (effectiveCap > 0.0f) {
+        v000 = effectiveCap * tanhf(v000 / effectiveCap);
+        v001 = effectiveCap * tanhf(v001 / effectiveCap);
+        v010 = effectiveCap * tanhf(v010 / effectiveCap);
+        v011 = effectiveCap * tanhf(v011 / effectiveCap);
+        v100 = effectiveCap * tanhf(v100 / effectiveCap);
+        v101 = effectiveCap * tanhf(v101 / effectiveCap);
+        v110 = effectiveCap * tanhf(v110 / effectiveCap);
+        v111 = effectiveCap * tanhf(v111 / effectiveCap);
     }
 
     // Trilinear interpolation
@@ -585,7 +598,8 @@ extern "C" __global__ void computeGridForceTiled(
                     &interpolated, &dx, &dy, &dz,
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],
                     tileWithOverlap,
-                    invPower, invPowerMode
+                    invPower, invPowerMode,
+                    effectiveCap
                 );
 
                 // Undo arcsinh for stacked STORED + arcsinh mode
@@ -759,7 +773,8 @@ extern "C" __global__ void computeGridForceTiled(
                     &interpolated, &dx, &dy, &dz,
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],
                     tileWithOverlap,
-                    invPower, invPowerMode
+                    invPower, invPowerMode,
+                    effectiveCap
                 );
 
                 // Undo arcsinh for stacked STORED + arcsinh mode
@@ -803,16 +818,7 @@ extern "C" __global__ void computeGridForceTiled(
                 atomRawEnergyBuffer[index] = unscaledScaling * interpolated;
             }
 
-            // Apply runtime tanh cap: f(v) = C * tanh(v/C), bounded by ±C
-            // Gradient factor: sech²(v/C) = 1 - tanh²(v/C)
-            if (effectiveCap > 0.0f) {
-                float t = tanhf(interpolated / effectiveCap);
-                float gradFactor = 1.0f - t * t;
-                interpolated = effectiveCap * t;
-                dx *= gradFactor;
-                dy *= gradFactor;
-                dz *= gradFactor;
-            }
+            // (tanh cap applied per-corner before interpolation)
 
             // Apply scaling factor and compute energy/force
             threadEnergy = scalingFactor * interpolated;
