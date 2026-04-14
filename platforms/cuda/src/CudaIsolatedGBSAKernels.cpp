@@ -27,6 +27,7 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       prefactor(0), includeSurfaceArea(false), surfaceTension(0), cutoffDistance(-1.0f),
       originX(0), originY(0), originZ(0), gridSpacing(0), probeRadius(0),
       numBins(0), interpolationMethod(0), hasHctDerivatives(false),
+      useKDECorrections(false), hasBinnedKDEDerivatives(false),
       numReceptorAtoms(0), receptorReferenceEnergyValue(0.0f),
       computeReceptorHCTGridKernel(nullptr), computeReceptorHCTPairwiseKernel(nullptr),
       computeLigandHCTKernel(nullptr),
@@ -123,9 +124,26 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
             gridHctProbe.upload(hctData);
         }
 
-        int corrSize = numBins * numPoints;
+        // Detect correction grid mode by size (same logic as GBSAGridForce)
+        const auto& corrNData = grid->getCorrectionN();
+        size_t expectedBinnedKDESize = static_cast<size_t>(numBins) * 27 * numPoints;
+        size_t expectedKDESize = static_cast<size_t>(27) * numPoints;
+        size_t expectedBinnedSize = static_cast<size_t>(numBins) * numPoints;
+
+        if (corrNData.size() == expectedBinnedKDESize) {
+            useKDECorrections = true;
+            hasBinnedKDEDerivatives = true;
+        } else if (corrNData.size() == expectedKDESize) {
+            useKDECorrections = true;
+            hasBinnedKDEDerivatives = false;
+        } else {
+            useKDECorrections = false;
+            hasBinnedKDEDerivatives = false;
+        }
+
+        int corrSize = static_cast<int>(corrNData.size());
         gridCorrectionN.initialize<float>(cu, corrSize, "isolatedGbsaGridCorrectionN");
-        gridCorrectionN.upload(grid->getCorrectionN());
+        gridCorrectionN.upload(corrNData);
         gridCorrectionA.initialize<float>(cu, corrSize, "isolatedGbsaGridCorrectionA");
         gridCorrectionA.upload(grid->getCorrectionA());
         gridCorrectionB.initialize<float>(cu, corrSize, "isolatedGbsaGridCorrectionB");
@@ -489,7 +507,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &gridCorrectionNPtr, &gridCorrectionAPtr, &gridCorrectionBPtr,
             &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
             &originX, &originY, &originZ, &gridSpacing, &probeRadius,
-            &numBins, &totalParticles, &numAtoms, &interpolationMethod, &hctReceptorPtr
+            &numBins, &totalParticles, &numAtoms, &interpolationMethod,
+            &useKDECorrections, &hasBinnedKDEDerivatives, &hctReceptorPtr
         };
         cu.executeKernel(computeReceptorHCTGridKernel, receptorArgs, numBlocks * blockSize, blockSize);
 

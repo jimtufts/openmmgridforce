@@ -62,6 +62,8 @@ private:
     int numBins;
     int interpolationMethod;
     bool hasHctDerivatives;
+    bool useKDECorrections;
+    bool hasBinnedKDEDerivatives;
 
     // Pairwise mode parameters (when receptorMode == PAIRWISE)
     int numReceptorAtoms;

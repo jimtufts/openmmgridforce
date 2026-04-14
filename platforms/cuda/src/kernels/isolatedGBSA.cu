@@ -2566,14 +2566,66 @@ extern "C" __global__ void computeIsolatedReceptorHCTGrid(
     int totalParticles,
     int templateNumAtoms,
     int interpolationMethod,
+    bool useKDECorrections,
+    bool hasBinnedKDEDerivatives,
     float* __restrict__ hctReceptor
 ) {
-    // Implementation similar to computeReceptorHCT in gbsaGridForce.cu
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
 
-    // For now, just set to zero - full grid interpolation to be added
-    hctReceptor[idx] = 0.0f;
+    // Determine which group this atom belongs to and its position within the group
+    int atomInGroup = idx;
+    for (int g = 0; g < numGroups; g++) {
+        int groupStartIdx = groupStart[g];
+        int groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            atomInGroup = idx - groupStartIdx;
+            break;
+        }
+    }
+
+    // Get particle index and template atom index
+    int particleIdx = particleIndices[idx];
+    int templateIdx = atomInGroup % templateNumAtoms;
+
+    // Get position
+    float4 pos = posq[particleIdx];
+    float3 position = make_float3(pos.x, pos.y, pos.z);
+
+    // Get radius and compute offset radius
+    float R_i = radii[templateIdx];
+    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    float R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+
+    // Grid dimensions
+    int nx = gridCounts[0];
+    int ny = gridCounts[1];
+    int nz = gridCounts[2];
+    int numPoints = nx * ny * nz;
+
+    // Find appropriate bin for this radius
+    int binIdx = numBins - 1;
+    for (int b = 0; b < numBins; b++) {
+        if (rThresholds[b] >= R_i_off) {
+            binIdx = b;
+            break;
+        }
+    }
+    int binOffset = binIdx * numPoints;
+
+    // Use the shared interpolation helper (defined in gbsaGridForce.cu,
+    // available because all .cu files are compiled into one module)
+    GBSAInterpolationResult result = interpolateGBSAGrids(
+        position, R_i_off, R_probe_off,
+        gridCounts, gridSpacing,
+        originX, originY, originZ,
+        gridHctProbe, gridHctDerivatives,
+        gridCorrectionN, gridCorrectionA, gridCorrectionB,
+        binOffset, interpolationMethod, false,
+        useKDECorrections, hasBinnedKDEDerivatives
+    );
+
+    hctReceptor[idx] = result.isInside ? result.hct : 0.0f;
 }
 
 extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
