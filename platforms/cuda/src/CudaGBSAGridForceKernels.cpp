@@ -857,9 +857,6 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
         generateLigandHCTGridWithDerivativesKernel = cu.getKernel(generationModule, "generateLigandHCTGridWithDerivatives");
         generateBinnedGridsWithKDEKernel = cu.getKernel(generationModule, "generateBinnedGridsWithKDE");
         generateBinnedGridsWithKDEDerivativesKernel = cu.getKernel(generationModule, "generateBinnedGridsWithKDEDerivatives");
-        // New 4-grid generation kernels (all in same module)
-        generateDesolvationGrids4Kernel = cu.getKernel(generationModule, "generateDesolvationGrids4");
-        generateHCTProbeGridKernel = cu.getKernel(generationModule, "generateHCTProbeGrid");
     }
 
     // Convert to float arrays
