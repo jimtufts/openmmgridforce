@@ -37,6 +37,7 @@ MultiGroupHMCIntegrator::MultiGroupHMCIntegrator(int numGroups, int atomsPerGrou
     // Initialize per-group arrays with defaults
     groupTemperatures.resize(numGroups, 300.0);   // 300 K default
     groupStepSizes.resize(numGroups, stepSize);    // uniform initial dt
+    groupStepsPerTrial.resize(numGroups, numOuterSteps);  // uniform initial steps
 
     acceptCounts.resize(numGroups, 0);
     trialCounts.resize(numGroups, 0);
@@ -96,6 +97,44 @@ void MultiGroupHMCIntegrator::setNumOuterSteps(int steps) {
     if (steps < 1)
         throw OpenMMException("MultiGroupHMCIntegrator: numOuterSteps must be >= 1");
     numOuterSteps = steps;
+    // Legacy API: set all groups to the same value so per-group code paths
+    // behave identically to the old single-value code when this is used.
+    for (int k = 0; k < numGroups; k++)
+        groupStepsPerTrial[k] = steps;
+}
+
+void MultiGroupHMCIntegrator::setGroupStepsPerTrial(int group, int steps) {
+    if (group < 0 || group >= numGroups)
+        throw OpenMMException("MultiGroupHMCIntegrator: group index out of range");
+    if (steps < 0)
+        throw OpenMMException("MultiGroupHMCIntegrator: stepsPerTrial must be >= 0");
+    groupStepsPerTrial[group] = steps;
+    // Track the max so respaTrajectory knows how many outer steps to loop.
+    int maxSteps = 0;
+    for (int k = 0; k < numGroups; k++)
+        if (groupStepsPerTrial[k] > maxSteps)
+            maxSteps = groupStepsPerTrial[k];
+    numOuterSteps = (maxSteps > 0) ? maxSteps : 1;
+}
+
+int MultiGroupHMCIntegrator::getGroupStepsPerTrial(int group) const {
+    if (group < 0 || group >= numGroups)
+        throw OpenMMException("MultiGroupHMCIntegrator: group index out of range");
+    return groupStepsPerTrial[group];
+}
+
+void MultiGroupHMCIntegrator::setAllGroupStepsPerTrial(const vector<int>& steps) {
+    if (static_cast<int>(steps.size()) != numGroups)
+        throw OpenMMException("MultiGroupHMCIntegrator: stepsPerTrial size must match numGroups");
+    for (int i = 0; i < numGroups; i++)
+        if (steps[i] < 0)
+            throw OpenMMException("MultiGroupHMCIntegrator: all stepsPerTrial values must be >= 0");
+    groupStepsPerTrial = steps;
+    int maxSteps = 0;
+    for (int k = 0; k < numGroups; k++)
+        if (groupStepsPerTrial[k] > maxSteps)
+            maxSteps = groupStepsPerTrial[k];
+    numOuterSteps = (maxSteps > 0) ? maxSteps : 1;
 }
 
 // ========== Per-Group Timestep ==========

@@ -1669,6 +1669,14 @@ public:
     void setNumOuterSteps(int steps);
     int getNumOuterSteps() const;
 
+    // Per-group outer step counts (matches AlGDock reference where each
+    // state adapts steps_per_trial independently). Groups with shorter
+    // steps have dt zeroed for the remaining outer steps.
+    void setGroupStepsPerTrial(int group, int steps);
+    int getGroupStepsPerTrial(int group) const;
+    void setAllGroupStepsPerTrial(const std::vector<int>& steps);
+    std::vector<int> getAllGroupStepsPerTrial() const;
+
     // Per-group timestep (ps)
     void setGroupStepSize(int group, double stepSize);
     double getGroupStepSize(int group) const;

@@ -934,11 +934,31 @@ void CudaIntegrateMultiGroupHMCStepKernel::respaTrajectory(
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     int numGroupAtoms = K * atomsPerGroup;
 
+    // Per-group outer step counts. Groups with completed steps have their
+    // dt zeroed for subsequent iterations so kick/drift become no-ops.
+    // This lets different states run different trial lengths in one pass,
+    // matching the AlGDock reference where each state adapts independently.
+    const vector<int>& groupSteps = integrator.getAllGroupStepsPerTrial();
+    vector<double> maskedStepSizesHost(K, 0.0);  // reused per outer iteration
+
     if (schedule.empty()) {
         // Simple Verlet with per-group dt
         int allGroupsMask = 0xFFFFFFFF;
 
         for (int step = 0; step < numOuterSteps; step++) {
+            // Build per-group dt mask: zero for groups past their step count
+            bool anyActive = false;
+            for (int k = 0; k < K; k++) {
+                if (step < groupSteps[k]) {
+                    maskedStepSizesHost[k] = groupStepSizesHost[k];
+                    anyActive = true;
+                } else {
+                    maskedStepSizesHost[k] = 0.0;
+                }
+            }
+            if (!anyActive) break;
+            groupStepSizesBuffer.upload(maskedStepSizesHost);
+
             // Half-kick
             launchKick(forcePtr, 0.5);
 
@@ -951,6 +971,8 @@ void CudaIntegrateMultiGroupHMCStepKernel::respaTrajectory(
             // Half-kick
             launchKick(forcePtr, 0.5);
         }
+        // Restore original per-group dt in buffer for any subsequent use
+        groupStepSizesBuffer.upload(groupStepSizesHost);
         return;
     }
 
@@ -991,15 +1013,33 @@ void CudaIntegrateMultiGroupHMCStepKernel::respaTrajectory(
     // We need two dt buffers: outer (already in groupStepSizesBuffer) and inner
     // To avoid extra allocation, we re-upload as needed.
 
+    // Per-outer-step masked buffers (zeroed for groups past their step count).
+    vector<double> maskedOuterDt(K, 0.0);
+    vector<double> maskedInnerDt(K, 0.0);
+
     for (int outer = 0; outer < numOuterSteps; outer++) {
+        // Build per-group mask: zero dt for groups that have completed.
+        bool anyActive = false;
+        for (int k = 0; k < K; k++) {
+            if (outer < groupSteps[k]) {
+                maskedOuterDt[k] = groupStepSizesHost[k];
+                maskedInnerDt[k] = innerDtHost[k];
+                anyActive = true;
+            } else {
+                maskedOuterDt[k] = 0.0;
+                maskedInnerDt[k] = 0.0;
+            }
+        }
+        if (!anyActive) break;
+
         // Slow half-kick (outer dt, from saved slow forces)
-        groupStepSizesBuffer.upload(groupStepSizesHost);
+        groupStepSizesBuffer.upload(maskedOuterDt);
         launchKick(slowForcePtr, 0.5);
 
         // Inner loop
         for (int inner = 0; inner < innerStepsPerOuter; inner++) {
             // Fast half-kick (inner dt)
-            groupStepSizesBuffer.upload(innerDtHost);
+            groupStepSizesBuffer.upload(maskedInnerDt);
             launchKick(forcePtr, 0.5);
 
             // Drift (inner dt)
@@ -1023,7 +1063,7 @@ void CudaIntegrateMultiGroupHMCStepKernel::respaTrajectory(
         }
 
         // Slow half-kick (outer dt, from saved slow forces)
-        groupStepSizesBuffer.upload(groupStepSizesHost);
+        groupStepSizesBuffer.upload(maskedOuterDt);
         launchKick(slowForcePtr, 0.5);
     }
 

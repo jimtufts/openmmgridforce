@@ -138,16 +138,44 @@ public:
     // ========== HMC Trajectory Length ==========
 
     /**
-     * Set the number of outer RESPA steps per HMC trial.
+     * Set the number of outer RESPA steps per HMC trial for all groups.
      * Total trajectory length for group k = groupStepSize[k] * numOuterSteps.
+     * This is the legacy single-value API. For per-group control (matching
+     * AlGDock reference where each state adapts independently), use
+     * setGroupStepsPerTrial() or setAllGroupStepsPerTrial().
      * @param steps number of outer steps
      */
     void setNumOuterSteps(int steps);
 
     /**
-     * Get the number of outer RESPA steps per HMC trial.
+     * Get the maximum number of outer RESPA steps across all groups.
      */
     int getNumOuterSteps() const { return numOuterSteps; }
+
+    /**
+     * Set per-group outer steps. Groups with fewer steps have their dt
+     * effectively zeroed for the remaining outer steps.
+     * @param group group index
+     * @param steps number of outer steps for this group
+     */
+    void setGroupStepsPerTrial(int group, int steps);
+
+    /**
+     * Get outer steps for a specific group.
+     */
+    int getGroupStepsPerTrial(int group) const;
+
+    /**
+     * Set outer steps for all groups at once. Updates numOuterSteps to
+     * the maximum across groups.
+     * @param steps vector of length numGroups
+     */
+    void setAllGroupStepsPerTrial(const std::vector<int>& steps);
+
+    /**
+     * Get outer steps for all groups.
+     */
+    std::vector<int> getAllGroupStepsPerTrial() const { return groupStepsPerTrial; }
 
     // ========== Per-Group Timestep ==========
 
@@ -451,8 +479,11 @@ private:
     // RESPA schedule: (forceGroupIndex, substeps) pairs
     std::vector<std::pair<int,int> > forceGroupSchedule;
 
-    // HMC trajectory length (number of outer steps)
+    // HMC trajectory length (number of outer steps).
+    // numOuterSteps is the maximum across groups; groupStepsPerTrial
+    // contains the per-group values (matching AlGDock reference).
     int numOuterSteps;
+    std::vector<int> groupStepsPerTrial;
 
     // Momentum refresh
     MomentumRefreshMode momentumRefreshMode;
