@@ -78,6 +78,12 @@ private:
     OpenMM::CudaArray gridCorrectionB;
     OpenMM::CudaArray rThresholds;
 
+    // Cross-term scalar-field grid (GRID mode augment)
+    bool computeCrossTermGrid;
+    int crossTermNumBins;                  // = numAtoms (one bin per template atom)
+    OpenMM::CudaArray crossTermGrid;       // [numBins * totalGridPoints] float
+    OpenMM::CudaArray crossTermBinRLig;    // [numBins] float
+
     // Device arrays - receptor (for PAIRWISE mode)
     OpenMM::CudaArray receptorPositions;  // float3 array
     OpenMM::CudaArray receptorRadii;
@@ -146,6 +152,10 @@ private:
 
     // CUDA kernels
     CUfunction computeReceptorHCTGridKernel;      // Grid interpolation
+    CUfunction generateCrossTermGridKernel;       // GRID mode augment: build cross-term scalar field
+    CUfunction computeCrossTermFromGridKernel;    // GRID mode augment: runtime eval (phase 3)
+    CUfunction computeCrossTermPairwiseKernel;    // GRID mode augment: direct pair-sum cross term
+    CUfunction accumulateCrossTermBornDerivativesKernel; // GRID mode: dE_cross/dR_born chain rule
     CUfunction computeReceptorHCTPairwiseKernel;  // Pairwise receptor-ligand (naive)
     CUfunction computeReceptorHCTPairwiseTiledKernel;  // Pairwise receptor-ligand (tiled, fast)
     CUfunction computeLigandHCTKernel;            // Ligand-ligand pairwise

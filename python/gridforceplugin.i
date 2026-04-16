@@ -520,6 +520,14 @@ public:
     int getInterpolationMethod() const;
     void setInterpolationMethod(int method);
 
+    // Cross-term scalar-field grid (GRID-mode augment)
+    bool getComputeCrossTermGrid() const;
+    void setComputeCrossTermGrid(bool enable);
+    void setCrossTermBinValues(const std::vector<double>& binValues);
+    const std::vector<double>& getCrossTermBinValues() const;
+    void setReceptorBornRadiiBaseline(const std::vector<double>& radii);
+    const std::vector<double>& getReceptorBornRadiiBaseline() const;
+
     // Pairwise mode configuration
     void setNumReceptorAtoms(int n);
     int getNumReceptorAtoms() const;

@@ -32,8 +32,38 @@ IsolatedGBSAForce::IsolatedGBSAForce()
       receptorLocalityCutoff(NO_LOCALITY_CUTOFF),
       receptorMode(NONE),
       interpolationMethod(0),
+      computeCrossTermGrid(false),
       numReceptorAtoms(0),
       globalScalingFactor(1.0) {
+}
+
+void IsolatedGBSAForce::setCrossTermBinValues(const vector<double>& binValues) {
+    if ((int)binValues.size() != numAtoms) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: crossTermBinValues must have length numAtoms");
+    }
+    for (double v : binValues) {
+        if (!(v > 0)) {
+            throw OpenMMException(
+                "IsolatedGBSAForce: cross-term bin values must be positive");
+        }
+    }
+    crossTermBinValues = binValues;
+}
+
+void IsolatedGBSAForce::setReceptorBornRadiiBaseline(const vector<double>& r) {
+    if ((int)r.size() != numReceptorAtoms) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: receptorBornRadiiBaseline must have length "
+            "numReceptorAtoms");
+    }
+    for (double v : r) {
+        if (!(v > 0)) {
+            throw OpenMMException(
+                "IsolatedGBSAForce: baseline Born radii must be positive");
+        }
+    }
+    receptorBornRadiiBaseline = r;
 }
 
 void IsolatedGBSAForce::setNumAtoms(int n) {

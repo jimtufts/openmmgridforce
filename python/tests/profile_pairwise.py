@@ -112,46 +112,43 @@ def main():
         pass
     del ctx, integ
 
-    print(f"\n{'Platform':<12s} {'RecSize':>8s} {'Locality':>10s} {'ms/eval':>10s} {'Speedup':>8s}")
-    print("-" * 55)
+    cutoffs = [-1.0, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5]
 
-    # Reference platform (fewer evals since it's slow)
-    for rec_n, n_evals in [(2000, 5), (9133, 2)]:
-        rec_sub = rec_pos[:rec_n]
-        rec_sub_c = rec_charges[:rec_n]
-        rec_sub_r = rec_radii[:rec_n]
-        rec_sub_s = rec_scales[:rec_n]
+    # ---- Reference platform: cutoff sweep at 9133 atoms ----
+    print(f"\n{'='*70}")
+    print("REFERENCE PLATFORM (9133 receptor atoms)")
+    print(f"{'='*70}")
+    print(f"{'Cutoff':>10s} {'ms/eval':>10s} {'Speedup':>8s}")
+    print("-" * 30)
 
-        t_ref_off, _ = bench(lig_pos, lig_charges, lig_radii, lig_scales,
-                             rec_sub, rec_sub_c, rec_sub_r, rec_sub_s,
-                             ref_platform, locality=-1.0, n_evals=n_evals)
+    ref_baseline = None
+    for cutoff in cutoffs:
+        label = "off" if cutoff < 0 else f"{cutoff} nm"
+        t, _ = bench(lig_pos, lig_charges, lig_radii, lig_scales,
+                     rec_pos, rec_charges, rec_radii, rec_scales,
+                     ref_platform, locality=cutoff, n_evals=3)
+        if ref_baseline is None:
+            ref_baseline = t
+        speedup = ref_baseline / t if t > 0 else 0
+        print(f"{label:>10s} {t:>10.1f} {speedup:>7.2f}x")
 
-        t_ref_on, _ = bench(lig_pos, lig_charges, lig_radii, lig_scales,
-                            rec_sub, rec_sub_c, rec_sub_r, rec_sub_s,
-                            ref_platform, locality=2.0, n_evals=n_evals)
+    # ---- CUDA platform: cutoff sweep at 9133 atoms ----
+    print(f"\n{'='*70}")
+    print("CUDA PLATFORM (9133 receptor atoms)")
+    print(f"{'='*70}")
+    print(f"{'Cutoff':>10s} {'ms/eval':>10s} {'Speedup':>8s}")
+    print("-" * 30)
 
-        speedup = t_ref_off / t_ref_on if t_ref_on > 0 else 0
-        print(f"{'Reference':<12s} {rec_n:>8d} {'off':>10s} {t_ref_off:>10.1f}")
-        print(f"{'Reference':<12s} {rec_n:>8d} {'2.0 nm':>10s} {t_ref_on:>10.1f} {speedup:>7.2f}x")
-
-    # CUDA platform
-    for rec_n in [500, 2000, 9133]:
-        rec_sub = rec_pos[:rec_n]
-        rec_sub_c = rec_charges[:rec_n]
-        rec_sub_r = rec_radii[:rec_n]
-        rec_sub_s = rec_scales[:rec_n]
-
-        t_cuda_off, _ = bench(lig_pos, lig_charges, lig_radii, lig_scales,
-                              rec_sub, rec_sub_c, rec_sub_r, rec_sub_s,
-                              cuda_platform, locality=-1.0, n_evals=100)
-
-        t_cuda_on, _ = bench(lig_pos, lig_charges, lig_radii, lig_scales,
-                             rec_sub, rec_sub_c, rec_sub_r, rec_sub_s,
-                             cuda_platform, locality=2.0, n_evals=100)
-
-        speedup = t_cuda_off / t_cuda_on if t_cuda_on > 0 else 0
-        print(f"{'CUDA':<12s} {rec_n:>8d} {'off':>10s} {t_cuda_off:>10.1f}")
-        print(f"{'CUDA':<12s} {rec_n:>8d} {'2.0 nm':>10s} {t_cuda_on:>10.1f} {speedup:>7.2f}x")
+    cuda_baseline = None
+    for cutoff in cutoffs:
+        label = "off" if cutoff < 0 else f"{cutoff} nm"
+        t, _ = bench(lig_pos, lig_charges, lig_radii, lig_scales,
+                     rec_pos, rec_charges, rec_radii, rec_scales,
+                     cuda_platform, locality=cutoff, n_evals=200)
+        if cuda_baseline is None:
+            cuda_baseline = t
+        speedup = cuda_baseline / t if t > 0 else 0
+        print(f"{label:>10s} {t:>10.1f} {speedup:>7.2f}x")
 
 
 if __name__ == '__main__':

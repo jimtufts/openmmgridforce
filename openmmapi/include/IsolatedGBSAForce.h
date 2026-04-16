@@ -218,6 +218,41 @@ public:
     int getInterpolationMethod() const { return interpolationMethod; }
     void setInterpolationMethod(int method);
 
+    // ========== Cross-term scalar-field grid (GRID mode augment) ==========
+    //
+    // When enabled, the receptor-ligand GB cross term is evaluated from a
+    // precomputed scalar field G_b(r) = Σ_j q_j / f_gb(|r-r_j|, R_b, R_rec_j)
+    // built per ligand atom ("bin") with baseline OBC receptor Born radii.
+    // At runtime each ligand atom reads G_i(r_i) from its own slice, energy
+    // = Σ_i prefactor * q_i * G_i(r_i), forces from the trilinear gradient.
+    // Frozen-R_rec approximation; per-atom binning eliminates within-type
+    // variance. See AlGDock/mwe/compare_cross_term_grid.py for the Python
+    // reference that validated the approach.
+
+    bool getComputeCrossTermGrid() const { return computeCrossTermGrid; }
+    void setComputeCrossTermGrid(bool enable) { computeCrossTermGrid = enable; }
+
+    /**
+     * Set the per-atom cross-term grid bin values (R_lig in nm).
+     * Must have length numAtoms. Each value is the calibration-mean OBC2
+     * Born radius of that ligand template atom (typically computed from
+     * dock6 ensemble via Python HCT+OBC helper).
+     */
+    void setCrossTermBinValues(const std::vector<double>& binValues);
+    const std::vector<double>& getCrossTermBinValues() const {
+        return crossTermBinValues;
+    }
+
+    /**
+     * Set precomputed baseline receptor OBC2 Born radii (nm).
+     * Must have length numReceptorAtoms. Used by the cross-term grid
+     * generator as R_rec_j values (pose-independent).
+     */
+    void setReceptorBornRadiiBaseline(const std::vector<double>& radii);
+    const std::vector<double>& getReceptorBornRadiiBaseline() const {
+        return receptorBornRadiiBaseline;
+    }
+
     // ========== Receptor Configuration (PAIRWISE mode) ==========
 
     /**
@@ -453,6 +488,11 @@ private:
     // Grid mode configuration
     std::shared_ptr<DesolvationGrid> desolvationGrid;
     int interpolationMethod;
+
+    // Cross-term grid configuration (augment on top of GRID mode)
+    bool computeCrossTermGrid;
+    std::vector<double> crossTermBinValues;       // [numAtoms], nm
+    std::vector<double> receptorBornRadiiBaseline; // [numReceptorAtoms], nm
 
     // Pairwise mode configuration
     int numReceptorAtoms;

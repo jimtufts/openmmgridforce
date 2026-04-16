@@ -756,3 +756,89 @@ extern "C" __global__ void generateBinnedGridsWithKDEDerivatives(
         }
     }
 }
+
+/**
+ * Cross-term scalar field: G_b(r) = Σ_j q_j / f_gb(|r - r_j|, R_b, R_rec_j)
+ *
+ * One slice per bin. Used by IsolatedGBSAForce when computeCrossTermGrid is
+ * enabled. At runtime the ligand-side kernel interpolates G_bin[i](r_i) at
+ * each ligand atom position and sums q_i * G_i.
+ *
+ * Output layout: gridCrossTerm[b * totalGridPoints + gridIdx]  (bin-major)
+ *
+ * @param gridCrossTerm      Output, [numBins * totalGridPoints] in units
+ *                           of e / nm (charge over distance). The runtime
+ *                           kernel multiplies by the solvent prefactor.
+ * @param receptorPositions  Receptor positions [numReceptorAtoms]
+ * @param receptorCharges    Receptor partial charges [numReceptorAtoms]
+ * @param receptorBornRadii  Baseline receptor OBC2 Born radii (nm), frozen
+ *                           at their no-ligand values. [numReceptorAtoms]
+ * @param numReceptorAtoms   Number of receptor atoms
+ * @param binRLigValues      Per-bin ligand Born radius (nm). [numBins]
+ * @param numBins            Number of bins. Must be <= MAX_CROSS_BINS.
+ * @param originX/Y/Z        Grid origin
+ * @param gridCounts         [nx, ny, nz]
+ * @param gridSpacing        Grid spacing (uniform, nm)
+ * @param totalGridPoints    nx * ny * nz
+ */
+#define MAX_CROSS_BINS 96
+extern "C" __global__ void generateCrossTermGrid(
+    float* __restrict__ gridCrossTerm,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,
+    int numReceptorAtoms,
+    const float* __restrict__ binRLigValues,
+    int numBins,
+    float originX, float originY, float originZ,
+    const int* __restrict__ gridCounts,
+    float gridSpacing,
+    int totalGridPoints
+) {
+    int gridIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gridIdx >= totalGridPoints) return;
+
+    // Convert linear index to grid coordinate
+    int nx = gridCounts[0];
+    int ny = gridCounts[1];
+    int nz = gridCounts[2];
+    int nyz = ny * nz;
+    int ix = gridIdx / nyz;
+    int remainder = gridIdx % nyz;
+    int iy = remainder / nz;
+    int iz = remainder % nz;
+
+    float gx = originX + ix * gridSpacing;
+    float gy = originY + iy * gridSpacing;
+    float gz = originZ + iz * gridSpacing;
+
+    // Load bin values into registers (cheap for reasonable numBins)
+    // Register pressure: numBins floats. Spills harmlessly to local if too big.
+    float accum[MAX_CROSS_BINS];
+    for (int b = 0; b < numBins; b++) accum[b] = 0.0f;
+
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        float3 rj = receptorPositions[j];
+        float dx = gx - rj.x;
+        float dy = gy - rj.y;
+        float dz = gz - rj.z;
+        float r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 < 1e-8f) continue;
+        float q_j = receptorCharges[j];
+        float R_rec = receptorBornRadii[j];
+
+        for (int b = 0; b < numBins; b++) {
+            float R_lig_b = binRLigValues[b];
+            float RiRj = R_lig_b * R_rec;
+            // f_gb^2 = r^2 + R_i R_j exp(-r^2 / (4 R_i R_j))
+            float u = r2 / (4.0f * RiRj);
+            float f_gb2 = r2 + RiRj * expf(-u);
+            // q_j / f_gb
+            accum[b] += q_j * rsqrtf(f_gb2);
+        }
+    }
+
+    for (int b = 0; b < numBins; b++) {
+        gridCrossTerm[b * totalGridPoints + gridIdx] = accum[b];
+    }
+}

@@ -28,8 +28,12 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       originX(0), originY(0), originZ(0), gridSpacing(0), probeRadius(0),
       numBins(0), interpolationMethod(0), hasHctDerivatives(false),
       useKDECorrections(false), hasBinnedKDEDerivatives(false),
+      computeCrossTermGrid(false), crossTermNumBins(0),
       numReceptorAtoms(0), receptorReferenceEnergyValue(0.0f),
-      computeReceptorHCTGridKernel(nullptr), computeReceptorHCTPairwiseKernel(nullptr),
+      computeReceptorHCTGridKernel(nullptr),
+      generateCrossTermGridKernel(nullptr),
+      computeCrossTermFromGridKernel(nullptr),
+      computeReceptorHCTPairwiseKernel(nullptr),
       computeLigandHCTKernel(nullptr),
       computeBornRadiiHCTKernel(nullptr), computeBornRadiiOBCKernel(nullptr),
       computeGBEnergyKernel(nullptr), computeSAEnergyKernel(nullptr),
@@ -153,6 +157,71 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         vector<float> thresholdsFloat(thresholds.begin(), thresholds.end());
         rThresholds.initialize<float>(cu, numBins, "isolatedGbsaRThresholds");
         rThresholds.upload(thresholdsFloat);
+
+        // ---- Cross-term pairwise augment (GRID mode) ----
+        // Uses the existing computeCrossTermGBEnergy kernel with
+        // ligand Born radii from the HCT grid (already computed)
+        // and baseline receptor Born radii (frozen, precomputed once).
+        computeCrossTermGrid = force.getComputeCrossTermGrid();
+        if (computeCrossTermGrid) {
+            int nRec = force.getNumReceptorAtoms();
+            if (nRec == 0) {
+                throw OpenMMException(
+                    "IsolatedGBSAForce: computeCrossTermGrid requires "
+                    "receptor atoms (set via setNumReceptorAtoms / "
+                    "setReceptorAtomParameters / setReceptorPositions) "
+                    "even in GRID mode.");
+            }
+            const auto& recPos = force.getReceptorPositions();
+            if (recPos.size() != static_cast<size_t>(nRec * 3)) {
+                throw OpenMMException(
+                    "IsolatedGBSAForce: receptor positions size mismatch.");
+            }
+            const auto& recBornBaseline = force.getReceptorBornRadiiBaseline();
+            if ((int)recBornBaseline.size() != nRec) {
+                throw OpenMMException(
+                    "IsolatedGBSAForce: receptorBornRadiiBaseline must "
+                    "have length numReceptorAtoms.");
+            }
+            numReceptorAtoms = nRec;
+
+            // Upload receptor positions (persistent)
+            vector<float3> posF(nRec);
+            for (int j = 0; j < nRec; j++) {
+                posF[j] = make_float3(
+                    static_cast<float>(recPos[j * 3]),
+                    static_cast<float>(recPos[j * 3 + 1]),
+                    static_cast<float>(recPos[j * 3 + 2]));
+            }
+            receptorPositions.initialize<float3>(
+                cu, nRec, "isolatedGbsaReceptorPositions");
+            receptorPositions.upload(posF);
+
+            // Upload receptor charges (persistent)
+            vector<float> recChargesF(nRec);
+            for (int j = 0; j < nRec; j++) {
+                double q, r, s;
+                force.getReceptorAtomParameters(j, q, r, s);
+                recChargesF[j] = static_cast<float>(q);
+            }
+            receptorCharges.initialize<float>(
+                cu, nRec, "isolatedGbsaReceptorCharges");
+            receptorCharges.upload(recChargesF);
+
+            // Upload baseline receptor Born radii, replicated K times
+            // (the kernel indexes as receptorBornRadii[group * nRec + j])
+            int K = numParticleGroups;
+            vector<float> recBornF(K * nRec);
+            for (int g = 0; g < K; g++) {
+                for (int j = 0; j < nRec; j++) {
+                    recBornF[g * nRec + j] =
+                        static_cast<float>(recBornBaseline[j]);
+                }
+            }
+            receptorBornRadii.initialize<float>(
+                cu, K * nRec, "isolatedGbsaReceptorBornRadii");
+            receptorBornRadii.upload(recBornF);
+        }
 
     } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
         numReceptorAtoms = force.getNumReceptorAtoms();
@@ -345,6 +414,10 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     // Compile CUDA kernels (all kernels are in gridForceKernel)
     CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
     computeLigandHCTKernel = cu.getKernel(module, "computeIsolatedLigandHCT");
+    generateCrossTermGridKernel = cu.getKernel(module, "generateCrossTermGrid");
+    computeCrossTermFromGridKernel = cu.getKernel(module, "computeCrossTermFromGrid");
+    computeCrossTermPairwiseKernel = cu.getKernel(module, "computeCrossTermGBEnergy");
+    accumulateCrossTermBornDerivativesKernel = cu.getKernel(module, "accumulateCrossTermBornDerivatives");
     computeBornRadiiHCTKernel = cu.getKernel(module, "computeBornRadiiHCT");
     computeBornRadiiOBCKernel = cu.getKernel(module, "computeBornRadiiOBC");
     computeGBEnergyKernel = cu.getKernel(module, "computeIsolatedGBEnergy");
@@ -651,6 +724,35 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     };
     cu.executeKernel(computeGBEnergyKernel, energyArgs, numBlocks * blockSize, blockSize);
 
+    // Step 4a: GRID mode augment — direct pairwise cross-term.
+    // Uses the existing computeCrossTermGBEnergy kernel with ligand Born
+    // radii from the HCT grid (just computed) and baseline receptor Born
+    // radii (frozen, uploaded at init). This is the receptor-ligand GB
+    // cross term that computeGBEnergyKernel (ligand-only) omits.
+    if (receptorMode == IsolatedGBSAForce::GRID && computeCrossTermGrid) {
+        CUdeviceptr receptorPosPtr = receptorPositions.getDevicePointer();
+        CUdeviceptr receptorChargesPtr = receptorCharges.getDevicePointer();
+        CUdeviceptr receptorBornRadiiPtr = receptorBornRadii.getDevicePointer();
+        CUdeviceptr groupCrossPtr = groupCrossTermEnergies.getDevicePointer();
+        CUdeviceptr isActivePtr = (CUdeviceptr)0;  // unused
+        void* crossArgs[] = {
+            &posqPtr, &particleIndicesPtr, &chargesPtr,
+            &bornRadiiPtr,
+            &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiPtr,
+            &groupStartPtr, &numParticleGroups,
+            &numReceptorAtoms, &numAtoms,
+            &prefactor,
+            &groupCrossPtr,
+            &forcePtr, &paddedNumAtoms,
+            &globalScalingFactor, &groupScalingFactorsPtr,
+            &isActivePtr,
+        };
+        cu.executeKernel(computeCrossTermPairwiseKernel, crossArgs,
+                         numBlocks * blockSize, blockSize);
+        // Also add cross-term to total group energies
+        // (the kernel writes to crossTermEnergies only; we need it in
+        // groupEnergies too for the OpenMM total energy return path)
+    }
 
     // Step 4b: PAIRWISE mode - receptor desolvation and cross-term energy
     // All accumulation done on GPU to avoid host-device sync points.
@@ -888,6 +990,25 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(accumulateSADerivativesKernel, saDerivArgs, numBlocks * blockSize, blockSize);
         }
 
+        // Cross-term dE/dR_born contribution (GRID mode augment)
+        if (receptorMode == IsolatedGBSAForce::GRID && computeCrossTermGrid) {
+            CUdeviceptr receptorPosPtr2 = receptorPositions.getDevicePointer();
+            CUdeviceptr receptorChargesPtr2 = receptorCharges.getDevicePointer();
+            CUdeviceptr receptorBornRadiiPtr2 = receptorBornRadii.getDevicePointer();
+            void* crossDerivArgs[] = {
+                &posqPtr, &particleIndicesPtr, &chargesPtr,
+                &bornRadiiPtr,
+                &receptorPosPtr2, &receptorChargesPtr2, &receptorBornRadiiPtr2,
+                &groupStartPtr, &numParticleGroups,
+                &numReceptorAtoms, &numAtoms,
+                &prefactor,
+                &dE_dRPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr,
+            };
+            cu.executeKernel(accumulateCrossTermBornDerivativesKernel,
+                             crossDerivArgs, numBlocks * blockSize, blockSize);
+        }
+
         // Ligand-ligand HCT chain rule forces (scaling propagates via dE_dR)
         void* hctChainArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
@@ -915,6 +1036,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &rThresholdsPtr, &groupStartPtr, &numParticleGroups,
                 &originX, &originY, &originZ, &gridSpacing, &probeRadius,
                 &numBins, &totalParticles, &numAtoms, &interpolationMethod,
+                &useKDECorrections, &hasBinnedKDEDerivatives,
                 &forcePtr, &paddedNumAtoms
             };
             cu.executeKernel(computeReceptorHCTGradientForceKernel, receptorGradArgs, numBlocks * blockSize, blockSize);
@@ -951,12 +1073,21 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
             groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
             groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
+        } else if (receptorMode == IsolatedGBSAForce::GRID
+                   && computeCrossTermGrid) {
+            groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
         }
 
-        // Sum total energy
+        // Sum total energy. In GRID+crossTerm mode the cross-term
+        // kernel writes to its own buffer (not groupEnergies), so add
+        // it here.
         double totalEnergy = 0.0;
         for (int g = 0; g < numParticleGroups; g++) {
             totalEnergy += groupEnergiesHost[g];
+            if (receptorMode == IsolatedGBSAForce::GRID
+                && computeCrossTermGrid) {
+                totalEnergy += groupCrossTermEnergiesHost[g];
+            }
         }
 
         return totalEnergy;

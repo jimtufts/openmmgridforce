@@ -2652,10 +2652,78 @@ extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
     int totalParticles,
     int templateNumAtoms,
     int interpolationMethod,
+    bool useKDECorrections,
+    bool hasBinnedKDEDerivatives,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms
 ) {
-    // Placeholder - to be implemented
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= totalParticles) return;
+
+    int atomInGroup = idx;
+    for (int g = 0; g < numGroups; g++) {
+        int groupStartIdx = groupStart[g];
+        int groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            atomInGroup = idx - groupStartIdx;
+            break;
+        }
+    }
+
+    int particleIdx = particleIndices[idx];
+    int templateIdx = atomInGroup % templateNumAtoms;
+    float4 pos = posq[particleIdx];
+    float3 position = make_float3(pos.x, pos.y, pos.z);
+
+    float R_i = radii[templateIdx];
+    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    float R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+
+    int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
+    int binIdx = numBins - 1;
+    for (int b = 0; b < numBins; b++) {
+        if (rThresholds[b] >= R_i_off) {
+            binIdx = b;
+            break;
+        }
+    }
+    int binOffset = binIdx * numPoints;
+
+    GBSAInterpolationResult result = interpolateGBSAGrids(
+        position, R_i_off, R_probe_off,
+        gridCounts, gridSpacing,
+        originX, originY, originZ,
+        gridHctProbe, gridHctDerivatives,
+        gridCorrectionN, gridCorrectionA, gridCorrectionB,
+        binOffset, interpolationMethod, true,
+        useKDECorrections, hasBinnedKDEDerivatives
+    );
+
+    if (!result.isInside) return;
+
+    float hctTotal = hctReceptor[idx] + hctLigand[idx];
+    float psi = 0.5f * R_i_off * hctTotal;
+    float psi2 = psi * psi;
+    float psi3 = psi2 * psi;
+    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    float tanhVal = tanhf(tanhArg);
+    float sech2 = 1.0f - tanhVal * tanhVal;
+    float dTanhArgDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    float obcChain = R_i_off * dTanhArgDPsi * sech2 / R_i;
+
+    float bornR = bornRadii[idx];
+    float bornForces = dE_dR[idx] * bornR * bornR * obcChain;
+
+    float fx = -0.5f * bornForces * result.gradient.x;
+    float fy = -0.5f * bornForces * result.gradient.y;
+    float fz = -0.5f * bornForces * result.gradient.z;
+
+    atomicAdd(&forceBuffer[particleIdx],
+              static_cast<unsigned long long>((long long)(fx * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx + paddedNumAtoms],
+              static_cast<unsigned long long>((long long)(fy * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx + 2*paddedNumAtoms],
+              static_cast<unsigned long long>((long long)(fz * 0x100000000)));
 }
 
 extern "C" __global__ void computeIsolatedReceptorHCTPairwiseChainRule(
@@ -3176,6 +3244,97 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     atomicAdd(&forceBuffer[particleIdx_lig], static_cast<unsigned long long>((long long)(force_lig.x * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_lig + paddedNumAtoms], static_cast<unsigned long long>((long long)(force_lig.y * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx_lig + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force_lig.z * 0x100000000)));
+}
+
+/**
+ * Accumulate dE_cross/dR_born_lig into the Born radii chain-rule buffer.
+ *
+ * For each ligand atom i, computes:
+ *   dE_cross/dR_i = prefactor * q_i * Σ_j q_j * dGpol_dalpha2 * R_rec_j
+ * where dGpol_dalpha2 = -0.5 * Gpol * exp(-D) * (1+D) / f_gb²
+ * and D = r²/(4*R_i*R_j).
+ *
+ * This is added to the existing dE_dR buffer so the HCT chain-rule
+ * kernel propagates both self-GB and cross-term derivatives.
+ */
+extern "C" __global__ void accumulateCrossTermBornDerivatives(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ ligandCharges,
+    const float* __restrict__ ligandBornRadii,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int numReceptorAtoms,
+    int templateNumAtoms,
+    float prefactor,
+    float* __restrict__ dE_dR,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int groupIdx = 0;
+    int atomInGroup = idx;
+    int groupStartIdx = 0;
+    int groupEndIdx = 0;
+
+    for (int g = 0; g < numGroups; g++) {
+        groupStartIdx = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            groupIdx = g;
+            atomInGroup = idx - groupStartIdx;
+            break;
+        }
+    }
+    if (idx >= groupEndIdx) return;
+
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+
+    int particleIdx = particleIndices[idx];
+    int templateIdx = atomInGroup % templateNumAtoms;
+
+    float4 pos_lig = posq[particleIdx];
+    float q_lig = ligandCharges[templateIdx];
+    float R_lig = ligandBornRadii[idx];
+
+    float dEdR_accum = 0.0f;
+    const float MIN_CROSS_R2 = 0.01f;
+
+    for (int j = 0; j < numReceptorAtoms; j++) {
+        float3 pos_rec = receptorPositions[j];
+        float q_rec = receptorCharges[j];
+        float R_rec = receptorBornRadii[groupIdx * numReceptorAtoms + j];
+
+        float dx = pos_rec.x - pos_lig.x;
+        float dy = pos_rec.y - pos_lig.y;
+        float dz = pos_rec.z - pos_lig.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < MIN_CROSS_R2) continue;
+
+        float RiRj = R_lig * R_rec;
+        float D = r2 / (4.0f * RiRj);
+        float expTerm = expf(-D);
+        float f_gb2 = r2 + RiRj * expTerm;
+        float invFgb2 = 1.0f / f_gb2;
+        float invFgb = rsqrtf(f_gb2);
+
+        // dGpol/d(alpha2_ij) where alpha2_ij = R_i * R_j
+        // = -0.5 * Gpol * exp(-D) * (1+D) / f_gb²
+        float Gpol = prefactor * q_lig * q_rec * invFgb;
+        float dGpol_dalpha2 = -0.5f * Gpol * expTerm * (1.0f + D) * invFgb2;
+
+        // dE/dR_i = dGpol/d(alpha2) * d(alpha2)/dR_i = dGpol_dalpha2 * R_rec
+        dEdR_accum += dGpol_dalpha2 * R_rec;
+    }
+
+    // Add to the chain-rule buffer (scaled alchemically).
+    // The existing accumulateBornRadiiDerivatives already wrote the
+    // self-GB contribution; we add the cross-term on top.
+    dE_dR[idx] += dEdR_accum * scale;
 }
 
 /**
@@ -5059,5 +5218,173 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
         }
 
         __syncwarp();
+    }
+}
+
+/**
+ * Cross-term GBSA grid runtime evaluation (GRID mode augment).
+ *
+ * For each ligand atom, looks up the precomputed scalar field G_b(r) where
+ * b is the per-template-atom bin (b = template atom index). Adds
+ *     U_cross_i = prefactor * q_i * G_b(r_i)
+ * to the per-group energy and
+ *     F_cross_i = -prefactor * q_i * grad G_b(r_i)
+ * to the per-group force buffer. Uses local trilinear interpolation with
+ * analytic gradient so no external interpolation helper is needed.
+ *
+ * Bin-major grid layout: crossTermGrid[b * totalGridPoints + gridIdx].
+ *
+ * One thread per ligand atom. Receptor data is NOT touched at runtime —
+ * all receptor dependence is already baked into the scalar field.
+ */
+extern "C" __global__ void computeCrossTermFromGrid(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ charges,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int templateNumAtoms,
+    float prefactor,
+    const float* __restrict__ crossTermGrid,
+    int totalGridPoints,
+    float originX, float originY, float originZ,
+    const int* __restrict__ gridCounts,
+    float gridSpacing,
+    unsigned long long* __restrict__ forceBuffer,
+    float* __restrict__ groupEnergies,
+    float* __restrict__ groupCrossTermEnergies,
+    int paddedNumAtoms,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ groupUnscaledEnergies
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Find which group this atom belongs to (same pattern as the rest of
+    // the ligand-side kernels in this file).
+    int groupIdx = 0;
+    int atomInGroup = idx;
+    int groupStartIdx = 0;
+    int groupEndIdx = 0;
+    for (int g = 0; g < numGroups; g++) {
+        groupStartIdx = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            groupIdx = g;
+            atomInGroup = idx - groupStartIdx;
+            break;
+        }
+    }
+    if (idx >= groupEndIdx) return;
+
+    // Bin = template atom index (per-atom binning: each ligand template
+    // atom has its own slice of the cross-term grid).
+    int binIdx = atomInGroup % templateNumAtoms;
+    const float* G = crossTermGrid + binIdx * totalGridPoints;
+
+    float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+
+    int particleIdx = particleIndices[idx];
+    float4 pos = posq[particleIdx];
+    float q_i = charges[binIdx];
+
+    // --- Trilinear interpolation + analytic gradient on G[binIdx] ---
+    int nx = gridCounts[0];
+    int ny = gridCounts[1];
+    int nz = gridCounts[2];
+    int nyz = ny * nz;
+
+    float fx = (pos.x - originX) / gridSpacing;
+    float fy = (pos.y - originY) / gridSpacing;
+    float fz = (pos.z - originZ) / gridSpacing;
+
+    // If the atom is outside the grid, skip (silent no-op; the grid
+    // extent should cover the binding site margin). Caller must ensure
+    // the grid spans all sampled ligand positions.
+    if (fx < 0.0f || fy < 0.0f || fz < 0.0f ||
+        fx >= (float)(nx - 1) ||
+        fy >= (float)(ny - 1) ||
+        fz >= (float)(nz - 1)) {
+        return;
+    }
+
+
+    int ix = (int)fx;
+    int iy = (int)fy;
+    int iz = (int)fz;
+    float tx = fx - (float)ix;
+    float ty = fy - (float)iy;
+    float tz = fz - (float)iz;
+
+    // 8 cube corners: G(ix+a, iy+b, iz+c), a,b,c in {0,1}
+    int base = ix * nyz + iy * nz + iz;
+    float c000 = G[base];
+    float c001 = G[base + 1];
+    float c010 = G[base + nz];
+    float c011 = G[base + nz + 1];
+    float c100 = G[base + nyz];
+    float c101 = G[base + nyz + 1];
+    float c110 = G[base + nyz + nz];
+    float c111 = G[base + nyz + nz + 1];
+
+    // Interpolated value: trilinear blend
+    float w000 = (1.0f - tx) * (1.0f - ty) * (1.0f - tz);
+    float w001 = (1.0f - tx) * (1.0f - ty) * tz;
+    float w010 = (1.0f - tx) * ty         * (1.0f - tz);
+    float w011 = (1.0f - tx) * ty         * tz;
+    float w100 = tx          * (1.0f - ty) * (1.0f - tz);
+    float w101 = tx          * (1.0f - ty) * tz;
+    float w110 = tx          * ty         * (1.0f - tz);
+    float w111 = tx          * ty         * tz;
+
+    float Gval = w000 * c000 + w001 * c001 + w010 * c010 + w011 * c011
+               + w100 * c100 + w101 * c101 + w110 * c110 + w111 * c111;
+
+    // Analytic gradient of trilinear interpolant (dG/dfx, etc. are in
+    // units of grid cells, convert to /nm by dividing by gridSpacing).
+    float dG_dfx = (1.0f - ty) * (1.0f - tz) * (c100 - c000)
+                 + (1.0f - ty) * tz         * (c101 - c001)
+                 + ty         * (1.0f - tz) * (c110 - c010)
+                 + ty         * tz         * (c111 - c011);
+    float dG_dfy = (1.0f - tx) * (1.0f - tz) * (c010 - c000)
+                 + (1.0f - tx) * tz         * (c011 - c001)
+                 + tx         * (1.0f - tz) * (c110 - c100)
+                 + tx         * tz         * (c111 - c101);
+    float dG_dfz = (1.0f - tx) * (1.0f - ty) * (c001 - c000)
+                 + (1.0f - tx) * ty         * (c011 - c010)
+                 + tx         * (1.0f - ty) * (c101 - c100)
+                 + tx         * ty         * (c111 - c110);
+    float invSpacing = 1.0f / gridSpacing;
+    float dG_dx = dG_dfx * invSpacing;
+    float dG_dy = dG_dfy * invSpacing;
+    float dG_dz = dG_dfz * invSpacing;
+
+    // Energy contribution (unscaled vs scaled handled like the rest of
+    // the group energy accumulators in this file).
+    float e_i = prefactor * q_i * Gval;
+
+
+    // Force = -dE/dr = -prefactor * q_i * grad G, scaled alchemically
+    float fxx = -prefactor * q_i * dG_dx * scale;
+    float fyy = -prefactor * q_i * dG_dy * scale;
+    float fzz = -prefactor * q_i * dG_dz * scale;
+
+    atomicAdd(&forceBuffer[particleIdx],
+              static_cast<unsigned long long>(
+                  (long long)(fxx * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx + paddedNumAtoms],
+              static_cast<unsigned long long>(
+                  (long long)(fyy * 0x100000000)));
+    atomicAdd(&forceBuffer[particleIdx + 2 * paddedNumAtoms],
+              static_cast<unsigned long long>(
+                  (long long)(fzz * 0x100000000)));
+
+    atomicAdd(&groupEnergies[groupIdx], e_i * scale);
+    if (groupCrossTermEnergies != 0) {
+        atomicAdd(&groupCrossTermEnergies[groupIdx], e_i * scale);
+    }
+    if (groupUnscaledEnergies != 0) {
+        atomicAdd(&groupUnscaledEnergies[groupIdx],
+                  e_i * globalScalingFactor);
     }
 }
