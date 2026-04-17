@@ -177,6 +177,7 @@ private:
     CUfunction computeReceptorGBEnergyAndDeDRTiledKernel; // Fused energy + dE/dR (tiled)
     CUfunction computeReceptorBornRadiiWithLigandKernel; // Runtime: receptor Born radii (with ligand)
     CUfunction precomputeReceptorBornForcesKernel;    // Runtime: precompute bornForces per receptor
+    CUfunction accumulateCrossTermReceptorDeDRKernel; // Runtime: add cross-term dE/dR_rec to receptorDeDR
     CUfunction computeFusedReceptorForcesKernel;     // Runtime: fused desolv + cross-term forces (legacy)
     CUfunction computePairwiseGBForceTiledKernel;   // Runtime: tiled pass 1 (cross-term + desolv + dEdR)
     CUfunction reduceLigandBornForceKernel;          // Runtime: dEdR → bornForceLig

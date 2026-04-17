@@ -447,6 +447,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         computeReceptorGBEnergyAndDeDRTiledKernel = cu.getKernel(module, "computeReceptorGBEnergyAndDeDRTiled");
         computeReceptorBornRadiiWithLigandKernel = cu.getKernel(module, "computeReceptorBornRadiiWithLigand");
         precomputeReceptorBornForcesKernel = cu.getKernel(module, "precomputeReceptorBornForces");
+        accumulateCrossTermReceptorDeDRKernel = cu.getKernel(module, "accumulateCrossTermReceptorDeDR");
         computePairwiseGBForceTiledKernel = cu.getKernel(module, "computePairwiseGBForceTiled");
         reduceLigandBornForceKernel = cu.getKernel(module, "reduceLigandBornForce");
         computePairwiseChainRuleTiledKernel = cu.getKernel(module, "computePairwiseChainRuleTiled");
@@ -841,6 +842,29 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.executeKernel(accumulateDesolvationOnGPUKernel, accumArgs, 1, 1);
         }
 
+        // 4b.3a+: Accumulate cross-term contribution to receptorDeDR.
+        // computeReceptorGBEnergyAndDeDRTiled only populates receptor self +
+        // intra-receptor terms; the cross-term's dE/dR_born_rec (symmetric
+        // with the dE/dR_born_lig computed in pass 1) also needs to be added
+        // so bornForcesRec captures all physical paths.
+        if (includeForces) {
+            CUdeviceptr receptorPosPtrC = receptorPositions.getDevicePointer();
+            CUdeviceptr ligandChargesPtrC = charges.getDevicePointer();
+            CUdeviceptr ligandBornRadiiPtrC = bornRadii.getDevicePointer();
+            CUdeviceptr receptorChargesPtrC = receptorCharges.getDevicePointer();
+            int crossBlocks = (numParticleGroups * numReceptorAtoms
+                               + blockSize - 1) / blockSize;
+            void* crossDedrArgs[] = {
+                &posqPtr, &particleIndicesPtr, &receptorPosPtrC,
+                &ligandChargesPtrC, &ligandBornRadiiPtrC,
+                &receptorChargesPtrC, &receptorBornRadiiPtr,
+                &groupStartPtr, &numParticleGroups, &numReceptorAtoms,
+                &numAtoms, &prefactor, &receptorDeDRPtr
+            };
+            cu.executeKernel(accumulateCrossTermReceptorDeDRKernel,
+                             crossDedrArgs, crossBlocks * blockSize, blockSize);
+        }
+
         // 4b.3b: Precompute bornForces per receptor atom
         if (includeForces) {
             CUdeviceptr bornForcesRecPtr = receptorBornForces.getDevicePointer();
@@ -928,10 +952,36 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         cu.executeKernel(accumulateCrossTermOnGPUKernel, crossAccumArgs, 1, 1);
 
 
-        // === REDUCE: dE/dR_born_lig → bornForceLig ===
+        // Accumulate self-GB + intra-ligand dE/dR_born_lig into dE_dR before
+        // reducing so that the receptor→ligand chain rule (pass 2) sees the
+        // TOTAL dE/dR_lig rather than just the cross-term portion.
+        CUdeviceptr dE_dRPtr_for_reduce = dE_dR.getDevicePointer();
+        void* bornDerivArgsEarly[] = {
+            &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
+            &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor,
+            &dE_dRPtr_for_reduce,
+            &globalScalingFactor, &groupScalingFactorsPtr
+        };
+        cu.executeKernel(accumulateBornRadiiDerivativesKernel,
+                         bornDerivArgsEarly, numBlocks * blockSize, blockSize);
+
+        if (includeSurfaceArea) {
+            float probe = (receptorMode == IsolatedGBSAForce::GRID) ? probeRadius : 0.14f;
+            void* saDerivArgsEarly[] = {
+                &radiiPtr, &bornRadiiPtr, &groupStartPtr,
+                &numParticleGroups, &numAtoms, &surfaceTension, &probe,
+                &dE_dRPtr_for_reduce,
+                &globalScalingFactor, &groupScalingFactorsPtr
+            };
+            cu.executeKernel(accumulateSADerivativesKernel,
+                             saDerivArgsEarly, numBlocks * blockSize, blockSize);
+        }
+
+        // === REDUCE: (cross-term dE/dR + self-GB dE/dR) → bornForceLig ===
         int reduceBlocks = (totalParticles + blockSize - 1) / blockSize;
         void* reduceArgs[] = {
-            &dEdRCrossTermPtr, &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr,
+            &dEdRCrossTermPtr, &dE_dRPtr_for_reduce,
+            &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr,
             &radiiPtr, &groupStartPtr, &numParticleGroups, &totalParticles, &numAtoms,
             &globalScalingFactor, &groupScalingFactorsPtr, &bornForceLigPtr
         };
@@ -971,27 +1021,15 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     // Step 6: Chain rule forces through Born radii
     if (includeForces) {
         CUdeviceptr dE_dRPtr = dE_dR.getDevicePointer();
-
-        // Accumulate dE/dR_born (scaled by alchemical factors)
-        void* bornDerivArgs[] = {
-            &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
-            &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor, &dE_dRPtr,
-            &globalScalingFactor, &groupScalingFactorsPtr
-        };
-        cu.executeKernel(accumulateBornRadiiDerivativesKernel, bornDerivArgs, numBlocks * blockSize, blockSize);
-
-        if (includeSurfaceArea) {
-            float probe = (receptorMode == IsolatedGBSAForce::GRID) ? probeRadius : 0.14f;
-            void* saDerivArgs[] = {
-                &radiiPtr, &bornRadiiPtr, &groupStartPtr,
-                &numParticleGroups, &numAtoms, &surfaceTension, &probe, &dE_dRPtr,
-                &globalScalingFactor, &groupScalingFactorsPtr
-            };
-            cu.executeKernel(accumulateSADerivativesKernel, saDerivArgs, numBlocks * blockSize, blockSize);
-        }
-
-        // Cross-term dE/dR_born contribution (GRID mode augment)
-        if (receptorMode == IsolatedGBSAForce::GRID && computeCrossTermGrid) {
+        // dE_dR already has self-GB + intra-ligand + SA from the earlier
+        // accumulate before reduceLigandBornForce. We now add the cross-term
+        // contribution so that computeHCTChainRuleForces (intra-ligand HCT)
+        // propagates the FULL dE/dR through that path as well. Without this,
+        // the cross-term dE/dR_lig path through intra-ligand HCT is missing.
+        bool addCrossTermToDEdR =
+            (receptorMode == IsolatedGBSAForce::PAIRWISE) ||
+            (receptorMode == IsolatedGBSAForce::GRID && computeCrossTermGrid);
+        if (addCrossTermToDEdR) {
             CUdeviceptr receptorPosPtr2 = receptorPositions.getDevicePointer();
             CUdeviceptr receptorChargesPtr2 = receptorCharges.getDevicePointer();
             CUdeviceptr receptorBornRadiiPtr2 = receptorBornRadii.getDevicePointer();

@@ -517,7 +517,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
                     energy += prefactor * q1 * q2 / f_gb;
 
                     // dE/dR_born_i from pair (i,j)
-                    float factor = -prefactor * q1 * q2 * invFgb2 / f_gb;
+                    float factor = -prefactor * q1 * q2 * invFgb2;
                     float dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     float dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     myDeDR += factor * dFgbDR1;
@@ -553,7 +553,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
 
                     energy += prefactor * q1 * q2 / f_gb;
 
-                    float factor = -prefactor * q1 * q2 * invFgb2 / f_gb;
+                    float factor = -prefactor * q1 * q2 * invFgb2;
                     float dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     float dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     myDeDR += factor * dFgbDR1;
@@ -3512,6 +3512,87 @@ extern "C" __global__ void computeReceptorDesolvationForces(
  *
  * Output: bornForcesRec[groupIdx * numReceptorAtoms + recIdx]
  */
+/**
+ * Accumulate the cross-term contribution to dE/dR_born_rec_j:
+ *   dE_cross/dR_born_rec_j = Σ_i (-prefactor * q_lig_i * q_rec_j * invFgb²
+ *                                  * dFgbDR_rec(R_lig_born_i, R_rec_born_j))
+ *
+ * The receptor self + intra pair terms were already deposited into
+ * receptorDeDR by computeReceptorGBEnergyAndDeDRTiled. This kernel adds the
+ * missing lig-rec (cross-term) contribution so that bornForcesRec, and the
+ * downstream lig-screens-rec chain rule, includes ALL physical paths.
+ *
+ * One thread per (group, receptor-atom). Loops over ligand atoms within
+ * the group. The loop is short (58 atoms for our test system) so no tiling
+ * needed; global memory traffic is the bottleneck.
+ */
+extern "C" __global__ void accumulateCrossTermReceptorDeDR(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ ligandCharges,
+    const float* __restrict__ ligandBornRadii,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,    // [K * N_rec]
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int numReceptorAtoms,
+    int templateNumAtoms,
+    float prefactor,
+    float* __restrict__ receptorDeDR                // [K * N_rec] output (+=)
+) {
+    int totalWork = numGroups * numReceptorAtoms;
+    const float MIN_R2 = 0.01f;
+
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
+
+        int groupIdx = globalIdx / numReceptorAtoms;
+        int recIdx = globalIdx % numReceptorAtoms;
+
+        int gs = groupStart[groupIdx];
+        int ge = groupStart[groupIdx + 1];
+        int groupSize = ge - gs;
+
+        float3 recPos = receptorPositions[recIdx];
+        float qRec = receptorCharges[recIdx];
+        float R_rec_born = receptorBornRadii[globalIdx];
+
+        float dEdR_rec_accum = 0.0f;
+
+        for (int li = 0; li < groupSize; li++) {
+            int ligGlobal = gs + li;
+            int particleIdx = particleIndices[ligGlobal];
+            int templateIdx = li % templateNumAtoms;
+            float4 p = posq[particleIdx];
+            float qLig = ligandCharges[templateIdx];
+            float R_lig_born = ligandBornRadii[ligGlobal];
+
+            float dx = p.x - recPos.x;
+            float dy = p.y - recPos.y;
+            float dz = p.z - recPos.z;
+            float r2 = dx * dx + dy * dy + dz * dz;
+            if (r2 < MIN_R2) continue;
+
+            float RiRj = R_lig_born * R_rec_born;
+            float D = r2 / (4.0f * RiRj);
+            float expTerm = expf(-D);
+            float f_gb2 = r2 + RiRj * expTerm;
+            float invFgb2 = 1.0f / f_gb2;
+            float f_gb = sqrtf(f_gb2);
+
+            // dE_cross/dR_born_rec = -prefactor * q_lig * q_rec * invFgb² * dFgbDRrec
+            // dFgbDRrec = R_lig_born * exp(-D) * (1+D) / (2 f_gb)
+            float dFgbDRrec = (R_lig_born * expTerm / (2.0f * f_gb)) * (1.0f + D);
+            dEdR_rec_accum += -prefactor * qLig * qRec * invFgb2 * dFgbDRrec;
+        }
+
+        receptorDeDR[globalIdx] += dEdR_rec_accum;
+    }
+}
+
+
 extern "C" __global__ void precomputeReceptorBornForces(
     const float* __restrict__ receptorRadii,
     const float* __restrict__ receptorSelfHCT,
@@ -5027,6 +5108,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
  */
 extern "C" __global__ void reduceLigandBornForce(
     const unsigned long long* __restrict__ dEdR_crossTerm,  // fixed-point
+    const float* __restrict__ dE_dR_other,  // float, self-GB + intra-lig + SA (pre-scaled)
     const float* __restrict__ ligandBornRadii,
     const float* __restrict__ hctReceptor,
     const float* __restrict__ hctLigand,
@@ -5058,8 +5140,14 @@ extern "C" __global__ void reduceLigandBornForce(
 
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
-    // Convert fixed-point dE/dR to float
-    float dEdR_lig = (float)((long long)dEdR_crossTerm[idx] / (double)0x100000000);
+    // Total dE/dR_lig from both buffers:
+    //   dEdR_crossTerm: accumulated UNSCALED in pass 1 tiled kernel
+    //     (computePairwiseGBForceTiled writes dEdR_lig without scale multiplier).
+    //   dE_dR_other:    self-GB + intra-ligand + SA, already scaled by the
+    //     accumulateIsolatedBornRadiiDerivatives / SA kernels.
+    // Convert to float, apply scale to the cross-term half, then sum.
+    float dEdR_cross = (float)((long long)dEdR_crossTerm[idx] / (double)0x100000000);
+    float dEdR_lig = dEdR_cross * scale + dE_dR_other[idx];
 
     // OBC chain rule
     float R = ligandRadii[templateIdx];
@@ -5074,7 +5162,9 @@ extern "C" __global__ void reduceLigandBornForce(
     float dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
     float obcChain = R_off * dTanhDPsi * sech2 / R;
 
-    bornForceLig[idx] = dEdR_lig * bornR * bornR * obcChain * scale;
+    // dEdR_lig is already scaled (cross-term by the * scale above, self-GB/SA
+    // by the respective accumulate kernels). Do not multiply by scale again.
+    bornForceLig[idx] = dEdR_lig * bornR * bornR * obcChain;
 }
 
 /**
@@ -5215,6 +5305,7 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
             atomicAdd(&forceBuffer[ligParticle], static_cast<unsigned long long>((long long)(de * dx * 0x100000000)));
             atomicAdd(&forceBuffer[ligParticle + paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dy * 0x100000000)));
             atomicAdd(&forceBuffer[ligParticle + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dz * 0x100000000)));
+
         }
 
         __syncwarp();
