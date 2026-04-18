@@ -415,6 +415,95 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
  * Single pass over all receptor-receptor pairs computes both quantities,
  * eliminating the separate O(N²) dE/dR kernel.
  */
+/**
+ * Batched-load receptor GB energy + dE/dR kernel. One thread per receptor
+ * atom (i) accumulates its contributions into thread-local registers — no
+ * cross-thread accumulation, so correctness is straightforward. For cache
+ * efficiency, blocks of J atoms are cooperatively loaded into shared memory
+ * and all threads in the block iterate over the same batch.
+ *
+ * Each pair (i,j) with i != j is visited twice (once as (i,j) from thread i
+ * and once as (j,i) from thread j). The 0.5 factor in the energy term
+ * accounts for this double visitation. For the derivative, each atom's
+ * thread accumulates only its OWN dE/dR — no factor-of-2 needed.
+ */
+extern "C" __global__ void computeReceptorGBEnergyAndDeDRSimple(
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorCharges,
+    const float* __restrict__ receptorBornRadii,
+    int numReceptorAtoms,
+    float prefactor,
+    float* __restrict__ receptorEnergy,     // [1] scalar, atomicAdd
+    float* __restrict__ receptorDeDR        // [numReceptorAtoms] per-atom
+) {
+    const int BATCH = 128;
+    __shared__ float3 sPos[BATCH];
+    __shared__ float  sQ[BATCH];
+    __shared__ float  sR[BATCH];
+
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    bool valid_i = (i < numReceptorAtoms);
+
+    float3 pos_i = make_float3(0, 0, 0);
+    float q_i = 0.0f;
+    float R_i = 1.0f;
+    if (valid_i) {
+        pos_i = receptorPositions[i];
+        q_i = receptorCharges[i];
+        R_i = receptorBornRadii[i];
+    }
+
+    // Self term
+    float my_energy = valid_i ? (0.5f * prefactor * q_i * q_i / R_i) : 0.0f;
+    float my_dEdR   = valid_i ? (-0.5f * prefactor * q_i * q_i / (R_i * R_i)) : 0.0f;
+
+    // Iterate over batches of J atoms
+    for (int jStart = 0; jStart < numReceptorAtoms; jStart += BATCH) {
+        int jEnd = jStart + BATCH;
+        if (jEnd > numReceptorAtoms) jEnd = numReceptorAtoms;
+        int batchSize = jEnd - jStart;
+
+        // Cooperative batch load into shared memory
+        for (int t = threadIdx.x; t < batchSize; t += blockDim.x) {
+            sPos[t] = receptorPositions[jStart + t];
+            sQ[t]   = receptorCharges[jStart + t];
+            sR[t]   = receptorBornRadii[jStart + t];
+        }
+        __syncthreads();
+
+        if (valid_i) {
+            for (int t = 0; t < batchSize; t++) {
+                int j = jStart + t;
+                if (j == i) continue;
+                float dx = sPos[t].x - pos_i.x;
+                float dy = sPos[t].y - pos_i.y;
+                float dz = sPos[t].z - pos_i.z;
+                float r2 = dx*dx + dy*dy + dz*dz;
+
+                float q_j = sQ[t];
+                float R_j = sR[t];
+                float RiRj = R_i * R_j;
+                float D = r2 / (4.0f * RiRj);
+                float expTerm = expf(-D);
+                float f_gb2 = r2 + RiRj * expTerm;
+                float f_gb = sqrtf(f_gb2);
+
+                my_energy += 0.5f * prefactor * q_i * q_j / f_gb;
+
+                float dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + D);
+                my_dEdR += -prefactor * q_i * q_j * dFgbDRi / f_gb2;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (valid_i) {
+        receptorDeDR[i] = my_dEdR;
+        atomicAdd(receptorEnergy, my_energy);
+    }
+}
+
+
 extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
     const float3* __restrict__ receptorPositions,
     const float* __restrict__ receptorCharges,
@@ -491,22 +580,27 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
         __syncwarp();
 
         if (x == y) {
-            // Diagonal tile: self term + upper triangle
+            // Diagonal tile: self term + upper triangle pairs.
+            // Use the same rotation pattern as the off-diagonal tile so that
+            // all 32 threads always write to 32 distinct shared-memory lanes
+            // (no SIMT race). Guard with atom1 < atom2_j to process each
+            // upper-triangle pair exactly once.
             if (atom1 < numReceptorAtoms) {
                 energy += 0.5f * prefactor * q1 * q1 / R1;
                 myDeDR += -0.5f * prefactor * q1 * q1 / (R1 * R1);
             }
 
-            for (int j = tgx + 1; j < TILE_SIZE; j++) {
-                int atom2_j = y * TILE_SIZE + j;
-                if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = localData[tbx + j].x - pos1.x;
-                    float dy = localData[tbx + j].y - pos1.y;
-                    float dz = localData[tbx + j].z - pos1.z;
+            unsigned int tj = tgx;
+            for (int j = 0; j < TILE_SIZE; j++) {
+                int atom2_j = y * TILE_SIZE + tj;
+                if ((int)atom1 < atom2_j && atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
+                    float dx = localData[tbx + tj].x - pos1.x;
+                    float dy = localData[tbx + tj].y - pos1.y;
+                    float dz = localData[tbx + tj].z - pos1.z;
                     float r2 = dx*dx + dy*dy + dz*dz;
 
-                    float q2 = localData[tbx + j].charge;
-                    float R2 = localData[tbx + j].bornRadius;
+                    float q2 = localData[tbx + tj].charge;
+                    float R2 = localData[tbx + tj].bornRadius;
                     float RiRj = R1 * R2;
                     float expArg = -r2 / (4.0f * RiRj);
                     float expTerm = expf(expArg);
@@ -516,17 +610,17 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
 
                     energy += prefactor * q1 * q2 / f_gb;
 
-                    // dE/dR_born_i from pair (i,j)
                     float factor = -prefactor * q1 * q2 * invFgb2;
                     float dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     float dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     myDeDR += factor * dFgbDR1;
-                    localData[tbx + j].energy += factor * dFgbDR2;
+                    localData[tbx + tj].energy += factor * dFgbDR2;
                 }
+                tj = (tj + 1) & (TILE_SIZE - 1);
+                __syncwarp();
             }
 
             // Write atom2 dE/dR contributions from shared memory
-            __syncwarp();
             if (atom2 < numReceptorAtoms && localData[tbx + tgx].energy != 0.0f) {
                 atomicAdd(&receptorDeDR[atom2], localData[tbx + tgx].energy);
             }

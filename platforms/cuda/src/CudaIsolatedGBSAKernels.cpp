@@ -8,8 +8,11 @@
 #include "openmm/cuda/CudaBondedUtilities.h"
 #include "openmm/cuda/CudaForceInfo.h"
 #include "openmm/OpenMMException.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <utility>
+#include <vector>
 
 using namespace GridForcePlugin;
 using namespace OpenMM;
@@ -445,6 +448,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         computeReceptorBornRadiiReferenceKernel = cu.getKernel(module, "computeReceptorBornRadiiReference");
         computeReceptorGBEnergyTiledKernel = cu.getKernel(module, "computeReceptorGBEnergyTiled");
         computeReceptorGBEnergyAndDeDRTiledKernel = cu.getKernel(module, "computeReceptorGBEnergyAndDeDRTiled");
+        computeReceptorGBEnergyAndDeDRSimpleKernel = cu.getKernel(module, "computeReceptorGBEnergyAndDeDRSimple");
         computeReceptorBornRadiiWithLigandKernel = cu.getKernel(module, "computeReceptorBornRadiiWithLigand");
         precomputeReceptorBornForcesKernel = cu.getKernel(module, "precomputeReceptorBornForces");
         accumulateCrossTermReceptorDeDRKernel = cu.getKernel(module, "accumulateCrossTermReceptorDeDR");
@@ -818,13 +822,17 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.clearBuffer(receptorEnergy);
 
             if (includeForces) {
-
-                // Fused energy + dE/dR in single tiled pass
-                void* fusedArgs[] = {
+                // Fused receptor energy + dE/dR for this group.
+                // Tiled O(N²/2) kernel — uses rotation pattern in both diagonal
+                // and off-diagonal loops to guarantee 32 distinct shared-memory
+                // lanes per step (no SIMT race).
+                void* tiledArgs[] = {
                     &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
-                    &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &groupDeDRPtr, &numTiles
+                    &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &groupDeDRPtr,
+                    &numTiles
                 };
-                cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel, fusedArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
+                cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel,
+                                 tiledArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
             } else {
                 // Energy only
                 void* recEnergyArgs[] = {
