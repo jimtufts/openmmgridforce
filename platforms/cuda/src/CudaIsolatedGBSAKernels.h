@@ -163,6 +163,7 @@ private:
     CUfunction computeBornRadiiOBCKernel;         // OBC-II method
     CUfunction computeGBEnergyKernel;             // GB energy with forces
     CUfunction computeSAEnergyKernel;             // Surface area energy
+    CUfunction computeReceptorDeltaSAKernel;      // Receptor ΔSA (PAIRWISE only)
     CUfunction accumulateBornRadiiDerivativesKernel;
     CUfunction accumulateSADerivativesKernel;
     CUfunction computeHCTChainRuleForcesKernel;

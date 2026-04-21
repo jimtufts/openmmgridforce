@@ -501,6 +501,10 @@ public:
     double getSurfaceTension() const;
     void setSurfaceTension(double tension);
 
+    // Opt-in diagnostic: download Born radii from device per force eval.
+    void setDownloadBornRadii(bool enabled);
+    bool getDownloadBornRadii() const;
+
     // Cutoff
     double getCutoffDistance() const;
     void setCutoffDistance(double distance);

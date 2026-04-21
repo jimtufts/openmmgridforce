@@ -72,8 +72,13 @@ double IsolatedGBSAForceImpl::calcForcesAndEnergy(ContextImpl& context,
             owner.groupReceptorContributions[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupReceptorContribution(g);
             owner.groupReceptorDesolvations[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupReceptorDesolvation(g);
             owner.groupCrossTermEnergies[g] = kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupCrossTermEnergy(g);
-            // Born radii and atom energies: skip expensive GPU downloads during force evaluation.
-            // These are diagnostic arrays — download on-demand via getGroupBornRadii() / getReceptorBornRadii().
+            // Born radii download is opt-in (avoids per-sweep GPU↔host sync).
+            // Set via IsolatedGBSAForce::setDownloadBornRadii(true) before the
+            // next force evaluation when diagnostic access is required.
+            if (owner.getDownloadBornRadii()) {
+                owner.groupBornRadii[g] =
+                    kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupBornRadii(g);
+            }
         }
 
         return energy;

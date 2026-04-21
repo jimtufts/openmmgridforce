@@ -382,8 +382,19 @@ public:
 
     /**
      * Get the Born radii for atoms in a particle group.
+     * Requires setDownloadBornRadii(true) to have been called before the
+     * last force evaluation (otherwise returns an empty vector).
      */
     std::vector<double> getGroupBornRadii(int groupIndex) const;
+
+    /**
+     * Enable (opt-in) downloading of Born radii from the device on every
+     * force evaluation so that getGroupBornRadii() returns valid data.
+     * Disabled by default because the GPU↔host sync is expensive in a
+     * tight MD loop. Turn on only for diagnostic rescoring.
+     */
+    void setDownloadBornRadii(bool enabled) { downloadBornRadiiEnabled = enabled; }
+    bool getDownloadBornRadii() const { return downloadBornRadiiEnabled; }
 
     /**
      * Get per-atom GB energies for a particle group.
@@ -475,6 +486,9 @@ private:
     // Surface area term
     bool includeSurfaceArea;
     double surfaceTension;
+
+    // Opt-in diagnostic: download Born radii from device per force eval.
+    bool downloadBornRadiiEnabled;
 
     // Cutoff
     double cutoffDistance;

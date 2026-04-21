@@ -40,6 +40,7 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       computeLigandHCTKernel(nullptr),
       computeBornRadiiHCTKernel(nullptr), computeBornRadiiOBCKernel(nullptr),
       computeGBEnergyKernel(nullptr), computeSAEnergyKernel(nullptr),
+      computeReceptorDeltaSAKernel(nullptr),
       accumulateBornRadiiDerivativesKernel(nullptr), accumulateSADerivativesKernel(nullptr),
       computeHCTChainRuleForcesKernel(nullptr),
       computeReceptorHCTGradientForceKernel(nullptr),
@@ -425,6 +426,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     computeBornRadiiOBCKernel = cu.getKernel(module, "computeBornRadiiOBC");
     computeGBEnergyKernel = cu.getKernel(module, "computeIsolatedGBEnergy");
     computeSAEnergyKernel = cu.getKernel(module, "computeIsolatedSAEnergy");
+    computeReceptorDeltaSAKernel = cu.getKernel(module, "computeReceptorDeltaSA");
     accumulateBornRadiiDerivativesKernel = cu.getKernel(module, "accumulateIsolatedBornRadiiDerivatives");
     accumulateSADerivativesKernel = cu.getKernel(module, "accumulateIsolatedSADerivatives");
     computeHCTChainRuleForcesKernel = cu.getKernel(module, "computeIsolatedHCTChainRuleForces");
@@ -507,15 +509,24 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         };
         cu.executeKernel(computeReceptorBornRadiiReferenceKernel, bornRefArgs, convertBlocks * recBlockSize, recBlockSize);
 
-        // Step 3: Compute receptor reference energy using TILED kernel
+        // Step 3: Compute receptor reference energy using the FUSED tiled
+        // kernel (same one used at runtime). Using the same accumulation
+        // order here eliminates the float32 pair-sum discrepancy between
+        // setup and runtime (~11 kJ/mol over ~87M pair terms). The dE/dR
+        // output goes to the receptorDeDR scratch buffer (group 0 slice),
+        // which is overwritten at runtime and so is safe to clobber.
         vector<float> zeroEnergy(1, 0.0f);
         receptorReferenceEnergy.upload(zeroEnergy);
+        CUdeviceptr scratchDeDRPtr = receptorDeDR.getDevicePointer();
+        cu.clearBuffer(receptorDeDR);
 
         void* refEnergyTiledArgs[] = {
             &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiRefPtr,
-            &numReceptorAtoms, &prefactor, &receptorRefEnergyPtr, &numTiles
+            &numReceptorAtoms, &prefactor, &receptorRefEnergyPtr,
+            &scratchDeDRPtr, &numTiles
         };
-        cu.executeKernel(computeReceptorGBEnergyTiledKernel, refEnergyTiledArgs, recNumBlocks * recBlockSize, recBlockSize);
+        cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel,
+                         refEnergyTiledArgs, recNumBlocks * recBlockSize, recBlockSize);
 
         // Download and cache reference energy
         vector<float> refEnergy(1);
@@ -1023,6 +1034,32 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &globalScalingFactor, &groupScalingFactorsPtr, &groupUnscaledEnergiesPtr
         };
         cu.executeKernel(computeSAEnergyKernel, saArgs, numBlocks * blockSize, blockSize);
+
+        // Step 5b: Receptor ΔSA (PAIRWISE only).
+        // When the ligand descreens receptor atoms, their Born radii shrink,
+        // which changes the receptor's self-SA energy. Stock OpenMM
+        // E_GBSA(R+L) − E_GBSA(R) includes this term automatically; our
+        // computeIsolatedSAEnergy loops only over ligand atoms and misses
+        // it. Here we add the per-receptor-atom SA delta using
+        // (R_born_withL vs R_born_alone), summed into group desolvation.
+        if (receptorMode == IsolatedGBSAForce::PAIRWISE && numReceptorAtoms > 0) {
+            CUdeviceptr receptorRadiiPtr = receptorRadii.getDevicePointer();
+            CUdeviceptr receptorBornRadiiPtr = receptorBornRadii.getDevicePointer();
+            CUdeviceptr receptorBornRadiiRefPtr = receptorBornRadiiRef.getDevicePointer();
+            CUdeviceptr groupDesolvPtr = groupReceptorDesolvations.getDevicePointer();
+            float rProbe = 0.14f;
+            void* rSaArgs[] = {
+                &receptorRadiiPtr, &receptorBornRadiiPtr, &receptorBornRadiiRefPtr,
+                &numReceptorAtoms, &numParticleGroups,
+                &surfaceTension, &rProbe,
+                &globalScalingFactor, &groupScalingFactorsPtr,
+                &groupDesolvPtr, &groupEnergiesPtr, &groupUnscaledEnergiesPtr
+            };
+            int totalWork = numParticleGroups * numReceptorAtoms;
+            int saBlocks = (totalWork + blockSize - 1) / blockSize;
+            cu.executeKernel(computeReceptorDeltaSAKernel, rSaArgs,
+                             saBlocks * blockSize, blockSize);
+        }
     }
 
 
@@ -1215,28 +1252,30 @@ double CudaCalcIsolatedGBSAForceKernel::getGroupCrossTermEnergy(int groupIndex) 
 }
 
 vector<double> CudaCalcIsolatedGBSAForceKernel::getGroupBornRadii(int groupIndex) const {
-    if (groupIndex < 0 || groupIndex >= static_cast<int>(groupBornRadiiHost.size())) {
+    if (groupIndex < 0 || groupIndex >= numParticleGroups) {
         throw OpenMMException("IsolatedGBSAForce: invalid group index");
     }
-
-    // Download Born radii if not cached
-    if (groupBornRadiiHost[groupIndex].empty()) {
-        int startIdx = 0;
-        int endIdx = 0;
-        vector<int> groupStarts(numParticleGroups + 1);
-        groupStartIndex.download(groupStarts);
-        startIdx = groupStarts[groupIndex];
-        endIdx = groupStarts[groupIndex + 1];
-
-        vector<float> allBornRadii(bornRadii.getSize());
-        bornRadii.download(allBornRadii);
-
-        groupBornRadiiHost[groupIndex].assign(allBornRadii.begin() + startIdx,
-                                               allBornRadii.begin() + endIdx);
+    if (bornRadii.getSize() == 0) {
+        throw OpenMMException(
+            "IsolatedGBSAForce::getGroupBornRadii: Born radii buffer is "
+            "empty. Call Context.getState(getEnergy=True) at least once "
+            "before querying.");
     }
 
-    vector<double> result(groupBornRadiiHost[groupIndex].begin(),
-                          groupBornRadiiHost[groupIndex].end());
+    // Force a fresh download from device on every call. The earlier caching
+    // scheme was unreliable (and automatic download in getState caused
+    // expensive host↔device syncs every sweep), so this explicit diagnostic
+    // path always pays the sync cost but gives correct values.
+    vector<int> groupStarts(numParticleGroups + 1);
+    groupStartIndex.download(groupStarts);
+    int startIdx = groupStarts[groupIndex];
+    int endIdx = groupStarts[groupIndex + 1];
+
+    vector<float> allBornRadii(bornRadii.getSize());
+    bornRadii.download(allBornRadii);
+
+    vector<double> result(allBornRadii.begin() + startIdx,
+                          allBornRadii.begin() + endIdx);
     return result;
 }
 

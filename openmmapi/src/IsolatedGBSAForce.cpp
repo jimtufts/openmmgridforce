@@ -28,6 +28,7 @@ IsolatedGBSAForce::IsolatedGBSAForce()
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
       includeSurfaceArea(true),
       surfaceTension(DEFAULT_SA_SURFACE_TENSION),
+      downloadBornRadiiEnabled(false),
       cutoffDistance(NO_CUTOFF),
       receptorLocalityCutoff(NO_LOCALITY_CUTOFF),
       receptorMode(NONE),

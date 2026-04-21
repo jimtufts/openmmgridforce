@@ -2352,6 +2352,72 @@ extern "C" __global__ void computeIsolatedSAEnergy(
 }
 
 /**
+ * Receptor ΔSA term for PAIRWISE OBC_RL.
+ *
+ * Stock OpenMM's E_GBSA(R+L) − E_GBSA(R alone) includes the change in
+ * receptor self-surface-area from ligand-induced Born radius changes.
+ * We missed this term: our isolated-ligand SA kernel iterates only over
+ * ligand atoms, so receptor atoms whose Born radii shrink due to ligand
+ * descreening don't contribute their SA reduction.
+ *
+ * ACE-style SA:   SA_i = surfaceTension × 4π × (R_i + probe)² × (R_i/R_born)^6
+ *
+ * Per receptor atom, the change is:
+ *   ΔSA_i = surfaceTension × 4π × (R_i + probe)²
+ *           × [(R_i/R_born_i_withL)^6 − (R_i/R_born_i_alone)^6]
+ *
+ * Summed and multiplied by the alchemical scale, added to group desolvation.
+ */
+extern "C" __global__ void computeReceptorDeltaSA(
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorBornRadii,     // per-group [g*N_r + i]
+    const float* __restrict__ receptorBornRadiiRef,  // per-atom (R alone)
+    int numReceptorAtoms,
+    int numGroups,
+    float surfaceTension,
+    float probeRadius,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors,
+    float* __restrict__ groupReceptorDesolvations,   // += ΔSA*scale
+    float* __restrict__ groupEnergies,               // += ΔSA*scale
+    float* __restrict__ groupUnscaledEnergies        // += ΔSA (no group scale)
+) {
+    int totalWork = numGroups * numReceptorAtoms;
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
+
+        int groupIdx = globalIdx / numReceptorAtoms;
+        int i = globalIdx % numReceptorAtoms;
+
+        float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+        if (scale < 0.05f) continue;
+
+        float R_i = receptorRadii[i];
+        float R_born_withL = receptorBornRadii[groupIdx * numReceptorAtoms + i];
+        float R_born_alone = receptorBornRadiiRef[i];
+
+        // Skip atoms with no Born-radius change (e.g. inactive or far)
+        if (fabsf(R_born_withL - R_born_alone) < 1e-7f) continue;
+
+        float Rsolv = R_i + probeRadius;
+        float ratio_w = R_i / R_born_withL;
+        float ratio_a = R_i / R_born_alone;
+        float ratio6_w = ratio_w*ratio_w*ratio_w*ratio_w*ratio_w*ratio_w;
+        float ratio6_a = ratio_a*ratio_a*ratio_a*ratio_a*ratio_a*ratio_a;
+        float dSA_i = surfaceTension * 4.0f * 3.14159265f
+                      * Rsolv * Rsolv * (ratio6_w - ratio6_a);
+
+        atomicAdd(&groupReceptorDesolvations[groupIdx], dSA_i * scale);
+        atomicAdd(&groupEnergies[groupIdx], dSA_i * scale);
+        if (groupUnscaledEnergies != 0) {
+            atomicAdd(&groupUnscaledEnergies[groupIdx],
+                      dSA_i * globalScalingFactor);
+        }
+    }
+}
+
+/**
  * Accumulate dE/dR_born from GB energy.
  */
 extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
