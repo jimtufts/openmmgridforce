@@ -825,9 +825,6 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         }
 
         for (int g = 0; g < numParticleGroups; g++) {
-            float gScale = globalScalingFactor * groupScalingFactorsHostCopy[g];
-            if (gScale < 0.05f) continue;
-
             CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
             CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(float);
             cu.clearBuffer(receptorEnergy);
@@ -1066,11 +1063,36 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     // Step 6: Chain rule forces through Born radii
     if (includeForces) {
         CUdeviceptr dE_dRPtr = dE_dR.getDevicePointer();
-        // dE_dR already has self-GB + intra-ligand + SA from the earlier
-        // accumulate before reduceLigandBornForce. We now add the cross-term
-        // contribution so that computeHCTChainRuleForces (intra-ligand HCT)
-        // propagates the FULL dE/dR through that path as well. Without this,
-        // the cross-term dE/dR_lig path through intra-ligand HCT is missing.
+
+        // Populate dE_dR with self-GB + intra-ligand + SA derivatives.
+        // For PAIRWISE this was already done in Step 4b before
+        // reduceLigandBornForce; skip here to avoid redundant work.
+        // For NONE and GRID modes, nothing else populates dE_dR, so
+        // computeHCTChainRuleForces below would use zero/stale data and
+        // drop the ligand-OBC chain-rule force contribution entirely.
+        if (receptorMode != IsolatedGBSAForce::PAIRWISE) {
+            void* bornDerivArgs[] = {
+                &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
+                &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor,
+                &dE_dRPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
+            };
+            cu.executeKernel(accumulateBornRadiiDerivativesKernel,
+                             bornDerivArgs, numBlocks * blockSize, blockSize);
+            if (includeSurfaceArea) {
+                float probe = (receptorMode == IsolatedGBSAForce::GRID)
+                              ? probeRadius : 0.14f;
+                void* saDerivArgs[] = {
+                    &radiiPtr, &bornRadiiPtr, &groupStartPtr,
+                    &numParticleGroups, &numAtoms, &surfaceTension, &probe,
+                    &dE_dRPtr,
+                    &globalScalingFactor, &groupScalingFactorsPtr
+                };
+                cu.executeKernel(accumulateSADerivativesKernel,
+                                 saDerivArgs, numBlocks * blockSize, blockSize);
+            }
+        }
+        // Cross-term contribution to dE_dR (adds, doesn't overwrite).
         bool addCrossTermToDEdR =
             (receptorMode == IsolatedGBSAForce::PAIRWISE) ||
             (receptorMode == IsolatedGBSAForce::GRID && computeCrossTermGrid);
