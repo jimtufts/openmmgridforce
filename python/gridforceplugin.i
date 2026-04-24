@@ -640,6 +640,8 @@ public:
     double getGridCap() const;
     void setRuntimeCap(double cap);
     double getRuntimeCap() const;
+    void setEvaluateInVSpace(bool enabled);
+    bool getEvaluateInVSpace() const;
     void setOutOfBoundsRestraint(double k);
     double getOutOfBoundsRestraint() const;
     void setEffectiveBounds(double minX, double minY, double minZ,

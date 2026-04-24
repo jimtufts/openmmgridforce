@@ -68,7 +68,8 @@ __device__ void trilinearInterpolateTiled(
     int tileWithOverlap,  // Total tile dimension including overlap
     float invPower,       // inv_power value
     int invPowerMode,     // 0=NONE, 1=RUNTIME, 2=STORED
-    float effectiveCap    // Per-corner tanh cap (0=disabled)
+    float effectiveCap,   // Per-corner tanh cap (0=disabled)
+    int evaluateInVSpace  // Per-corner back-transform + V-space cap (STORED grids only)
 ) {
     // Get 8 corner values from tile
     float v000 = tileValues[tileIndex(localX, localY, localZ, tileWithOverlap)];
@@ -92,6 +93,19 @@ __device__ void trilinearInterpolateTiled(
         v101 = invPowerForwardTransform(v101, invN);
         v110 = invPowerForwardTransform(v110, invN);
         v111 = invPowerForwardTransform(v111, invN);
+    }
+
+    // Per-corner back-transform v^(1/n) -> V before cap (STORED mode only).
+    // Matches trilinear_grid.c semantic: cap+interp in V-space, no post-interp back-transform.
+    if (evaluateInVSpace && invPowerMode == 2 && invPower != 0.0f) {
+        v000 = (v000 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v000), invPower);
+        v001 = (v001 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v001), invPower);
+        v010 = (v010 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v010), invPower);
+        v011 = (v011 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v011), invPower);
+        v100 = (v100 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v100), invPower);
+        v101 = (v101 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v101), invPower);
+        v110 = (v110 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v110), invPower);
+        v111 = (v111 >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v111), invPower);
     }
 
     // Apply tanh cap per corner before interpolation
@@ -501,6 +515,7 @@ extern "C" __global__ void computeGridForceTiled(
     const float runtimeCap,   // Global runtime cap (0=disabled)
     const float* __restrict__ groupRuntimeCaps,    // Per-group runtime caps (null = use global, 0 = use global)
     float* __restrict__ atomRawEnergyBuffer,       // Per-atom raw (pre-cap) energy storage (null = don't store)
+    const int evaluateInVSpace,   // Per-corner ^n + V-space cap + no post-interp back-transform
     // Tile-specific parameters
     const int* __restrict__ tileOffsets,           // Grid offsets for each tile (x,y,z,x,y,z,...)
     const unsigned long long* __restrict__ tileValuePtrs,   // Device pointers to tile values
@@ -599,11 +614,12 @@ extern "C" __global__ void computeGridForceTiled(
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],
                     tileWithOverlap,
                     invPower, invPowerMode,
-                    effectiveCap
+                    effectiveCap,
+                    evaluateInVSpace
                 );
 
                 // Undo arcsinh for stacked STORED + arcsinh mode
-                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                if (arcsinhScale > 0.0f && invPowerMode == 2 && !evaluateInVSpace) {
                     float sinhG = sinhf(interpolated);
                     float coshG = coshf(interpolated);
                     interpolated = arcsinhScale * sinhG;
@@ -615,7 +631,8 @@ extern "C" __global__ void computeGridForceTiled(
 
                 // Back-transform from transformed space if RUNTIME or STORED mode
                 // val^(1/n) -> val^(1/n)^n = val
-                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                // Skipped when evaluateInVSpace is set (back-transform already done per-corner).
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f && !evaluateInVSpace) {
                     float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
                     float absVal = fabsf(interpolated);
                     if (absVal > 1e-10f) {
@@ -774,11 +791,12 @@ extern "C" __global__ void computeGridForceTiled(
                     gridSpacing[0], gridSpacing[1], gridSpacing[2],
                     tileWithOverlap,
                     invPower, invPowerMode,
-                    effectiveCap
+                    effectiveCap,
+                    evaluateInVSpace
                 );
 
                 // Undo arcsinh for stacked STORED + arcsinh mode
-                if (arcsinhScale > 0.0f && invPowerMode == 2) {
+                if (arcsinhScale > 0.0f && invPowerMode == 2 && !evaluateInVSpace) {
                     float sinhG = sinhf(interpolated);
                     float coshG = coshf(interpolated);
                     interpolated = arcsinhScale * sinhG;
@@ -789,7 +807,7 @@ extern "C" __global__ void computeGridForceTiled(
                 }
 
                 // Back-transform from transformed space if RUNTIME or STORED mode
-                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f) {
+                if ((invPowerMode == 1 || invPowerMode == 2) && invPower != 0.0f && !evaluateInVSpace) {
                     float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
                     float absVal = fabsf(interpolated);
                     if (absVal > 1e-10f) {

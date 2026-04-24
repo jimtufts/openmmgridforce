@@ -50,7 +50,7 @@ using namespace std;
 
 namespace GridForcePlugin {
 
-GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0), m_outOfBoundsRestraint(10000.0), m_hasEffectiveBounds(false), m_interpolationMethod(0),
+GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0), m_evaluateInVSpace(false), m_outOfBoundsRestraint(10000.0), m_hasEffectiveBounds(false), m_interpolationMethod(0),
                          m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0), m_blurSigma(0.0),
                          m_adaptiveRegularization(0.0), m_regularizationThreshold(0.0),
                          m_prefilterPCGTolerance(1e-6), m_prefilterMaxIterations(200),
@@ -69,6 +69,7 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
 
 GridForce::GridForce(std::shared_ptr<GridData> gridData)
     : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m_gridCap(41840.0), m_runtimeCap(0.0),
+      m_evaluateInVSpace(false),
       m_outOfBoundsRestraint(10000.0), m_interpolationMethod(0),
       m_bsplinePrefilterOrder(0), m_arcsinhScale(0.0), m_blurSigma(0.0),
       m_adaptiveRegularization(0.0), m_regularizationThreshold(0.0),
@@ -323,6 +324,14 @@ void GridForce::setRuntimeCap(double cap) {
 
 double GridForce::getRuntimeCap() const {
     return m_runtimeCap;
+}
+
+void GridForce::setEvaluateInVSpace(bool enabled) {
+    m_evaluateInVSpace = enabled;
+}
+
+bool GridForce::getEvaluateInVSpace() const {
+    return m_evaluateInVSpace;
 }
 
 void GridForce::setOutOfBoundsRestraint(double k) {

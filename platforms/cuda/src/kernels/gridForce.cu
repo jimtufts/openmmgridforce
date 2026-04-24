@@ -44,6 +44,7 @@ extern "C" __global__ void computeGridForce(
     const float runtimeCap,   // Global runtime cap (0=disabled)
     const float* __restrict__ groupRuntimeCaps,    // Per-group runtime caps (null = use global, 0 = use global)
     float* __restrict__ atomRawEnergyBuffer,         // Per-atom raw (pre-cap) energy storage (null = don't store)
+    const int evaluateInVSpace,   // Per-corner ^n + V-space cap + no post-interp back-transform
     const float effectiveMinX, const float effectiveMinY, const float effectiveMinZ,  // Effective evaluation bounds (grid-local coords)
     const float effectiveMaxX, const float effectiveMaxY, const float effectiveMaxZ) {
 
@@ -523,6 +524,20 @@ extern "C" __global__ void computeGridForce(
                 else vppp = 0.0f;
             }
 
+            // Per-corner back-transform v^(1/n) -> V before cap (STORED mode only).
+            // Cap operates in V-space, linear interp in V-space, no post-interp
+            // back-transform. Matches trilinear_grid.c semantic.
+            if (evaluateInVSpace && invPowerMode == 2) {
+                vmmm = (vmmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmm), invPower);
+                vmmp = (vmmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmp), invPower);
+                vmpm = (vmpm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpm), invPower);
+                vmpp = (vmpp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpp), invPower);
+                vpmm = (vpmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmm), invPower);
+                vpmp = (vpmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmp), invPower);
+                vppm = (vppm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppm), invPower);
+                vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppp), invPower);
+            }
+
             // Apply runtime tanh cap PER CORNER before interpolation.
             // This preserves gradients near clash boundaries (matching AlGDock's
             // pre-capped grid approach) instead of capping the interpolated value
@@ -559,7 +574,7 @@ extern "C" __global__ void computeGridForce(
 
         // Undo arcsinh for stacked STORED + arcsinh mode.
         // Grid stores arcsinh(V^(1/n) / scale); undo arcsinh first → V^(1/n) space.
-        if (arcsinhScale > 0.0f && invPowerMode == 2) {
+        if (arcsinhScale > 0.0f && invPowerMode == 2 && !evaluateInVSpace) {
             float sinhG = sinhf(interpolated);
             float coshG = coshf(interpolated);
             interpolated = arcsinhScale * sinhG;
@@ -571,7 +586,8 @@ extern "C" __global__ void computeGridForce(
 
         // Back-convert from transformed space to get final energy
         // Both RUNTIME and STORED modes need this: val^(1/n) -> (val^(1/n))^n = val
-        if (invPowerMode == 1 || invPowerMode == 2) {
+        // Skipped when evaluateInVSpace is set (back-transform already done per-corner).
+        if ((invPowerMode == 1 || invPowerMode == 2) && !evaluateInVSpace) {
             float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
             float absVal = fabsf(interpolated);
             if (absVal > 1e-10f) {

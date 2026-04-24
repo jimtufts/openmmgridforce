@@ -325,6 +325,31 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     double getRuntimeCap() const;
 
     /**
+     * Enable V-space evaluation semantics for soft-LJ-style forces (sLJr).
+     *
+     * When true AND invPowerMode==STORED, the kernel:
+     *   (1) back-transforms each corner v^(1/n) -> V (per-corner)
+     *   (2) applies the runtime tanh cap in V-space
+     *   (3) linearly interpolates the capped V values
+     *   (4) SKIPS the post-interp back-transform
+     *
+     * This reproduces AlGDock reference's `trilinear_grid.c` semantics for
+     * sLJr (tanh cap at a finite V value, linearly interpolated) while still
+     * reading from a shared v^(1/n) STORED grid file (e.g. ljr.grid).
+     *
+     * Default: false (keeps current STORED behavior: cap in v^(1/n) space,
+     * interp, then ^n back-transform).
+     *
+     * @param enabled  enable V-space per-corner evaluation path
+     */
+    void setEvaluateInVSpace(bool enabled);
+
+    /**
+     * Get the current V-space evaluation setting.
+     */
+    bool getEvaluateInVSpace() const;
+
+    /**
      * Set the force constant for the harmonic restraint applied to atoms outside the grid.
      * When an atom is outside the grid bounds, a harmonic restrain force is applied
      * with energy: E = 0.5 * k * distance^2, where distance is the distance from the
@@ -1224,6 +1249,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     InvPowerMode m_invPowerMode;     // Transformation mode (NONE, RUNTIME, or STORED)
     double m_gridCap;  // Capping threshold for grid values (kJ/mol)
     double m_runtimeCap;  // Runtime capping threshold (kJ/mol), 0 = disabled
+    bool m_evaluateInVSpace;  // Per-corner back-transform + V-space cap (for STORED grids)
     double m_outOfBoundsRestraint;  // Force constant for out-of-bounds harmonic restraint (kJ/mol/nm^2)
     bool m_hasEffectiveBounds;     // Whether custom effective bounds are set
     std::vector<double> m_effectiveBoundsMin;  // 3 elements: min x,y,z in absolute coordinates (nm)

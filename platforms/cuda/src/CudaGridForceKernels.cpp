@@ -128,6 +128,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     arcsinhScale = (float)force.getArcsinhScale();
     globalScalingFactor = (float)force.getGlobalScalingFactor();
     runtimeCap = (float)force.getRuntimeCap();
+    evaluateInVSpace = force.getEvaluateInVSpace() ? 1 : 0;
     interpolationMethod = interp_method;
 
     // Store ligand atoms and derivative computation flag
@@ -1159,6 +1160,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
         &runtimeCap,
         &groupRuntimeCapsPtr,
         &atomRawEnergyBufferPtr,
+        &evaluateInVSpace,
         &effectiveMinX, &effectiveMinY, &effectiveMinZ,
         &effectiveMaxX, &effectiveMaxY, &effectiveMaxZ
     };
@@ -1279,6 +1281,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
             &runtimeCap,
             &groupRuntimeCapsPtr,
             &atomRawEnergyBufferPtr,
+            &evaluateInVSpace,
             &tileOffsetsPtr,
             &tileValuePtrsPtr,
             &tileDerivPtrsPtr,
@@ -1379,6 +1382,7 @@ void CudaCalcGridForceKernel::copyParametersToContext(ContextImpl& contextImpl, 
     arcsinhScale = (float)force.getArcsinhScale();
     globalScalingFactor = (float)force.getGlobalScalingFactor();
     runtimeCap = (float)force.getRuntimeCap();
+    evaluateInVSpace = force.getEvaluateInVSpace() ? 1 : 0;
     interpolationMethod = interp_method;
 
     // Update per-group scaling factors if groups exist

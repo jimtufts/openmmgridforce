@@ -185,6 +185,7 @@ private:
     OpenMM::CudaArray groupRuntimeCapsBuffer;     // Per-group runtime caps (0 = use global)
     float gridCap;
     float runtimeCap;
+    int evaluateInVSpace;  // 0/1 flag: per-corner back-transform + V-space cap
     float outOfBoundsRestraint;
     float effectiveMinX, effectiveMinY, effectiveMinZ;  // Effective bounds in grid-local coordinates
     float effectiveMaxX, effectiveMaxY, effectiveMaxZ;
