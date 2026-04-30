@@ -23,10 +23,16 @@ if platform.system() == 'Linux':
 
 extension = Extension(name='_gridforceplugin',
                      sources=['GridForcePluginWrapper.cpp'],
-                     libraries=['OpenMM', 'OpenMMGridForce'],
+                     libraries=['OpenMM', 'OpenMMGridForce', 'OpenMMGridForceCUDA'],
                      include_dirs=[os.path.join(openmm_dir, 'include'), gridforceplugin_header_dir],
-                     library_dirs=[os.path.join(openmm_dir, 'lib'), gridforceplugin_library_dir],
-                     runtime_library_dirs=[os.path.join(openmm_dir, 'lib'), gridforceplugin_library_dir],
+                     library_dirs=[os.path.join(openmm_dir, 'lib'),
+                                   os.path.join(openmm_dir, 'lib', 'plugins'),
+                                   gridforceplugin_library_dir,
+                                   os.path.join(gridforceplugin_library_dir, 'platforms', 'cuda')],
+                     runtime_library_dirs=[os.path.join(openmm_dir, 'lib'),
+                                           os.path.join(openmm_dir, 'lib', 'plugins'),
+                                           gridforceplugin_library_dir,
+                                           os.path.join(gridforceplugin_library_dir, 'platforms', 'cuda')],
                      extra_compile_args=extra_compile_args,
                      extra_link_args=extra_link_args
                     )

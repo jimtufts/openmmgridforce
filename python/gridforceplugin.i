@@ -48,6 +48,9 @@ namespace std {
 #include "IsolatedGBSAForceKernels.h"
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
+#include "BATTopology.h"
+#include "CudaBATConverter.h"
+#include "CudaSmartDartingPool.h"
 #include "MultiGroupHMCIntegrator.h"
 #include "MultiGroupHMCKernels.h"
 #include "MultiGroupNUTSIntegrator.h"
@@ -1561,6 +1564,82 @@ public:
             'rms_force': self.getFinalRMSForce()
         }
     %}
+};
+
+/**
+ * BAT (Bond/Angle/Torsion) coordinate topology for smart darting.
+ *
+ * Mirror of the Python AlGDock/mwe/bat_coords.BATTopology class. Build
+ * the topology in Python (where bond-graph parsing is easy), then pass
+ * the integer arrays here for the GPU-side kernels to consume.
+ *
+ * Use `getHash()` to verify that the C++ and Python sides see bit-
+ * identical topology data before trusting any kernel output.
+ */
+class BATTopology {
+public:
+    BATTopology();
+
+    void setTopology(int nAtoms,
+                     const std::vector<int>& root,
+                     const std::vector<int>& torsions,
+                     const std::vector<int>& perturbableMask,
+                     const std::vector<int>& primaryTorsionIdx = {});
+
+    int getNumAtoms() const;
+    int getNumTorsions() const;
+
+    const std::vector<int>& getRoot() const;
+    const std::vector<int>& getTorsions() const;
+    const std::vector<int>& getPerturbableMask() const;
+    const std::vector<int>& getPrimaryTorsionIndices() const;
+
+    unsigned long long getHash() const;
+
+    void validate() const;
+};
+
+/**
+ * CUDA Cartesian <-> BAT coordinate converter. Driven by `BATTopology`.
+ * Single-precision FP throughout; deterministic given fixed CUDA driver.
+ */
+class CudaBATConverter {
+public:
+    CudaBATConverter();
+    void initialize(const BATTopology& topo,
+                    OpenMM::Context& context, int maxK = 256);
+
+    int getNumAtoms() const;
+    int getNumTorsions() const;
+
+    std::vector<float> cartesianToBATHost(const std::vector<float>& positions,
+                                          int K);
+    std::vector<float> BATToCartesianHost(const std::vector<float>& bat,
+                                          int K);
+};
+
+/**
+ * Smart-darting target pool with CUDA kernels for nearest-target lookup
+ * and BAT-space dart proposal.
+ */
+class CudaSmartDartingPool {
+public:
+    CudaSmartDartingPool();
+    void initialize(const BATTopology& topo,
+                    OpenMM::Context& context,
+                    const std::vector<float>& targets_BAT_flat,
+                    const std::vector<float>& weights,
+                    float epsilon_sq);
+
+    int getNumTargets() const;
+    int getNumAtoms() const;
+    float getEpsilonSq() const;
+
+    std::vector<int> findNearestHost(const std::vector<float>& bat, int K);
+    std::vector<float> findNearestDistsHost(const std::vector<float>& bat, int K);
+    std::vector<float> proposeDartHost(const std::vector<float>& bat,
+                                       const std::vector<int>& j_per,
+                                       const std::vector<int>& k_per, int K);
 };
 
 class CalcGridForceKernel : public OpenMM::KernelImpl {
