@@ -5639,3 +5639,246 @@ extern "C" __global__ void computeCrossTermFromGrid(
                   e_i * globalScalingFactor);
     }
 }
+
+
+// ============================================================================
+// Hessian kernels — PAIRWISE replacements for the grid-based ones in
+// gbsaGridForce.cu. Three of the five Hessian passes (prepareHessianIntermediates,
+// computeBornCouplingMatrix, assembleGBSAHessian) live in gbsaGridForce.cu and
+// are mode-agnostic — IsolatedGBSA loads them by name from the same bundled
+// kernel module. The two pairwise-specific kernels below produce buffers with
+// the exact same shape the assembly kernel consumes, so no assembly changes
+// are needed.
+//
+// computeHCTJacobianPairwise — fills J[N x 3N] = ∂Ψ_k/∂x_j with
+//   * a sum over receptor atoms (contributes only to J[k, 3k+α] since the
+//     receptor is fixed), and
+//   * the same ligand-ligand pairwise contribution as gbsaGridForce.cu's
+//     computeHCTJacobian (lines 2091-2150), kept inline to match its
+//     validated t3 formula exactly.
+//
+// computeReceptorPairwiseHessian — fills hessianRecD2Psi[N x 6] = 6-component
+//   upper-triangle d²Ψ_k/∂x_α dx_β, summed over receptor atoms.  Uses the
+//   chain rule on r(x) with I[1] = dI/dr and I[2] = d²I/dr² from
+//   HCTChainRule.cuh's computeHCT_rDerivs helper.  The 6 components follow
+//   the same [xx, yy, zz, xy, xz, yz] ordering that gbsaGridForce.cu's
+//   computeReceptorGridHessian writes, which assembleGBSAHessian reads at
+//   gbsaGridForce.cu:2530-2542.
+// ============================================================================
+
+extern "C" __global__ void computeHCTJacobianPairwise(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ radii,
+    const float* __restrict__ scaleFactors,
+    const int* __restrict__ exclusionAtoms,
+    const int* __restrict__ exclusionStart,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int templateNumAtoms,
+    // Receptor (fixed) — pairwise replacement for the grid HCT field
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScaleFactors,
+    int numReceptorAtoms,
+    int totalParticles,
+    float* __restrict__ jacobian
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int atomInGroup = idx;
+    int groupStartIdx = 0;
+    int groupEndIdx = 0;
+    for (int g = 0; g < numGroups; g++) {
+        groupStartIdx = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            atomInGroup = idx - groupStartIdx;
+            break;
+        }
+    }
+    if (idx >= groupEndIdx) return;
+
+    int dim3N = 3 * totalParticles;
+    for (int c = 0; c < dim3N; c++) {
+        jacobian[idx * dim3N + c] = 0.0f;
+    }
+
+    int particleIdx_k = particleIndices[idx];
+    int templateIdx_k = atomInGroup % templateNumAtoms;
+    float4 pos_k = posq[particleIdx_k];
+    float R_k = radii[templateIdx_k];
+    float R_k_off = R_k - DIELECTRIC_OFFSET;
+
+    // --- Receptor pairwise sum (only J[k, 3k+α] gets contributions; receptor
+    //     atoms are fixed so off-diagonal blocks are zero) ---
+    for (int rj = 0; rj < numReceptorAtoms; rj++) {
+        float3 pj = receptorPositions[rj];
+        float dx = pos_k.x - pj.x;
+        float dy = pos_k.y - pj.y;
+        float dz = pos_k.z - pj.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+        float r = sqrtf(r2);
+        if (r < 1e-6f) continue;
+
+        float R_rj = receptorRadii[rj];
+        float R_rj_off = R_rj - DIELECTRIC_OFFSET;
+        float S_rj = R_rj_off * receptorScaleFactors[rj];
+        if (R_k_off >= r + S_rj) continue;
+
+        // Same t3 formula as gbsaGridForce.cu:2126-2137 — validated against
+        // HCTChainRule.cuh's case2 closed form.
+        float r_minus_S = fabsf(r - S_rj);
+        float l_val = (R_k_off > r_minus_S) ? (1.0f / R_k_off) : (1.0f / r_minus_S);
+        float u_val = 1.0f / (r + S_rj);
+        float l2 = l_val * l_val;
+        float u2 = u_val * u_val;
+        float invr2 = 1.0f / r2;
+        float t3 = 0.125f * (1.0f + S_rj * S_rj * invr2) * (l2 - u2)
+                  + 0.25f * logf(u_val / l_val) * invr2;
+        float dI_dr = -2.0f * t3;
+
+        float invr = 1.0f / r;
+        jacobian[idx * dim3N + 3 * idx + 0] += dI_dr * dx * invr;
+        jacobian[idx * dim3N + 3 * idx + 1] += dI_dr * dy * invr;
+        jacobian[idx * dim3N + 3 * idx + 2] += dI_dr * dz * invr;
+    }
+
+    // --- Ligand-ligand pairwise (identical to gbsaGridForce.cu:2091-2150) ---
+    int exclStart = exclusionStart[templateIdx_k];
+    int exclEnd = exclusionStart[templateIdx_k + 1];
+    int groupSize = groupEndIdx - groupStartIdx;
+    for (int jLocal = 0; jLocal < groupSize; jLocal++) {
+        if (jLocal == atomInGroup) continue;
+        int j = groupStartIdx + jLocal;
+        int templateIdx_j = jLocal % templateNumAtoms;
+
+        bool excluded = false;
+        for (int e = exclStart; e < exclEnd; e++) {
+            if (exclusionAtoms[e] == templateIdx_j) { excluded = true; break; }
+        }
+        if (excluded) continue;
+
+        int particleIdx_j = particleIndices[j];
+        float4 pos_j = posq[particleIdx_j];
+        float R_j = radii[templateIdx_j];
+        float R_j_off = R_j - DIELECTRIC_OFFSET;
+        float S_j = R_j_off * scaleFactors[templateIdx_j];
+
+        float dx = pos_k.x - pos_j.x;
+        float dy = pos_k.y - pos_j.y;
+        float dz = pos_k.z - pos_j.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+        float r = sqrtf(r2);
+        if (r < 1e-6f) continue;
+
+        float r_plus_Sj = r + S_j;
+        if (R_k_off >= r_plus_Sj) continue;
+
+        float r_minus_Sj = fabsf(r - S_j);
+        float l_val = (R_k_off > r_minus_Sj) ? (1.0f / R_k_off) : (1.0f / r_minus_Sj);
+        float u_val = 1.0f / r_plus_Sj;
+        float l2 = l_val * l_val;
+        float u2 = u_val * u_val;
+        float S2 = S_j * S_j;
+        float invr2 = 1.0f / r2;
+        float t3 = 0.125f * (1.0f + S2 * invr2) * (l2 - u2)
+                  + 0.25f * logf(u_val / l_val) * invr2;
+        float dI_dr = -2.0f * t3;
+
+        float invr = 1.0f / r;
+        jacobian[idx * dim3N + 3 * idx + 0] += dI_dr * dx * invr;
+        jacobian[idx * dim3N + 3 * idx + 1] += dI_dr * dy * invr;
+        jacobian[idx * dim3N + 3 * idx + 2] += dI_dr * dz * invr;
+        jacobian[idx * dim3N + 3 * j + 0] += -dI_dr * dx * invr;
+        jacobian[idx * dim3N + 3 * j + 1] += -dI_dr * dy * invr;
+        jacobian[idx * dim3N + 3 * j + 2] += -dI_dr * dz * invr;
+    }
+}
+
+
+extern "C" __global__ void computeReceptorPairwiseHessian(
+    const float4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const float* __restrict__ radii,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int templateNumAtoms,
+    const float3* __restrict__ receptorPositions,
+    const float* __restrict__ receptorRadii,
+    const float* __restrict__ receptorScaleFactors,
+    int numReceptorAtoms,
+    int totalParticles,
+    float* __restrict__ hessianOut       // [N * 6]: xx, yy, zz, xy, xz, yz
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int atomInGroup = idx;
+    int groupEndIdx = 0;
+    for (int g = 0; g < numGroups; g++) {
+        int gs = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= gs && idx < groupEndIdx) {
+            atomInGroup = idx - gs;
+            break;
+        }
+    }
+    if (idx >= groupEndIdx) return;
+
+    int templateIdx = atomInGroup % templateNumAtoms;
+    int particleIdx = particleIndices[idx];
+    float4 pk = posq[particleIdx];
+    float R_k = radii[templateIdx];
+    float R_k_off = R_k - DIELECTRIC_OFFSET;
+
+    float Hxx = 0.0f, Hyy = 0.0f, Hzz = 0.0f;
+    float Hxy = 0.0f, Hxz = 0.0f, Hyz = 0.0f;
+
+    for (int rj = 0; rj < numReceptorAtoms; rj++) {
+        float3 pj = receptorPositions[rj];
+        float dx = pk.x - pj.x;
+        float dy = pk.y - pj.y;
+        float dz = pk.z - pj.z;
+        float r2 = dx*dx + dy*dy + dz*dz;
+        float r = sqrtf(r2);
+        if (r < 1e-6f) continue;
+
+        float R_rj = receptorRadii[rj];
+        float R_rj_off = R_rj - DIELECTRIC_OFFSET;
+        float S_rj = R_rj_off * receptorScaleFactors[rj];
+        if (R_k_off >= r + S_rj) continue;
+
+        // Get I[0..6]; we use I[1] = dI/dr and I[2] = d²I/dr².
+        // computeHCT_rDerivs handles both case1 (R_probe > |r-S|) and case2.
+        float deriv[7];
+        computeHCT_rDerivs(r, S_rj, R_k_off, deriv);
+        float dI_dr  = deriv[1];
+        float d2I_dr2 = deriv[2];
+
+        float invr = 1.0f / r;
+        float rhx = dx * invr;
+        float rhy = dy * invr;
+        float rhz = dz * invr;
+
+        // Chain rule on r(x): ∂r/∂x_α = r̂_α; ∂²r/∂x_α dx_β = (δ_αβ - r̂_α r̂_β)/r.
+        //   d²I/dx_α dx_β = (∂I/∂r) (δ_αβ - r̂_α r̂_β)/r + (∂²I/∂r²) r̂_α r̂_β
+        //                  = A δ_αβ + B r̂_α r̂_β,  with  A = (∂I/∂r)/r,
+        //                                            B = (∂²I/∂r²) - A.
+        float A = dI_dr * invr;
+        float B = d2I_dr2 - A;
+
+        Hxx += A + B * rhx * rhx;
+        Hyy += A + B * rhy * rhy;
+        Hzz += A + B * rhz * rhz;
+        Hxy += B * rhx * rhy;
+        Hxz += B * rhx * rhz;
+        Hyz += B * rhy * rhz;
+    }
+
+    hessianOut[idx * 6 + 0] = Hxx;
+    hessianOut[idx * 6 + 1] = Hyy;
+    hessianOut[idx * 6 + 2] = Hzz;
+    hessianOut[idx * 6 + 3] = Hxy;
+    hessianOut[idx * 6 + 4] = Hxz;
+    hessianOut[idx * 6 + 5] = Hyz;
+}

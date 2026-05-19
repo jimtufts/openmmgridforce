@@ -148,7 +148,32 @@ private:
     OpenMM::CudaArray atomEnergies;
 
     // Hessian computation
-    OpenMM::CudaArray hessianBuffer;
+    // Mirrors the 5-pass analytical chain in CudaGBSAGridForceKernels.cpp:
+    //   1. prepareHessianIntermediates fills hessianDRdPsi / hessianD2RdPsi2
+    //      (mode-agnostic OBC-II radius transforms) and reuses dE_dHCT.
+    //   2. computeHCTJacobianPairwise fills hessianJacobian = dPsi/dx.
+    //   3. computeReceptorPairwiseHessian fills hessianRecD2Psi = d2Psi/dx^2
+    //      (6 unique upper-triangle components per atom: xx, yy, zz, xy, xz, yz).
+    //   4. computeBornCouplingMatrix fills hessianCouplingMatrix = d2U/dRi dRj.
+    //   5. assembleGBSAHessian writes the full 3N x 3N matrix into hessianMatrix.
+    // hessianBuffersInitialized gates one-time allocation across calls.
+    OpenMM::CudaArray hessianBuffer;             // legacy placeholder; unused
+    OpenMM::CudaArray hessianDRdPsi;             // [N] float
+    OpenMM::CudaArray hessianD2RdPsi2;           // [N] float
+    OpenMM::CudaArray hessianDEdHCT;             // [N] float (per-atom dE/dHCT)
+    OpenMM::CudaArray hessianJacobian;           // [N * 3N] float
+    OpenMM::CudaArray hessianRecD2Psi;           // [N * 6] float (xx,yy,zz,xy,xz,yz)
+    OpenMM::CudaArray hessianCouplingMatrix;     // [N * N] float
+    OpenMM::CudaArray hessianMatrix;             // [3N * 3N] float
+    // Zero-filled dummy exclusion buffers: IsolatedGBSAForce has no
+    // exclusion API (all pairs contribute by design), but the shared
+    // Hessian kernels (ported from GBSAGridForce) read exclusion lists.
+    // We give them empty lists so the exclusion check is a no-op.
+    OpenMM::CudaArray hessianDummyExclStart;     // [templateN + 1] int (all zeros)
+    OpenMM::CudaArray hessianDummyExclAtoms;     // [1] int (never read)
+    bool hessianBuffersInitialized = false;
+    int hessianNumAtomsCached = 0;
+    std::vector<double> hessianFullHost;         // download cache
 
     // CUDA kernels
     CUfunction computeReceptorHCTGridKernel;      // Grid interpolation
@@ -194,7 +219,13 @@ private:
     CUfunction accumulateDesolvationOnGPUKernel;
     CUfunction accumulateCrossTermOnGPUKernel;
 
-    CUfunction computeHessianKernel;
+    CUfunction computeHessianKernel;                        // legacy placeholder
+    // Hessian kernel chain (declared here, loaded lazily in computeHessian()).
+    CUfunction prepareHessianIntermediatesKernel;           // OBC-II radius transforms
+    CUfunction computeHCTJacobianPairwiseKernel;            // dPsi/dx (pairwise)
+    CUfunction computeReceptorPairwiseHessianKernel;        // d2Psi/dx2 (pairwise)
+    CUfunction computeBornCouplingMatrixKernel;             // d2U/dRi dRj
+    CUfunction assembleGBSAHessianKernel;                   // final 3N x 3N assembly
 
     // Host-side results cache
     mutable std::vector<float> groupEnergiesHost;
