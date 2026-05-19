@@ -1633,13 +1633,26 @@ public:
 
     int getNumTargets() const;
     int getNumAtoms() const;
+    int getNumHeavy() const;
     float getEpsilonSq() const;
+
+    void setCartesianTargets(const std::vector<int>& heavy_inds,
+                              const std::vector<float>& targets_heavy_flat);
+    void setCartesianFullTargets(const std::vector<float>& targets_full_flat);
 
     std::vector<int> findNearestHost(const std::vector<float>& bat, int K);
     std::vector<float> findNearestDistsHost(const std::vector<float>& bat, int K);
     std::vector<float> proposeDartHost(const std::vector<float>& bat,
                                        const std::vector<int>& j_per,
                                        const std::vector<int>& k_per, int K);
+    std::vector<int> findNearestCartesianHost(
+        const std::vector<float>& pos, int K);
+    std::vector<float> findNearestCartesianDistsHost(
+        const std::vector<float>& pos, int K);
+    std::vector<float> proposeCartesianDartHost(
+        const std::vector<float>& pos,
+        const std::vector<int>& j_per,
+        const std::vector<int>& k_per, int K);
 };
 
 class CalcGridForceKernel : public OpenMM::KernelImpl {

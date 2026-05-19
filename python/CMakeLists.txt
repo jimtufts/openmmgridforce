@@ -26,8 +26,10 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py ${CMAKE_CURRENT_BINARY_DIR}/
 add_custom_command(TARGET PythonInstall
     # First install C++ libraries to ensure they're up-to-date in the target prefix
     COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}"
-    # Then install Python wrapper
-    COMMAND "${PYTHON_EXECUTABLE}" -m pip install .
+    # Then install Python wrapper. --no-build-isolation reuses the conda
+    # env's setuptools/wheel rather than fetching from PyPI, which lets
+    # the install run on offline compute nodes.
+    COMMAND "${PYTHON_EXECUTABLE}" -m pip install --no-build-isolation .
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 

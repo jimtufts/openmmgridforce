@@ -78,9 +78,15 @@ IF(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
 ENDIF()
 
 # Use system GCC as CUDA host compiler to avoid incompatibilities with
-# conda-provided GCC 14+ (whose C++20 standard library headers conflict with nvcc)
-IF(EXISTS /usr/bin/g++)
-    SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -ccbin /usr/bin/g++")
+# conda-provided GCC 14+ (whose C++20 standard library headers conflict
+# with nvcc). Skip this fallback when the user already supplied a host
+# compiler via CMAKE_CUDA_HOST_COMPILER (or CUDAHOSTCXX) — appending a
+# second -ccbin causes nvcc to last-arg-win onto /usr/bin/g++ which on
+# some compute nodes lacks libstdc++-devel.
+IF(NOT DEFINED CMAKE_CUDA_HOST_COMPILER AND "$ENV{CUDAHOSTCXX}" STREQUAL "")
+    IF(EXISTS /usr/bin/g++)
+        SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -ccbin /usr/bin/g++")
+    ENDIF()
 ENDIF()
 
 INSTALL(TARGETS ${SHARED_TARGET} DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/plugins)

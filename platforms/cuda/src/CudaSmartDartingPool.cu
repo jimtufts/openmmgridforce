@@ -98,6 +98,75 @@ __global__ void findNearestTargetKernel(
 }
 
 
+/**
+ * Per-replica nearest-target lookup in Cartesian heavy-atom SSD.
+ * Single thread per replica; deterministic argmin with lower-index
+ * tie-break.
+ */
+__global__ void findNearestCartesianKernel(
+    const float* __restrict__ pos_all,        // [K * N * 3]
+    const float* __restrict__ targets_heavy,  // [M * N_h * 3]
+    const int*   __restrict__ heavy_inds,     // [N_h]
+    int*         __restrict__ j_out,          // [K]
+    float*       __restrict__ d2_out,         // [K]
+    int K, int M, int N, int N_h)
+{
+    int r = blockIdx.x;
+    if (r >= K) return;
+    if (threadIdx.x != 0) return;
+
+    const float* pos = pos_all + r * N * 3;
+    int   best_j = 0;
+    float best_d2 = INFINITY;
+    for (int t = 0; t < M; ++t) {
+        const float* tgt = targets_heavy + t * N_h * 3;
+        float d2 = 0.0f;
+        for (int h = 0; h < N_h; ++h) {
+            int aidx = heavy_inds[h];
+            float dx = pos[aidx * 3 + 0] - tgt[h * 3 + 0];
+            float dy = pos[aidx * 3 + 1] - tgt[h * 3 + 1];
+            float dz = pos[aidx * 3 + 2] - tgt[h * 3 + 2];
+            d2 += dx * dx + dy * dy + dz * dz;
+        }
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best_j = t;
+        }
+    }
+    j_out[r] = best_j;
+    d2_out[r] = best_d2;
+}
+
+
+/**
+ * Cartesian dart in full atom space:
+ *   pos_out[r, a] = pos_in[r, a] + (target_full[k_per[r], a] - target_full[j_per[r], a])
+ * for each replica r and atom a. One block per replica, threads cover atoms.
+ */
+__global__ void proposeCartesianDartKernel(
+    const float* __restrict__ pos_in,         // [K * N * 3]
+    const float* __restrict__ targets_full,   // [M * N * 3]
+    const int*   __restrict__ j_per_replica,  // [K]
+    const int*   __restrict__ k_per_replica,  // [K]
+    float*       __restrict__ pos_out,        // [K * N * 3]
+    int K, int N)
+{
+    int r = blockIdx.x;
+    if (r >= K) return;
+    int j = j_per_replica[r];
+    int k = k_per_replica[r];
+    const float* pos = pos_in + r * N * 3;
+    const float* tj  = targets_full + j * N * 3;
+    const float* tk  = targets_full + k * N * 3;
+    float* out = pos_out + r * N * 3;
+    for (int a = threadIdx.x; a < N; a += blockDim.x) {
+        out[a * 3 + 0] = pos[a * 3 + 0] + (tk[a * 3 + 0] - tj[a * 3 + 0]);
+        out[a * 3 + 1] = pos[a * 3 + 1] + (tk[a * 3 + 1] - tj[a * 3 + 1]);
+        out[a * 3 + 2] = pos[a * 3 + 2] + (tk[a * 3 + 2] - tj[a * 3 + 2]);
+    }
+}
+
+
 __global__ void proposeDartKernel(
     const float* __restrict__ bat_all,         // [K * dim]
     const float* __restrict__ targets,         // [M * dim]
@@ -187,9 +256,88 @@ void CudaSmartDartingPool::initialize(
 
 CudaSmartDartingPool::~CudaSmartDartingPool() {
     if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
-    if (d_targets_)  cudaFree(d_targets_);
-    if (d_mask_)     cudaFree(d_mask_);
-    if (d_ang_idx_)  cudaFree(d_ang_idx_);
+    if (d_targets_)        cudaFree(d_targets_);
+    if (d_mask_)           cudaFree(d_mask_);
+    if (d_ang_idx_)        cudaFree(d_ang_idx_);
+    if (d_heavy_inds_)     cudaFree(d_heavy_inds_);
+    if (d_targets_heavy_)  cudaFree(d_targets_heavy_);
+    if (d_targets_full_)   cudaFree(d_targets_full_);
+}
+
+void CudaSmartDartingPool::setCartesianFullTargets(
+    const std::vector<float>& targets_full_flat) {
+    if (M_ == 0)
+        throw std::runtime_error(
+            "setCartesianFullTargets: call initialize() first");
+    if ((int)targets_full_flat.size() != M_ * n_atoms_ * 3)
+        throw std::runtime_error(
+            "setCartesianFullTargets: size must be M * N_atoms * 3");
+    if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
+    if (d_targets_full_) cudaFree(d_targets_full_);
+    CUDA_CHECK(cudaMalloc(&d_targets_full_,
+                          sizeof(float) * M_ * n_atoms_ * 3));
+    CUDA_CHECK(cudaMemcpy(d_targets_full_, targets_full_flat.data(),
+                          sizeof(float) * M_ * n_atoms_ * 3,
+                          cudaMemcpyHostToDevice));
+}
+
+void CudaSmartDartingPool::proposeCartesianDart(
+    const float* d_pos_in, const int* d_j_per, const int* d_k_per,
+    float* d_pos_out, int K, cudaStream_t stream) {
+    if (K <= 0) return;
+    if (d_targets_full_ == nullptr)
+        throw std::runtime_error(
+            "proposeCartesianDart: setCartesianFullTargets() not called");
+    if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
+    int threads = 64;
+    if (n_atoms_ < threads) threads = n_atoms_;
+    proposeCartesianDartKernel<<<K, threads, 0, stream>>>(
+        d_pos_in, d_targets_full_, d_j_per, d_k_per,
+        d_pos_out, K, n_atoms_);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void CudaSmartDartingPool::setCartesianTargets(
+    const std::vector<int>& heavy_inds,
+    const std::vector<float>& targets_heavy_flat) {
+    if (M_ == 0)
+        throw std::runtime_error(
+            "setCartesianTargets: call initialize() first");
+    if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
+    int N_h = (int)heavy_inds.size();
+    if (N_h <= 0)
+        throw std::runtime_error("setCartesianTargets: N_h must be > 0");
+    if ((int)targets_heavy_flat.size() != M_ * N_h * 3)
+        throw std::runtime_error(
+            "setCartesianTargets: targets_heavy_flat size must be M*N_h*3");
+    for (int h = 0; h < N_h; ++h)
+        if (heavy_inds[h] < 0 || heavy_inds[h] >= n_atoms_)
+            throw std::runtime_error(
+                "setCartesianTargets: heavy_inds out of range");
+    if (d_heavy_inds_)    cudaFree(d_heavy_inds_);
+    if (d_targets_heavy_) cudaFree(d_targets_heavy_);
+    n_heavy_ = N_h;
+    CUDA_CHECK(cudaMalloc(&d_heavy_inds_, sizeof(int) * N_h));
+    CUDA_CHECK(cudaMemcpy(d_heavy_inds_, heavy_inds.data(),
+                          sizeof(int) * N_h, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_targets_heavy_, sizeof(float) * M_ * N_h * 3));
+    CUDA_CHECK(cudaMemcpy(d_targets_heavy_, targets_heavy_flat.data(),
+                          sizeof(float) * M_ * N_h * 3,
+                          cudaMemcpyHostToDevice));
+}
+
+void CudaSmartDartingPool::findNearestCartesian(
+    const float* d_pos, int K,
+    int* d_j_out, float* d_d2_out, cudaStream_t stream) {
+    if (K <= 0) return;
+    if (n_heavy_ == 0 || d_targets_heavy_ == nullptr || d_heavy_inds_ == nullptr)
+        throw std::runtime_error(
+            "findNearestCartesian: setCartesianTargets() not called");
+    if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
+    findNearestCartesianKernel<<<K, 1, 0, stream>>>(
+        d_pos, d_targets_heavy_, d_heavy_inds_,
+        d_j_out, d_d2_out, K, M_, n_atoms_, n_heavy_);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void CudaSmartDartingPool::findNearest(
@@ -293,6 +441,89 @@ std::vector<float> CudaSmartDartingPool::proposeDartHost(
     CUDA_CHECK(cudaMemcpy(out.data(), d_out, sizeof(float) * out.size(),
                           cudaMemcpyDeviceToHost));
     cudaFree(d_bat); cudaFree(d_out); cudaFree(d_j); cudaFree(d_k);
+    return out;
+}
+
+// Cartesian-metric host wrappers --------------------------------------
+
+std::vector<int> CudaSmartDartingPool::findNearestCartesianHost(
+    const std::vector<float>& pos, int K) {
+    if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
+    if ((int)pos.size() != K * n_atoms_ * 3)
+        throw std::runtime_error(
+            "findNearestCartesianHost: pos size mismatch");
+    float* d_pos = nullptr;
+    int*   d_j   = nullptr;
+    float* d_d2  = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_pos, sizeof(float) * pos.size()));
+    CUDA_CHECK(cudaMalloc(&d_j, sizeof(int) * K));
+    CUDA_CHECK(cudaMalloc(&d_d2, sizeof(float) * K));
+    CUDA_CHECK(cudaMemcpy(d_pos, pos.data(), sizeof(float) * pos.size(),
+                          cudaMemcpyHostToDevice));
+    findNearestCartesian(d_pos, K, d_j, d_d2);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<int> out(K);
+    CUDA_CHECK(cudaMemcpy(out.data(), d_j, sizeof(int) * K,
+                          cudaMemcpyDeviceToHost));
+    cudaFree(d_pos); cudaFree(d_j); cudaFree(d_d2);
+    return out;
+}
+
+std::vector<float> CudaSmartDartingPool::findNearestCartesianDistsHost(
+    const std::vector<float>& pos, int K) {
+    if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
+    if ((int)pos.size() != K * n_atoms_ * 3)
+        throw std::runtime_error(
+            "findNearestCartesianDistsHost: pos size mismatch");
+    float* d_pos = nullptr;
+    int*   d_j   = nullptr;
+    float* d_d2  = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_pos, sizeof(float) * pos.size()));
+    CUDA_CHECK(cudaMalloc(&d_j, sizeof(int) * K));
+    CUDA_CHECK(cudaMalloc(&d_d2, sizeof(float) * K));
+    CUDA_CHECK(cudaMemcpy(d_pos, pos.data(), sizeof(float) * pos.size(),
+                          cudaMemcpyHostToDevice));
+    findNearestCartesian(d_pos, K, d_j, d_d2);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> out(K);
+    CUDA_CHECK(cudaMemcpy(out.data(), d_d2, sizeof(float) * K,
+                          cudaMemcpyDeviceToHost));
+    cudaFree(d_pos); cudaFree(d_j); cudaFree(d_d2);
+    return out;
+}
+
+std::vector<float> CudaSmartDartingPool::proposeCartesianDartHost(
+    const std::vector<float>& pos,
+    const std::vector<int>& j_per,
+    const std::vector<int>& k_per, int K) {
+    if (cu_) static_cast<OpenMM::CudaContext*>(cu_)->setAsCurrent();
+    if ((int)pos.size() != K * n_atoms_ * 3)
+        throw std::runtime_error(
+            "proposeCartesianDartHost: pos size mismatch");
+    if ((int)j_per.size() != K || (int)k_per.size() != K)
+        throw std::runtime_error(
+            "proposeCartesianDartHost: j/k size mismatch");
+    float* d_pos_in = nullptr;
+    float* d_pos_out = nullptr;
+    int*   d_j   = nullptr;
+    int*   d_k   = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_pos_in, sizeof(float) * pos.size()));
+    CUDA_CHECK(cudaMalloc(&d_pos_out, sizeof(float) * pos.size()));
+    CUDA_CHECK(cudaMalloc(&d_j, sizeof(int) * K));
+    CUDA_CHECK(cudaMalloc(&d_k, sizeof(int) * K));
+    CUDA_CHECK(cudaMemcpy(d_pos_in, pos.data(), sizeof(float) * pos.size(),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_j, j_per.data(), sizeof(int) * K,
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_k, k_per.data(), sizeof(int) * K,
+                          cudaMemcpyHostToDevice));
+    proposeCartesianDart(d_pos_in, d_j, d_k, d_pos_out, K);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> out(pos.size());
+    CUDA_CHECK(cudaMemcpy(out.data(), d_pos_out,
+                          sizeof(float) * out.size(),
+                          cudaMemcpyDeviceToHost));
+    cudaFree(d_pos_in); cudaFree(d_pos_out); cudaFree(d_j); cudaFree(d_k);
     return out;
 }
 
