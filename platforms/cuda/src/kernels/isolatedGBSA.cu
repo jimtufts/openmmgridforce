@@ -5710,6 +5710,15 @@ extern "C" __global__ void computeHCTJacobianPairwise(
     float R_k = radii[templateIdx_k];
     float R_k_off = R_k - DIELECTRIC_OFFSET;
 
+    // Self-term accumulators in double precision. The self entries
+    // J[idx, 3*idx+α] receive numReceptorAtoms + numLigandPairs
+    // contributions of similar magnitude with potentially canceling
+    // signs (cross-coupling cancellation in Mpro-scale receptors).
+    // Float32 accumulation gives ~1% relative error at near-cancelled
+    // values; double is enough to keep agreement at single-precision
+    // floor for the final stored Hessian.
+    double jx_self = 0.0, jy_self = 0.0, jz_self = 0.0;
+
     // --- Receptor pairwise sum (only J[k, 3k+α] gets contributions; receptor
     //     atoms are fixed so off-diagonal blocks are zero) ---
     for (int rj = 0; rj < numReceptorAtoms; rj++) {
@@ -5739,9 +5748,9 @@ extern "C" __global__ void computeHCTJacobianPairwise(
         float dI_dr = -2.0f * t3;
 
         float invr = 1.0f / r;
-        jacobian[idx * dim3N + 3 * idx + 0] += dI_dr * dx * invr;
-        jacobian[idx * dim3N + 3 * idx + 1] += dI_dr * dy * invr;
-        jacobian[idx * dim3N + 3 * idx + 2] += dI_dr * dz * invr;
+        jx_self += (double)dI_dr * (double)dx * (double)invr;
+        jy_self += (double)dI_dr * (double)dy * (double)invr;
+        jz_self += (double)dI_dr * (double)dz * (double)invr;
     }
 
     // --- Ligand-ligand pairwise (identical to gbsaGridForce.cu:2091-2150) ---
@@ -5787,13 +5796,21 @@ extern "C" __global__ void computeHCTJacobianPairwise(
         float dI_dr = -2.0f * t3;
 
         float invr = 1.0f / r;
-        jacobian[idx * dim3N + 3 * idx + 0] += dI_dr * dx * invr;
-        jacobian[idx * dim3N + 3 * idx + 1] += dI_dr * dy * invr;
-        jacobian[idx * dim3N + 3 * idx + 2] += dI_dr * dz * invr;
-        jacobian[idx * dim3N + 3 * j + 0] += -dI_dr * dx * invr;
-        jacobian[idx * dim3N + 3 * j + 1] += -dI_dr * dy * invr;
-        jacobian[idx * dim3N + 3 * j + 2] += -dI_dr * dz * invr;
+        // Self contribution (accumulate)
+        jx_self += (double)dI_dr * (double)dx * (double)invr;
+        jy_self += (double)dI_dr * (double)dy * (double)invr;
+        jz_self += (double)dI_dr * (double)dz * (double)invr;
+        // Cross contribution (single per-j assignment is safe in float;
+        // the row was zeroed and each j is unique within this loop)
+        jacobian[idx * dim3N + 3 * j + 0] = -dI_dr * dx * invr;
+        jacobian[idx * dim3N + 3 * j + 1] = -dI_dr * dy * invr;
+        jacobian[idx * dim3N + 3 * j + 2] = -dI_dr * dz * invr;
     }
+
+    // Store the double-accumulated self entries back to float.
+    jacobian[idx * dim3N + 3 * idx + 0] = (float)jx_self;
+    jacobian[idx * dim3N + 3 * idx + 1] = (float)jy_self;
+    jacobian[idx * dim3N + 3 * idx + 2] = (float)jz_self;
 }
 
 
@@ -5831,8 +5848,12 @@ extern "C" __global__ void computeReceptorPairwiseHessian(
     float R_k = radii[templateIdx];
     float R_k_off = R_k - DIELECTRIC_OFFSET;
 
-    float Hxx = 0.0f, Hyy = 0.0f, Hzz = 0.0f;
-    float Hxy = 0.0f, Hxz = 0.0f, Hyz = 0.0f;
+    // Double-precision accumulators: each receives one term per
+    // receptor atom (up to N_rec contributions) and the d²I/dx² terms
+    // can have catastrophic cancellation between A and B*r̂·r̂. Same
+    // motivation as the Jacobian kernel above.
+    double Hxx = 0.0, Hyy = 0.0, Hzz = 0.0;
+    double Hxy = 0.0, Hxz = 0.0, Hyz = 0.0;
 
     for (int rj = 0; rj < numReceptorAtoms; rj++) {
         float3 pj = receptorPositions[rj];
@@ -5864,21 +5885,21 @@ extern "C" __global__ void computeReceptorPairwiseHessian(
         //   d²I/dx_α dx_β = (∂I/∂r) (δ_αβ - r̂_α r̂_β)/r + (∂²I/∂r²) r̂_α r̂_β
         //                  = A δ_αβ + B r̂_α r̂_β,  with  A = (∂I/∂r)/r,
         //                                            B = (∂²I/∂r²) - A.
-        float A = dI_dr * invr;
-        float B = d2I_dr2 - A;
+        double A = (double)dI_dr * (double)invr;
+        double B = (double)d2I_dr2 - A;
 
-        Hxx += A + B * rhx * rhx;
-        Hyy += A + B * rhy * rhy;
-        Hzz += A + B * rhz * rhz;
-        Hxy += B * rhx * rhy;
-        Hxz += B * rhx * rhz;
-        Hyz += B * rhy * rhz;
+        Hxx += A + B * (double)rhx * (double)rhx;
+        Hyy += A + B * (double)rhy * (double)rhy;
+        Hzz += A + B * (double)rhz * (double)rhz;
+        Hxy += B * (double)rhx * (double)rhy;
+        Hxz += B * (double)rhx * (double)rhz;
+        Hyz += B * (double)rhy * (double)rhz;
     }
 
-    hessianOut[idx * 6 + 0] = Hxx;
-    hessianOut[idx * 6 + 1] = Hyy;
-    hessianOut[idx * 6 + 2] = Hzz;
-    hessianOut[idx * 6 + 3] = Hxy;
-    hessianOut[idx * 6 + 4] = Hxz;
-    hessianOut[idx * 6 + 5] = Hyz;
+    hessianOut[idx * 6 + 0] = (float)Hxx;
+    hessianOut[idx * 6 + 1] = (float)Hyy;
+    hessianOut[idx * 6 + 2] = (float)Hzz;
+    hessianOut[idx * 6 + 3] = (float)Hxy;
+    hessianOut[idx * 6 + 4] = (float)Hxz;
+    hessianOut[idx * 6 + 5] = (float)Hyz;
 }
