@@ -2429,7 +2429,15 @@ extern "C" __global__ void assembleGBSAHessian(
     int exclStart_i = exclusionStart[templateIdx_i];
     int exclEnd_i = exclusionStart[templateIdx_i + 1];
 
-    float H_val = 0.0f;
+    // Accumulate in double precision to avoid catastrophic cancellation
+    // in the J^T M J path (58² ≈ 3364 product terms per Hessian element)
+    // and in the H_cross path (per-pair sums). Float intermediates remain
+    // single-precision; only the running sum is double, cast back to
+    // float at the final store. Same motivation as the double local
+    // accumulators in computeHCTJacobianPairwise / computeReceptorPairwiseHessian
+    // in isolatedGBSA.cu — verified to be insufficient there alone because
+    // this is where the dominant summation lives.
+    double H_val = 0.0;
 
     // --- H_direct + H_cross + H_hct2 (computed pair-by-pair) ---
     if (atom_i == atom_j) {
@@ -2693,18 +2701,19 @@ extern "C" __global__ void assembleGBSAHessian(
         }
     }
 
-    // --- J^T · M · J ---
+    // --- J^T · M · J --- (inner products kept in double to match H_val)
     for (int k = 0; k < totalParticles; k++) {
-        float Jk = jacobian[k * dim3N + row];
-        if (fabsf(Jk) < 1e-15f) continue;
+        double Jk = (double)jacobian[k * dim3N + row];
+        if (fabs(Jk) < 1e-15) continue;
         for (int l = 0; l < totalParticles; l++) {
-            float Mkl = couplingMatrix[k * totalParticles + l];
-            if (fabsf(Mkl) < 1e-15f) continue;
-            H_val += Jk * Mkl * jacobian[l * dim3N + col];
+            double Mkl = (double)couplingMatrix[k * totalParticles + l];
+            if (fabs(Mkl) < 1e-15) continue;
+            H_val += Jk * Mkl * (double)jacobian[l * dim3N + col];
         }
     }
 
 write_result:
-    hessian[row * dim3N + col] = H_val;
-    if (col > row) hessian[col * dim3N + row] = H_val;
+    float H_store = (float)H_val;
+    hessian[row * dim3N + col] = H_store;
+    if (col > row) hessian[col * dim3N + row] = H_store;
 }

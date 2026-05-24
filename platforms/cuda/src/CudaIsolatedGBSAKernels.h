@@ -158,13 +158,24 @@ private:
     //   5. assembleGBSAHessian writes the full 3N x 3N matrix into hessianMatrix.
     // hessianBuffersInitialized gates one-time allocation across calls.
     OpenMM::CudaArray hessianBuffer;             // legacy placeholder; unused
-    OpenMM::CudaArray hessianDRdPsi;             // [N] float
-    OpenMM::CudaArray hessianD2RdPsi2;           // [N] float
-    OpenMM::CudaArray hessianDEdHCT;             // [N] float (per-atom dE/dHCT)
-    OpenMM::CudaArray hessianJacobian;           // [N * 3N] float
-    OpenMM::CudaArray hessianRecD2Psi;           // [N * 6] float (xx,yy,zz,xy,xz,yz)
-    OpenMM::CudaArray hessianCouplingMatrix;     // [N * N] float
-    OpenMM::CudaArray hessianMatrix;             // [3N * 3N] float
+    // Hessian path runs entirely in double. The upstream-shared force
+    // buffers (hctReceptor, bornRadii, hctLigand, dE_dR) are float, so
+    // for the Hessian we recompute hctReceptor (from the fixed-point
+    // accumulator hctReceptorFixed, where the sum is exact to ~2^-32)
+    // and Born radii in double. dE_dR stays float — its float
+    // precision contributes negligibly to Hessian element accuracy
+    // (the J^T M J error analysis showed the dominant noise was in
+    // the float hctReceptor sum at Mpro scale).
+    OpenMM::CudaArray hessianHctReceptorDouble;  // [N] double — receptor->ligand HCT in double
+    OpenMM::CudaArray hessianHctLigandDouble;    // [N] double — ligand-ligand HCT in double
+    OpenMM::CudaArray hessianBornRadiiDouble;    // [N] double — OBC2 from above
+    OpenMM::CudaArray hessianDRdPsi;             // [N] double
+    OpenMM::CudaArray hessianD2RdPsi2;           // [N] double
+    OpenMM::CudaArray hessianDEdHCT;             // [N] double
+    OpenMM::CudaArray hessianJacobian;           // [N * 3N] double
+    OpenMM::CudaArray hessianRecD2Psi;           // [N * 6] double
+    OpenMM::CudaArray hessianCouplingMatrix;     // [N * N] double
+    OpenMM::CudaArray hessianMatrix;             // [3N * 3N] double
     // Zero-filled dummy exclusion buffers: IsolatedGBSAForce has no
     // exclusion API (all pairs contribute by design), but the shared
     // Hessian kernels (ported from GBSAGridForce) read exclusion lists.
@@ -220,12 +231,22 @@ private:
     CUfunction accumulateCrossTermOnGPUKernel;
 
     CUfunction computeHessianKernel;                        // legacy placeholder
-    // Hessian kernel chain (declared here, loaded lazily in computeHessian()).
-    CUfunction prepareHessianIntermediatesKernel;           // OBC-II radius transforms
-    CUfunction computeHCTJacobianPairwiseKernel;            // dPsi/dx (pairwise)
-    CUfunction computeReceptorPairwiseHessianKernel;        // d2Psi/dx2 (pairwise)
-    CUfunction computeBornCouplingMatrixKernel;             // d2U/dRi dRj
-    CUfunction assembleGBSAHessianKernel;                   // final 3N x 3N assembly
+    // Hessian kernel chain. Double-precision storage variants are loaded
+    // lazily in computeHessian() and are the default.
+    CUfunction prepareHessianIntermediatesKernel;           // legacy float path (debug)
+    CUfunction computeHCTJacobianPairwiseKernel;            // legacy float path (debug)
+    CUfunction computeReceptorPairwiseHessianKernel;        // legacy float path (debug)
+    CUfunction computeBornCouplingMatrixKernel;             // legacy float path (debug)
+    CUfunction assembleGBSAHessianKernel;                   // legacy float path (debug)
+    CUfunction prepareHessianIntermediatesDoubleKernel;     // OBC-II transforms (double)
+    CUfunction computeHCTJacobianPairwiseDoubleKernel;      // dPsi/dx (double)
+    CUfunction computeReceptorPairwiseHessianDoubleKernel;  // d2Psi/dx2 (double)
+    CUfunction computeBornCouplingMatrixDoubleKernel;       // d2U/dRi dRj (double)
+    CUfunction assembleGBSAHessianDoubleKernel;             // final 3N x 3N (double)
+    CUfunction convertTiledHCTToDoubleKernel;               // fixed-point -> double (unused)
+    CUfunction computeBornRadiiOBCDoubleKernel;             // OBC2 transform (double)
+    CUfunction computeHctReceptorPairwiseDoubleKernel;      // receptor->ligand HCT in double
+    CUfunction computeHctLigandPairwiseDoubleKernel;        // ligand-ligand HCT in double
 
     // Host-side results cache
     mutable std::vector<float> groupEnergiesHost;
