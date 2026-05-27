@@ -393,10 +393,21 @@ def compute_full_nma_entropy(context, grid_forces_dict, system=None,
     where x = ℏω/(k_BT) and ω = sqrt(λ_mw) with λ_mw being eigenvalues
     of the mass-weighted Hessian.
     """
-    # Get positions and trigger energy calculation
-    context.getState(getEnergy=True)
+    # Get positions, forces (for Tier 1 gradient diagnostic), and trigger energy calc
+    from openmm import unit as omm_unit
+    import hashlib
+    state = context.getState(getEnergy=True, getForces=True, getPositions=True)
     n_atoms = context.getSystem().getNumParticles()
     n_dof = 3 * n_atoms
+
+    # Tier 1 diagnostics from the post-minimization state
+    positions_nm_arr = np.asarray(
+        state.getPositions(asNumpy=True).value_in_unit(omm_unit.nanometer))
+    rounded_pos = np.round(positions_nm_arr, decimals=6)
+    geometry_checksum = hashlib.sha256(rounded_pos.tobytes()).hexdigest()[:16]
+    forces_arr = np.asarray(state.getForces(asNumpy=True).value_in_unit(
+        omm_unit.kilojoule_per_mole / omm_unit.nanometer))
+    final_gradient_rms = float(np.sqrt(np.mean(forces_arr ** 2)))
 
     # Option 1: Use numerical Hessian (works for any force type)
     if use_numerical_hessian:
@@ -583,6 +594,13 @@ def compute_full_nma_entropy(context, grid_forces_dict, system=None,
         mean_fluctuation = np.nan
         b_factors = np.full(n_atoms, np.nan)
 
+    # Tier 1: lowest 10 vibrational frequencies (cm^-1), sorted by |.| ascending.
+    # frequencies_cm1 already excludes the rigid-body zeros; this surfaces soft
+    # modes that often indicate incomplete minimization.
+    low_freq_spectrum_cm1 = [
+        float(f) for f in sorted(frequencies_cm1, key=abs)[:10]
+    ]
+
     return {
         'nma_entropy': nma_entropy,
         'nma_entropy_per_mode': nma_entropy_per_mode,
@@ -606,6 +624,232 @@ def compute_full_nma_entropy(context, grid_forces_dict, system=None,
         'n_atoms': n_atoms,
         'n_dof': n_dof,
         'temperature': temperature,
+        # Tier 1 diagnostics
+        'geometry_checksum': geometry_checksum,
+        'final_gradient_rms_kjmol_nm': final_gradient_rms,
+        'low_freq_spectrum_cm1': low_freq_spectrum_cm1,
+        'n_imaginary_modes': int(n_negative),
+        'n_rigid_modes': int(n_zero),
+    }
+
+
+# Boltzmann constant in cal/(mol*K), used by the hybrid pipeline summary
+KB_CAL = 1.987204e-3
+
+
+def _masses_amu(system):
+    from openmm import unit as omm_unit
+    return np.array([
+        system.getParticleMass(i).value_in_unit(omm_unit.dalton)
+        for i in range(system.getNumParticles())
+    ])
+
+
+def _bonded_hessian_from_source(context, system, isolated_bonded_force):
+    """Return the 3N×3N bonded Hessian.
+
+    If isolated_bonded_force is given, use the plugin's computeHessian directly
+    (needed because SWIG loses the IsolatedBondedForce subclass identity when
+    retrieved via system.getForce(i)). Otherwise fall back to BondedHessian on
+    the System (works for stock OpenMM HarmonicBond/Angle/PeriodicTorsion)."""
+    n_dof = 3 * system.getNumParticles()
+    if isolated_bonded_force is not None:
+        return np.array(
+            isolated_bonded_force.computeHessian(context)).reshape(n_dof, n_dof)
+    bh = BondedHessian()
+    bh.initialize(system, context)
+    return np.array(bh.computeHessian(context)).reshape(n_dof, n_dof)
+
+
+def _full_cartesian_hessian(context, grid_forces_dict, system,
+                              isolated_nb_force, isolated_bonded_force=None,
+                              isolated_gbsa_force=None):
+    """Sum bonded + isolated NB + isolated GBSA + grid Hessians → (3N, 3N)
+    in kJ/(mol·nm^2)."""
+    n_atoms = context.getSystem().getNumParticles()
+    n_dof = 3 * n_atoms
+    H = np.zeros((n_dof, n_dof))
+    if system is not None:
+        H += _bonded_hessian_from_source(context, system, isolated_bonded_force)
+    if isolated_nb_force is not None:
+        H += np.array(isolated_nb_force.computeHessian(context)).reshape(n_dof, n_dof)
+    if isolated_gbsa_force is not None:
+        H += np.array(isolated_gbsa_force.computeHessian(context)).reshape(n_dof, n_dof)
+    for gtype, gf in grid_forces_dict.items():
+        if gtype == 'gbsa':
+            gf.computeHessian(context)
+            H += np.array(gf.getFullHessian(context)).reshape(n_dof, n_dof)
+        else:
+            gf.computeHessian(context)
+            blocks = np.array(gf.getHessianBlocks(context))
+            for i in range(n_atoms):
+                dxx, dyy, dzz, dxy, dxz, dyz = blocks[6*i:6*i+6]
+                b = 3 * i
+                H[b+0, b+0] += dxx; H[b+1, b+1] += dyy; H[b+2, b+2] += dzz
+                H[b+0, b+1] += dxy; H[b+1, b+0] += dxy
+                H[b+0, b+2] += dxz; H[b+2, b+0] += dxz
+                H[b+1, b+2] += dyz; H[b+2, b+1] += dyz
+    return 0.5 * (H + H.T)
+
+
+def compute_total_entropy_hybrid(context, grid_forces_dict, system,
+                                   isolated_nb_force=None, temperature=300.0,
+                                   is_bound=False, sigma_rot=1, scan_points=64,
+                                   isolated_bonded_force=None,
+                                   isolated_gbsa_force=None):
+    """v2 hybrid entropy: vibrational quantum HO + translation (gas) + rotation
+    (gas) + per-torsion Pitzer-Gwinn or Fourier DVR.
+
+    Args:
+        context:        OpenMM Context at the minimized geometry.
+        grid_forces_dict, isolated_nb_force, system: same as compute_full_nma_entropy.
+        temperature:    K.
+        is_bound:       True for bound state (rigid-body modes are vibrations;
+                        skip Sackur-Tetrode + rigid rotor); False for gas state.
+        sigma_rot:      molecular rotational symmetry number (1 for asymmetric).
+        scan_points:    n_points for each torsion 1D scan.
+
+    Returns:
+        (S_total_kB, info_dict) — info has per-component entropies, per-torsion
+        routing characterization, and the vibrational mode count.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from internal_coords import (
+        find_rotatable_torsions, compute_torsion_b_vector,
+        central_bond_reduced_moment, project_out_torsions, vibrational_frequencies,
+        extract_bond_list, AMU_NM2_TO_AMU_ANG2,
+    )
+    from entropy_methods import (
+        entropy_quantum_HO, sackur_tetrode, rigid_rotor,
+        principal_moments_of_inertia, AMU_TO_KG,
+    )
+    from torsion_scan import scan_torsion, torsion_entropy
+
+    from openmm import unit as omm_unit
+
+    n_atoms = system.getNumParticles()
+    state = context.getState(getPositions=True)
+    pos_nm = np.asarray(
+        state.getPositions(asNumpy=True).value_in_unit(omm_unit.nanometer))
+    masses_amu = _masses_amu(system)
+    # For IC analysis: caller may pass the plugin's IsolatedBondedForce reference
+    # since SWIG loses its subclass identity when retrieved via system.getForce(i).
+    ff_source = isolated_bonded_force if isolated_bonded_force is not None else system
+    bond_list = extract_bond_list(ff_source)
+
+    # 1. Cartesian Hessian + mass weight
+    H_cart = _full_cartesian_hessian(context, grid_forces_dict, system,
+                                       isolated_nb_force, isolated_bonded_force,
+                                       isolated_gbsa_force)
+    mass_3n = np.repeat(masses_amu, 3)
+    inv_sqrt_m = 1.0 / np.sqrt(mass_3n)
+    H_mw = H_cart * np.outer(inv_sqrt_m, inv_sqrt_m)
+    H_mw = 0.5 * (H_mw + H_mw.T)
+
+    # 2. Rotatable torsions + B-vectors (one per central bond)
+    rotatable = find_rotatable_torsions(ff_source, barrier_threshold_kjmol=30.0)
+    b_vectors_mw = []
+    torsion_meta = []
+    for t in rotatable:
+        i, j, k, l = t['representative_indices']
+        B = compute_torsion_b_vector(pos_nm, (i, j, k, l))
+        B_mw = B / np.sqrt(mass_3n)
+        n_b = float(np.linalg.norm(B_mw))
+        if n_b < 1e-12:
+            continue
+        I_r_amu_nm2 = central_bond_reduced_moment(
+            pos_nm, masses_amu, t['central_bond'], bond_list)
+        I_r_kg_m2 = I_r_amu_nm2 * AMU_TO_KG * (1e-9) ** 2
+        b_vectors_mw.append(B_mw)
+        torsion_meta.append({
+            'central_bond': t['central_bond'],
+            'representative_indices': (i, j, k, l),
+            'total_barrier_kjmol': t['total_barrier_kjmol'],
+            'I_r_amu_A2': I_r_amu_nm2 * AMU_NM2_TO_AMU_ANG2,
+            'I_r_kg_m2': I_r_kg_m2,
+            'B_mw': B_mw,
+        })
+
+    # 3. Vibrational HO entropy
+    # For gas: project out torsions (they're multi-well anharmonic, need DVR).
+    # For bound: keep torsions in the Hessian — pocket clamps them to a single
+    # well, so the bound torsion motion is harmonic and is captured correctly
+    # by the bound vibrational spectrum. Rigid-rotation scans through the
+    # receptor produce delta-needle V(phi) and DVR returns 0; skipping the
+    # projection avoids double-removing those modes.
+    if is_bound:
+        H_for_vib = H_mw
+        n_torsions_projected = 0
+    else:
+        H_for_vib = project_out_torsions(
+            H_mw, np.array(b_vectors_mw) if b_vectors_mw else None)
+        n_torsions_projected = len(b_vectors_mw)
+    vib = vibrational_frequencies(H_for_vib, n_torsions=n_torsions_projected,
+                                    is_bound=is_bound)
+    S_vib = float(sum(entropy_quantum_HO(w, temperature)
+                       for w in vib['vibrational_omega_rad_s']))
+
+    # 4. Gas-state rigid-body entropy (Sackur-Tetrode + rigid rotor)
+    if not is_bound:
+        total_mass_kg = float(masses_amu.sum()) * AMU_TO_KG
+        positions_m = pos_nm * 1e-9
+        masses_kg = masses_amu * AMU_TO_KG
+        I_principal = principal_moments_of_inertia(positions_m, masses_kg)
+        S_trans = float(sackur_tetrode(total_mass_kg, temperature, standard_state='1M'))
+        # Linear/spherical degeneracies: just call the formula and let caller verify
+        try:
+            S_rot = float(rigid_rotor(I_principal, temperature, sigma=sigma_rot))
+        except (FloatingPointError, ValueError):
+            S_rot = np.nan
+    else:
+        S_trans = 0.0
+        S_rot = 0.0
+
+    # 5. Per-torsion entropy via scan + PG/DVR router (gas only)
+    # In bound state, torsion motion is captured by the un-projected Hessian's
+    # low-frequency vibrational modes, so we skip DVR scans entirely. (Rigid
+    # rotation through the receptor produces unphysical V(phi) needles anyway.)
+    S_tors = 0.0
+    torsion_log = []
+    if not is_bound:
+        for tmeta in torsion_meta:
+            phi_grid, V_grid = scan_torsion(
+                context, tmeta['representative_indices'], bond_list, n_points=scan_points)
+            S_i, method, char = torsion_entropy(
+                phi_grid, V_grid, tmeta['I_r_kg_m2'], temperature)
+            S_tors += S_i
+            torsion_log.append({
+                'central_bond': tmeta['central_bond'],
+                'I_r_amu_A2': tmeta['I_r_amu_A2'],
+                'total_barrier_kjmol': tmeta['total_barrier_kjmol'],
+                'method': method,
+                'S_kB': float(S_i),
+                'characterization': char,
+            })
+    else:
+        for tmeta in torsion_meta:
+            torsion_log.append({
+                'central_bond': tmeta['central_bond'],
+                'I_r_amu_A2': tmeta['I_r_amu_A2'],
+                'total_barrier_kjmol': tmeta['total_barrier_kjmol'],
+                'method': 'in_vibrational_hessian',
+                'S_kB': 0.0,
+                'characterization': None,
+            })
+
+    S_total = S_vib + S_trans + S_rot + S_tors
+    return float(S_total), {
+        'S_vibrational_kB': S_vib,
+        'S_translational_kB': S_trans,
+        'S_rotational_kB': S_rot,
+        'S_torsional_kB': S_tors,
+        'n_vibrational_modes': int(len(vib['vibrational_omega_rad_s'])),
+        'n_imaginary_modes': int(vib['n_imaginary']),
+        'n_zero_modes': int(vib['n_zero']),
+        'n_rotatable_torsions': int(len(torsion_meta)),
+        'torsions': torsion_log,
+        'minus_TS_total_kcal_mol': -S_total * KB_CAL * temperature,
     }
 
 
@@ -728,6 +972,20 @@ def create_result_record(system_name, pose_data, pose_idx, method,
         'nma_n_vibrational_modes': nma_analysis['n_vibrational_modes'] if nma_analysis else np.nan,
         'nma_n_negative_modes': nma_analysis['n_negative_modes'] if nma_analysis else np.nan,
         'nma_n_zero_modes': nma_analysis['n_zero_modes'] if nma_analysis else np.nan,
+
+        # Tier 1 diagnostics (hessian_plan.md:266-290) -- visible silent-failure detectors
+        'tier1_geometry_checksum': (
+            nma_analysis.get('geometry_checksum', '') if nma_analysis else ''),
+        'tier1_final_gradient_rms_kjmol_nm': (
+            nma_analysis.get('final_gradient_rms_kjmol_nm', np.nan)
+            if nma_analysis else np.nan),
+        'tier1_low_freq_spectrum_cm1': (
+            ';'.join(f'{f:.4f}' for f in nma_analysis.get('low_freq_spectrum_cm1', []))
+            if nma_analysis else ''),
+        'tier1_n_imaginary_modes': (
+            nma_analysis.get('n_imaginary_modes', np.nan) if nma_analysis else np.nan),
+        'tier1_n_rigid_modes': (
+            nma_analysis.get('n_rigid_modes', np.nan) if nma_analysis else np.nan),
         'nma_covariance_trace': nma_analysis['covariance_trace'] if nma_analysis else np.nan,
         'nma_mean_fluctuation_nm': nma_analysis['mean_fluctuation'] if nma_analysis else np.nan,
         'nma_condition_number': nma_analysis['hessian_condition_number'] if nma_analysis else np.nan,
