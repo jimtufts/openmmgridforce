@@ -49,8 +49,10 @@ namespace std {
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
 #include "BATTopology.h"
+#ifdef GRIDFORCE_BUILD_CUDA
 #include "CudaBATConverter.h"
 #include "CudaSmartDartingPool.h"
+#endif
 #include "MultiGroupHMCIntegrator.h"
 #include "MultiGroupHMCKernels.h"
 #include "MultiGroupNUTSIntegrator.h"
@@ -1599,6 +1601,7 @@ public:
     void validate() const;
 };
 
+#ifdef GRIDFORCE_BUILD_CUDA
 /**
  * CUDA Cartesian <-> BAT coordinate converter. Driven by `BATTopology`.
  * Single-precision FP throughout; deterministic given fixed CUDA driver.
@@ -1654,6 +1657,7 @@ public:
         const std::vector<int>& j_per,
         const std::vector<int>& k_per, int K);
 };
+#endif
 
 class CalcGridForceKernel : public OpenMM::KernelImpl {
 public:

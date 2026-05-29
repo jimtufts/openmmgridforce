@@ -2,11 +2,22 @@ set(WRAP_FILE GridForcePluginWrapper.cpp)
 set(MODULE_NAME gridforceplugin)
 
 # Execute SWIG to generate source code for the Python module.
+# Only emit the CUDA-only bindings (CudaBATConverter, CudaSmartDartingPool)
+# when the CUDA implementation library is being built; setup.py mirrors this
+# via the GRIDFORCE_BUILD_CUDA env var so the two stay in sync.
+if(GRIDFORCE_BUILD_CUDA_LIB)
+    set(SWIG_CUDA_FLAG "-DGRIDFORCE_BUILD_CUDA")
+    set(GRIDFORCE_BUILD_CUDA_ENV "1")
+else()
+    set(SWIG_CUDA_FLAG "")
+    set(GRIDFORCE_BUILD_CUDA_ENV "0")
+endif()
 
 add_custom_command(
     OUTPUT "${WRAP_FILE}"
     COMMAND "${SWIG_EXECUTABLE}"
         -python -c++
+        ${SWIG_CUDA_FLAG}
         -o "${WRAP_FILE}"
         "-I${OPENMM_DIR}/include"
         "-I${CMAKE_SOURCE_DIR}/openmmapi/include"
@@ -28,8 +39,10 @@ add_custom_command(TARGET PythonInstall
     COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}"
     # Then install Python wrapper. --no-build-isolation reuses the conda
     # env's setuptools/wheel rather than fetching from PyPI, which lets
-    # the install run on offline compute nodes.
-    COMMAND "${PYTHON_EXECUTABLE}" -m pip install --no-build-isolation .
+    # the install run on offline compute nodes. GRIDFORCE_BUILD_CUDA tells
+    # setup.py whether to link OpenMMGridForceCUDA (matches the swig flag).
+    COMMAND "${CMAKE_COMMAND}" -E env "GRIDFORCE_BUILD_CUDA=${GRIDFORCE_BUILD_CUDA_ENV}"
+            "${PYTHON_EXECUTABLE}" -m pip install --no-build-isolation .
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
