@@ -141,7 +141,9 @@ void CudaCalcIsolatedBondedForceKernel::initialize(const System& system, const I
     defines["NUM_ANGLES"] = cu.intToString(numAngles);
     defines["NUM_TORSIONS"] = cu.intToString(numTorsions);
 
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::isolatedBondedKernel, defines);
     if (numBonds > 0)
         bondKernel = cu.getKernel(module, "computeIsolatedBonds");
     if (numAngles > 0)
@@ -432,7 +434,9 @@ void CudaCalcIsolatedBondedForceKernel::computeDiagonalHessianGPU() {
         defines["NUM_BONDS"] = cu.intToString(numBonds);
         defines["NUM_ANGLES"] = cu.intToString(numAngles);
         defines["NUM_TORSIONS"] = cu.intToString(numTorsions);
-        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+        CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::isolatedBondedKernel, defines);
 
         if (numBonds > 0)
             bondDiagHessianKernel = cu.getKernel(module, "computeIsolatedBondDiagHessian");

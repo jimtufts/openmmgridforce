@@ -76,7 +76,9 @@ void CudaCalcIsolatedSiteForceKernel::initialize(
     groupScalingFactorsBuffer.upload(scalingFactors);
 
     // Compile CUDA kernel
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::isolatedSiteKernel);
     siteKernel = cu.getKernel(module, "computeIsolatedSiteRestraint");
 
     hasInitializedKernel = true;

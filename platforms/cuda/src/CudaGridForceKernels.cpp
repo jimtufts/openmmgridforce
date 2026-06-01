@@ -899,7 +899,14 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 #if DEBUG_GRIDFORCE
     defines["DEBUG_GRIDFORCE"] = "1";
 #endif
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::gridForceKernel +
+        CudaGridForceKernelSources::gridForceTiledKernel +
+        CudaGridForceKernelSources::gridHessianKernel +
+        CudaGridForceKernelSources::gridHessianTiledKernel +
+        CudaGridForceKernelSources::gridHessianAnalysisKernel +
+        CudaGridForceKernelSources::tileCoverageCheckKernel, defines);
     kernelModule = module;  // Store for deferred kernel extraction (coverage check)
     kernel = cu.getKernel(module, "computeGridForce");
     addGroupEnergiesKernel = cu.getKernel(module, "addGroupEnergiesToTotal");
@@ -2047,7 +2054,9 @@ void CudaCalcGridForceKernel::generateGrid(
     d_gridSpacing.upload(gridSpacingVec);
 
     // Get kernel module
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::gridGenerationKernel);
 
     // Convert origin to float
     float originXf = (float)originX;
@@ -2378,7 +2387,9 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
     receptorEpsilons.upload(epsilonsVec);
 
     // Get kernel module
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::gridGenerationKernel);
 
     float originXf = (float)originX;
     float originYf = (float)originY;
@@ -2660,7 +2671,9 @@ void CudaCalcBondedHessianKernel::initialize(const System& system) {
     map<string, string> defines;
     defines["NUM_ATOMS"] = cu.intToString(numAtoms);
 
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::bondedHessianKernel, defines);
     bondHessianKernel = cu.getKernel(module, "computeBondHessians");
     angleHessianKernel = cu.getKernel(module, "computeAngleHessians");
     torsionHessianKernel = cu.getKernel(module, "computeTorsionHessians");

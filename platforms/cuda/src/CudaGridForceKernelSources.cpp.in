@@ -1,7 +1,0 @@
-#include "CudaGridForceKernelSources.h"
-
-namespace GridForcePlugin {
-
-std::string CudaGridForceKernelSources::gridForceKernel = "@GRID_FORCE_KERNEL@";
-
-} // namespace GridForcePlugin

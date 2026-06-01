@@ -206,7 +206,9 @@ void CudaIntegrateMultiGroupHMCStepKernel::execute(
         groupKTBuffer.initialize<double>(cu, K, "hmcGroupKT");
         acceptedBuffer.initialize<int>(cu, K, "hmcAccepted");
 
-        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+        CUmodule module = cu.createModule(
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::multiGroupHMCKernel);
         backupPositionsKernel = cu.getKernel(module, "hmcBackupPositions");
         drawMBVelocitiesFullKernel = cu.getKernel(module, "hmcDrawMBVelocitiesFull");
         drawMBVelocitiesPartialKernel = cu.getKernel(module, "hmcDrawMBVelocitiesPartial");

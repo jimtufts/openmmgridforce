@@ -137,7 +137,9 @@ void CudaBondedHessian::initialize(const System& system, Context& context) {
     map<string, string> defines;
     defines["NUM_ATOMS"] = cu->intToString(numAtoms);
 
-    CUmodule module = cu->createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+    CUmodule module = cu->createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::bondedHessianKernel, defines);
     bondHessianKernel = cu->getKernel(module, "computeBondHessians");
     angleHessianKernel = cu->getKernel(module, "computeAngleHessians");
     torsionHessianKernel = cu->getKernel(module, "computeTorsionHessians");

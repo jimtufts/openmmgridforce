@@ -163,7 +163,9 @@ void CudaCalcIsolatedNonbondedForceKernel::initialize(const System& system, cons
     defines["NUM_EXCLUSIONS"] = cu.intToString(numExclusions);
     defines["NUM_EXCEPTIONS"] = cu.intToString(numExceptions);
 
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::isolatedNonbondedKernel, defines);
     kernel = cu.getKernel(module, "computeIsolatedNonbonded");
 
     hasInitializedKernel = true;
@@ -304,7 +306,9 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
         defines["NUM_EXCLUSIONS"] = cu.intToString(exclusions.getSize() > 1 ? exclusions.getSize() : 0);
         defines["NUM_EXCEPTIONS"] = cu.intToString(exceptions.getSize() > 1 ? exceptions.getSize() : 0);
 
-        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+        CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::isolatedNonbondedKernel, defines);
         hessianKernel = cu.getKernel(module, "computeIsolatedNonbondedHessians");
     }
 
@@ -404,7 +408,9 @@ void CudaCalcIsolatedNonbondedForceKernel::computeDiagonalHessianGPU() {
         defines["NUM_EXCLUSIONS"] = cu.intToString(exclusions.getSize() > 1 ? exclusions.getSize() : 0);
         defines["NUM_EXCEPTIONS"] = cu.intToString(exceptions.getSize() > 1 ? exceptions.getSize() : 0);
 
-        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel, defines);
+        CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::isolatedNonbondedKernel, defines);
         diagHessianKernel = cu.getKernel(module, "computeIsolatedNonbondedDiagHessian");
 
         diagHessianInitialized = true;

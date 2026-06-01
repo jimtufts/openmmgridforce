@@ -748,7 +748,9 @@ void CudaIntegrateMultiGroupNUTSStepKernel::execute(
         uturnDotBuffer.initialize<double>(cu, 2 * K, "nutsUturnDot");
         divergentBuffer.initialize<int>(cu, K, "nutsDivergent");
 
-        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+        CUmodule module = cu.createModule(
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::multiGroupNUTSKernel);
         backupPositionsKernel = cu.getKernel(module, "nutsBackupPositions");
         drawMBVelocitiesFullKernel = cu.getKernel(module, "nutsDrawMBVelocitiesFull");
         drawMBVelocitiesPartialKernel = cu.getKernel(module, "nutsDrawMBVelocitiesPartial");

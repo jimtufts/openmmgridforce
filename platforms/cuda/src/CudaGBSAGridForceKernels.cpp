@@ -410,8 +410,9 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         dE_dHCT.initialize<float>(cu, totalParticles, "gbsaDEdHCT");
     }
 
-    // Compile CUDA kernels
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::gbsaGridForceKernel);
     computeReceptorHCTKernel = cu.getKernel(module, "computeReceptorHCT");
     computeLigandHCTKernel = cu.getKernel(module, "computeLigandHCT");
     computeBornRadiiKernel = cu.getKernel(module, "computeBornRadii");
@@ -851,7 +852,9 @@ void CudaCalcGBSAGridForceKernel::generateGrid(
 
     // Load kernel module if not already done
     if (generationModule == nullptr) {
-        generationModule = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+        generationModule = cu.createModule(
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::gbsaGridGenerationKernel);
         generateLigandHCTGridKernel = cu.getKernel(generationModule, "generateLigandHCTGrid");
         generateLigandHCTGridWithCorrectionsKernel = cu.getKernel(generationModule, "generateLigandHCTGridWithCorrections");
         generateLigandHCTGridWithDerivativesKernel = cu.getKernel(generationModule, "generateLigandHCTGridWithDerivatives");

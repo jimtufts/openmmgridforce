@@ -429,8 +429,11 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         atomEnergies.initialize<float>(cu, totalParticles, "isolatedGbsaAtomEnergies");
     }
 
-    // Compile CUDA kernels (all kernels are in gridForceKernel)
-    CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+    CUmodule module = cu.createModule(
+        CudaGridForceKernelSources::commonHeaders +
+        CudaGridForceKernelSources::gbsaGridForceKernel +
+        CudaGridForceKernelSources::gbsaGridGenerationKernel +
+        CudaGridForceKernelSources::isolatedGBSAKernel);
     computeLigandHCTKernel = cu.getKernel(module, "computeIsolatedLigandHCT");
     generateCrossTermGridKernel = cu.getKernel(module, "generateCrossTermGrid");
     computeCrossTermFromGridKernel = cu.getKernel(module, "computeCrossTermFromGrid");
@@ -1385,7 +1388,11 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
         std::vector<int> dummyAtoms(1, 0);
         hessianDummyExclAtoms.upload(dummyAtoms);
 
-        CUmodule module = cu.createModule(CudaGridForceKernelSources::gridForceKernel);
+        CUmodule module = cu.createModule(
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::gbsaGridForceKernel +
+            CudaGridForceKernelSources::isolatedGBSAKernel +
+            CudaGridForceKernelSources::gbsaHessianDoubleKernel);
         prepareHessianIntermediatesKernel        = cu.getKernel(module, "prepareHessianIntermediates");
         computeHCTJacobianPairwiseKernel         = cu.getKernel(module, "computeHCTJacobianPairwise");
         computeReceptorPairwiseHessianKernel     = cu.getKernel(module, "computeReceptorPairwiseHessian");
