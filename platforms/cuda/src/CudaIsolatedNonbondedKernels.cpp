@@ -157,15 +157,10 @@ void CudaCalcIsolatedNonbondedForceKernel::initialize(const System& system, cons
         exceptionParams.initialize<float3>(cu, 1, "isolatedNB_exceptionParams");
     }
 
-    // Load CUDA kernel
-    map<string, string> defines;
-    defines["NUM_ATOMS"] = cu.intToString(numAtoms);
-    defines["NUM_EXCLUSIONS"] = cu.intToString(numExclusions);
-    defines["NUM_EXCEPTIONS"] = cu.intToString(numExceptions);
-
+    // Load CUDA kernel — no per-ligand defines so NVRTC cache hits across systems
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::isolatedNonbondedKernel, defines);
+        CudaGridForceKernelSources::isolatedNonbondedKernel);
     kernel = cu.getKernel(module, "computeIsolatedNonbonded");
 
     hasInitializedKernel = true;
@@ -206,6 +201,8 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
     CUdeviceptr groupEnergiesPtr = groupEnergiesBuffer.getDevicePointer();
     CUdeviceptr groupScalingFactorsPtr = groupScalingFactorsBuffer.getDevicePointer();
 
+    int numExclusions = exclusions.getSize() > 1 ? (int)exclusions.getSize() : 0;
+    int numExceptions = exceptions.getSize() > 1 ? (int)exceptions.getSize() : 0;
     void* args[] = {
         &posqPtr,
         &forcePtr,
@@ -224,6 +221,8 @@ double CudaCalcIsolatedNonbondedForceKernel::execute(ContextImpl& context, bool 
         &numPairs,
         &numParticleGroups,
         &paddedNumAtoms,
+        &numExclusions,
+        &numExceptions,
         &includeEnergy
     };
 
@@ -301,14 +300,9 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
 
     // Initialize Hessian kernel if not already done
     if (hessianKernel == nullptr) {
-        map<string, string> defines;
-        defines["NUM_ATOMS"] = cu.intToString(numAtoms);
-        defines["NUM_EXCLUSIONS"] = cu.intToString(exclusions.getSize() > 1 ? exclusions.getSize() : 0);
-        defines["NUM_EXCEPTIONS"] = cu.intToString(exceptions.getSize() > 1 ? exceptions.getSize() : 0);
-
         CUmodule module = cu.createModule(
-        CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::isolatedNonbondedKernel, defines);
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::isolatedNonbondedKernel);
         hessianKernel = cu.getKernel(module, "computeIsolatedNonbondedHessians");
     }
 
@@ -336,6 +330,8 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     CUdeviceptr exceptionParamsPtr = exceptionParams.getDevicePointer();
     CUdeviceptr hessianPtr = hessianBuffer.getDevicePointer();
 
+    int numExclusions = exclusions.getSize() > 1 ? (int)exclusions.getSize() : 0;
+    int numExceptions = exceptions.getSize() > 1 ? (int)exceptions.getSize() : 0;
     void* args[] = {
         &posqPtr,
         &particleIndicesPtr,
@@ -348,7 +344,9 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
         &hessianPtr,
         &numAtoms,
         &numPairs,
-        &paddedNumAtoms
+        &paddedNumAtoms,
+        &numExclusions,
+        &numExceptions
     };
 
     // Launch kernel - one thread per pair
@@ -403,14 +401,9 @@ void CudaCalcIsolatedNonbondedForceKernel::computeDiagonalHessianGPU() {
         int totalElements = 6 * numParticleGroups * numAtoms;
         diagHessianBuffer.initialize<float>(cu, totalElements, "nbDiagHessian");
 
-        map<string, string> defines;
-        defines["NUM_ATOMS"] = cu.intToString(numAtoms);
-        defines["NUM_EXCLUSIONS"] = cu.intToString(exclusions.getSize() > 1 ? exclusions.getSize() : 0);
-        defines["NUM_EXCEPTIONS"] = cu.intToString(exceptions.getSize() > 1 ? exceptions.getSize() : 0);
-
         CUmodule module = cu.createModule(
-        CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::isolatedNonbondedKernel, defines);
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::isolatedNonbondedKernel);
         diagHessianKernel = cu.getKernel(module, "computeIsolatedNonbondedDiagHessian");
 
         diagHessianInitialized = true;
@@ -434,6 +427,8 @@ void CudaCalcIsolatedNonbondedForceKernel::computeDiagonalHessianGPU() {
     CUdeviceptr exceptionParamsPtr = exceptionParams.getDevicePointer();
     CUdeviceptr diagPtr = diagHessianBuffer.getDevicePointer();
 
+    int numExclusions = exclusions.getSize() > 1 ? (int)exclusions.getSize() : 0;
+    int numExceptions = exceptions.getSize() > 1 ? (int)exceptions.getSize() : 0;
     void* args[] = {
         &posqPtr,
         &groupIndicesPtr,
@@ -446,7 +441,9 @@ void CudaCalcIsolatedNonbondedForceKernel::computeDiagonalHessianGPU() {
         &diagPtr,
         &numAtoms,
         &numPairs,
-        &numParticleGroups
+        &numParticleGroups,
+        &numExclusions,
+        &numExceptions
     };
 
     cu.executeKernel(diagHessianKernel, args, numBlocks * blockSize, blockSize);

@@ -134,16 +134,10 @@ void CudaCalcIsolatedBondedForceKernel::initialize(const System& system, const I
         torsionParams.initialize<float4>(cu, 1, "isolatedBonded_torsionParams");
     }
 
-    // Load CUDA kernels
-    map<string, string> defines;
-    defines["NUM_ATOMS_BONDED"] = cu.intToString(numAtoms);
-    defines["NUM_BONDS"] = cu.intToString(numBonds);
-    defines["NUM_ANGLES"] = cu.intToString(numAngles);
-    defines["NUM_TORSIONS"] = cu.intToString(numTorsions);
-
+    // Load CUDA kernels — no per-ligand defines so NVRTC cache hits across systems
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::isolatedBondedKernel, defines);
+        CudaGridForceKernelSources::isolatedBondedKernel);
     if (numBonds > 0)
         bondKernel = cu.getKernel(module, "computeIsolatedBonds");
     if (numAngles > 0)
@@ -428,15 +422,9 @@ void CudaCalcIsolatedBondedForceKernel::computeDiagonalHessianGPU() {
         int totalElements = 6 * numParticleGroups * numAtoms;
         diagHessianBuffer.initialize<float>(cu, totalElements, "bondedDiagHessian");
 
-        // Load kernels from the already-compiled module
-        map<string, string> defines;
-        defines["NUM_ATOMS"] = cu.intToString(numAtoms);
-        defines["NUM_BONDS"] = cu.intToString(numBonds);
-        defines["NUM_ANGLES"] = cu.intToString(numAngles);
-        defines["NUM_TORSIONS"] = cu.intToString(numTorsions);
         CUmodule module = cu.createModule(
-        CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::isolatedBondedKernel, defines);
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::isolatedBondedKernel);
 
         if (numBonds > 0)
             bondDiagHessianKernel = cu.getKernel(module, "computeIsolatedBondDiagHessian");

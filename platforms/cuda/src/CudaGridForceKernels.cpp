@@ -2667,13 +2667,10 @@ void CudaCalcBondedHessianKernel::initialize(const System& system) {
     int hessianSize = 3 * numAtoms;
     hessianBuffer.initialize<float>(cu, hessianSize * hessianSize, "bondedHessian_hessian");
 
-    // Load CUDA kernels
-    map<string, string> defines;
-    defines["NUM_ATOMS"] = cu.intToString(numAtoms);
-
+    // Load CUDA kernels — no per-ligand defines so NVRTC cache hits across systems
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::bondedHessianKernel, defines);
+        CudaGridForceKernelSources::bondedHessianKernel);
     bondHessianKernel = cu.getKernel(module, "computeBondHessians");
     angleHessianKernel = cu.getKernel(module, "computeAngleHessians");
     torsionHessianKernel = cu.getKernel(module, "computeTorsionHessians");

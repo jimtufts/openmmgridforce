@@ -37,6 +37,8 @@ extern "C" __global__ void computeIsolatedNonbonded(
     const int numPairs,
     const int numGroups,
     const int paddedNumAtoms,
+    const int numExclusions,
+    const int numExceptions,
     const bool includeEnergy) {
 
     // Coulomb constant in kJ*nm/(mol*e^2)
@@ -65,24 +67,21 @@ extern "C" __global__ void computeIsolatedNonbonded(
         int i, j;
         decodePairIndex(pairIdx, &i, &j, numAtoms);
 
-        // Check if this pair is excluded
+        // Check if this pair is excluded (runtime numExclusions; loop is no-op when 0)
         bool excluded = false;
-#if NUM_EXCLUSIONS > 0
-        for (int k = 0; k < NUM_EXCLUSIONS; k++) {
+        for (int k = 0; k < numExclusions; k++) {
             int2 excl = exclusions[k];
             if ((excl.x == i && excl.y == j) || (excl.x == j && excl.y == i)) {
                 excluded = true;
                 break;
             }
         }
-#endif
         if (excluded) continue;
 
         // Check if this pair is an exception (1-4 interaction with custom parameters)
         bool isException = false;
         real qq, sigma, epsilon;
-#if NUM_EXCEPTIONS > 0
-        for (int k = 0; k < NUM_EXCEPTIONS; k++) {
+        for (int k = 0; k < numExceptions; k++) {
             int2 exc = exceptions[k];
             if ((exc.x == i && exc.y == j) || (exc.x == j && exc.y == i)) {
                 isException = true;
@@ -93,7 +92,6 @@ extern "C" __global__ void computeIsolatedNonbonded(
                 break;
             }
         }
-#endif
 
         // If not an exception, use standard combining rules
         if (!isException) {
@@ -181,7 +179,9 @@ extern "C" __global__ void computeIsolatedNonbondedHessians(
     unsigned long long* __restrict__ hessianBlocks, // Output: fixed-point 3x3 blocks [numAtoms*numAtoms*9]
     const int numAtoms,
     const int numPairs,
-    const int paddedNumAtoms) {
+    const int paddedNumAtoms,
+    const int numExclusions,
+    const int numExceptions) {
 
     // Coulomb constant in kJ*nm/(mol*e^2)
     const real COULOMB_CONST = 138.935456f;
@@ -194,24 +194,21 @@ extern "C" __global__ void computeIsolatedNonbondedHessians(
     int i, j;
     decodePairIndex(pairIdx, &i, &j, numAtoms);
 
-    // Check if this pair is excluded
+    // Check if this pair is excluded (runtime numExclusions; loop is no-op when 0)
     bool excluded = false;
-#if NUM_EXCLUSIONS > 0
-    for (int k = 0; k < NUM_EXCLUSIONS; k++) {
+    for (int k = 0; k < numExclusions; k++) {
         int2 excl = exclusions[k];
         if ((excl.x == i && excl.y == j) || (excl.x == j && excl.y == i)) {
             excluded = true;
             break;
         }
     }
-#endif
     if (excluded) return;
 
     // Check if this pair is an exception (1-4 interaction with custom parameters)
     bool isException = false;
     real qq, sigma, epsilon;
-#if NUM_EXCEPTIONS > 0
-    for (int k = 0; k < NUM_EXCEPTIONS; k++) {
+    for (int k = 0; k < numExceptions; k++) {
         int2 exc = exceptions[k];
         if ((exc.x == i && exc.y == j) || (exc.x == j && exc.y == i)) {
             isException = true;
@@ -222,7 +219,6 @@ extern "C" __global__ void computeIsolatedNonbondedHessians(
             break;
         }
     }
-#endif
 
     // If not an exception, use standard combining rules
     if (!isException) {
@@ -377,7 +373,9 @@ extern "C" __global__ void computeIsolatedNonbondedDiagHessian(
     float* __restrict__ diagHessian,
     const int numAtoms,
     const int numPairs,
-    const int numGroups) {
+    const int numGroups,
+    const int numExclusions,
+    const int numExceptions) {
 
     const real COULOMB_CONST = 138.935456f;
 
@@ -393,24 +391,21 @@ extern "C" __global__ void computeIsolatedNonbondedDiagHessian(
         int i, j;
         decodePairIndex(pairIdx, &i, &j, numAtoms);
 
-        // Check exclusions
+        // Check exclusions (runtime numExclusions; loop is no-op when 0)
         bool excluded = false;
-#if NUM_EXCLUSIONS > 0
-        for (int k = 0; k < NUM_EXCLUSIONS; k++) {
+        for (int k = 0; k < numExclusions; k++) {
             int2 excl = exclusions[k];
             if ((excl.x == i && excl.y == j) || (excl.x == j && excl.y == i)) {
                 excluded = true;
                 break;
             }
         }
-#endif
         if (excluded) continue;
 
         // Check exceptions
         bool isException = false;
         real qq, sigma, epsilon;
-#if NUM_EXCEPTIONS > 0
-        for (int k = 0; k < NUM_EXCEPTIONS; k++) {
+        for (int k = 0; k < numExceptions; k++) {
             int2 exc = exceptions[k];
             if ((exc.x == i && exc.y == j) || (exc.x == j && exc.y == i)) {
                 isException = true;
@@ -421,7 +416,6 @@ extern "C" __global__ void computeIsolatedNonbondedDiagHessian(
                 break;
             }
         }
-#endif
         if (!isException) {
             qq = charges[i] * charges[j];
             sigma = (sigmas[i] + sigmas[j]) * 0.5f;
