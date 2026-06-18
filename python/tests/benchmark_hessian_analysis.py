@@ -696,7 +696,8 @@ def compute_total_entropy_hybrid(context, grid_forces_dict, system,
                                    isolated_nb_force=None, temperature=300.0,
                                    is_bound=False, sigma_rot=1, scan_points=64,
                                    isolated_bonded_force=None,
-                                   isolated_gbsa_force=None):
+                                   isolated_gbsa_force=None,
+                                   method='hybrid'):
     """v2 hybrid entropy: vibrational quantum HO + translation (gas) + rotation
     (gas) + per-torsion Pitzer-Gwinn or Fourier DVR.
 
@@ -772,13 +773,10 @@ def compute_total_entropy_hybrid(context, grid_forces_dict, system,
         })
 
     # 3. Vibrational HO entropy
-    # For gas: project out torsions (they're multi-well anharmonic, need DVR).
-    # For bound: keep torsions in the Hessian — pocket clamps them to a single
-    # well, so the bound torsion motion is harmonic and is captured correctly
-    # by the bound vibrational spectrum. Rigid-rotation scans through the
-    # receptor produce delta-needle V(phi) and DVR returns 0; skipping the
-    # projection avoids double-removing those modes.
-    if is_bound:
+    # method='hybrid' (default): gas projects out torsions for DVR, bound keeps
+    # them in the Hessian. method='harmonic': pure-NMA treatment — all DOF stay
+    # in the Hessian, no DVR. Used as a baseline for comparison.
+    if is_bound or method == 'harmonic':
         H_for_vib = H_mw
         n_torsions_projected = 0
     else:
@@ -806,13 +804,12 @@ def compute_total_entropy_hybrid(context, grid_forces_dict, system,
         S_trans = 0.0
         S_rot = 0.0
 
-    # 5. Per-torsion entropy via scan + PG/DVR router (gas only)
-    # In bound state, torsion motion is captured by the un-projected Hessian's
-    # low-frequency vibrational modes, so we skip DVR scans entirely. (Rigid
-    # rotation through the receptor produces unphysical V(phi) needles anyway.)
+    # 5. Per-torsion entropy via scan + PG/DVR router (gas, hybrid method only).
+    # In bound state OR harmonic method, torsion motion stays in the Hessian
+    # and is captured as low-frequency vibrational modes — skip DVR scans.
     S_tors = 0.0
     torsion_log = []
-    if not is_bound:
+    if not is_bound and method == 'hybrid':
         for tmeta in torsion_meta:
             phi_grid, V_grid = scan_torsion(
                 context, tmeta['representative_indices'], bond_list, n_points=scan_points)

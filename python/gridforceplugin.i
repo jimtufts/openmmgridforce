@@ -1317,45 +1317,27 @@ public:
             offset += 4
         return {'bonds': bonds, 'angles': angles, 'torsions': torsions}
 
-    def computeInternalEntropy(self, context, system, grid_forces=None, temperature=300.0):
+    def getWilsonBMatrix(self, context, system):
         """
-        Compute entropy in internal coordinates using scalar force constants
-        and the Wilson GF-matrix for effective masses.
+        Build the Wilson B-matrix for all internal coordinates at the current geometry.
 
-        Optionally projects grid Hessian blocks into internal coordinate space
-        via the Wilson B-matrix, adding external stiffness contributions.
+        Row i of B is dq_i/dx (the gradient of internal coordinate q_i with respect to
+        all 3N Cartesian coordinates). Rows are ordered: bonds, angles, torsions, matching
+        getAtomIndicesPerDOF(). Bond rows are dimensionless; angle and torsion rows are in
+        units of 1/nm. Torsion rows use the Blondel-Karplus formulation (G1, G2, G3, G4).
 
         Args:
             context: OpenMM Context with current positions
-            system: OpenMM System (for masses)
-            grid_forces: dict of {name: GridForce} or None. If provided,
-                         grid Hessian blocks are projected into internal coords.
-            temperature: Temperature in K (default 300)
+            system: OpenMM System (for n_atoms)
 
         Returns:
-            dict with:
-                'total_classical_entropy_kB': total classical entropy in kB
-                'total_quantum_entropy_kB': total quantum entropy in kB
-                'bond_entropies_kB': per-bond classical entropy
-                'angle_entropies_kB': per-angle classical entropy
-                'torsion_entropies_kB': per-torsion classical entropy
-                'force_constants': dict from getInternalForceConstants
-                'effective_masses': effective mass per DOF in daltons
-                'frequencies_cm1': vibrational frequency per DOF in cm^-1
-                'n_negative': count of DOF with negative force constants
+            numpy.ndarray of shape (n_dof, 3*n_atoms)
         """
         import numpy as np
-        from openmm import unit as omm_unit
 
-        fc_dict = self.getInternalForceConstants(context)
         atom_idx = self.getAtomIndicesPerDOF()
-
-        # Get masses in daltons
         n_atoms = system.getNumParticles()
-        masses = np.array([system.getParticleMass(i).value_in_unit(omm_unit.dalton)
-                           for i in range(n_atoms)])
 
-        # Get positions in nm
         state = context.getState(getPositions=True)
         pos = np.array([[v.x, v.y, v.z] for v in state.getPositions()])
 
@@ -1364,9 +1346,6 @@ public:
         nt = self.getNumTorsions()
         n_dof = nb + na + nt
 
-        # Compute Wilson B-matrix rows and effective masses (G-matrix diagonal)
-        # B[i,:] = dq_i/dx (gradient of internal coordinate i w.r.t. all Cartesian coords)
-        # g_ii = sum_atoms (dq/dr_atom)^2 / m_atom = B[i,:] @ M_inv @ B[i,:]
         B = np.zeros((n_dof, 3 * n_atoms))
         dof_idx = 0
 
@@ -1398,9 +1377,6 @@ public:
             if sin_theta < 1e-10:
                 dof_idx += 1
                 continue
-            # dtheta/dr1 = -(1/(L1*sin_theta)) * (e3 - cos_theta*e1)
-            # dtheta/dr3 = -(1/(L3*sin_theta)) * (e1 - cos_theta*e3)
-            # dtheta/dr2 = -(dtheta/dr1 + dtheta/dr3)
             g1 = -(e3 - cos_theta * e1) / (L1 * sin_theta)
             g3 = -(e1 - cos_theta * e3) / (L3 * sin_theta)
             g2 = -(g1 + g3)
@@ -1439,13 +1415,75 @@ public:
             B[dof_idx, 3*l:3*l+3] = G4
             dof_idx += 1
 
-        # G-matrix diagonal: g_ii = B[i,:] @ M_inv @ B[i,:]
+        return B
+
+    def getEffectiveMasses(self, context, system):
+        """
+        Effective masses (reciprocal of Wilson G-matrix diagonal) for each internal DOF.
+
+        mu_i = 1 / (B[i,:] @ M_inv @ B[i,:])
+
+        For bonds this is the reduced mass in daltons; for angles and torsions it has units
+        of dalton/nm^2 because B is in 1/nm — consistent with the convention used elsewhere
+        in this module (omega^2 = k / mu yields rad^2/ps^2 when k is in kJ/(mol*rad^2)).
+
+        Args:
+            context: OpenMM Context with current positions
+            system: OpenMM System (for masses)
+
+        Returns:
+            numpy.ndarray of shape (n_dof,) — effective masses
+        """
+        import numpy as np
+        from openmm import unit as omm_unit
+
+        B = self.getWilsonBMatrix(context, system)
+        n_atoms = system.getNumParticles()
+        masses = np.array([system.getParticleMass(i).value_in_unit(omm_unit.dalton)
+                           for i in range(n_atoms)])
         mass_3n = np.repeat(masses, 3)
         inv_mass = 1.0 / mass_3n
-        effective_masses = np.zeros(n_dof)
-        for i in range(n_dof):
-            g_ii = np.dot(B[i, :] ** 2, inv_mass)
-            effective_masses[i] = 1.0 / g_ii if g_ii > 1e-30 else 1e30
+        g_diag = (B ** 2) @ inv_mass
+        return np.where(g_diag > 1e-30, 1.0 / np.where(g_diag > 0, g_diag, 1.0), 1e30)
+
+    def computeInternalEntropy(self, context, system, grid_forces=None, temperature=300.0):
+        """
+        Compute entropy in internal coordinates using scalar force constants
+        and the Wilson GF-matrix for effective masses.
+
+        Optionally projects grid Hessian blocks into internal coordinate space
+        via the Wilson B-matrix, adding external stiffness contributions.
+
+        Args:
+            context: OpenMM Context with current positions
+            system: OpenMM System (for masses)
+            grid_forces: dict of {name: GridForce} or None. If provided,
+                         grid Hessian blocks are projected into internal coords.
+            temperature: Temperature in K (default 300)
+
+        Returns:
+            dict with:
+                'total_classical_entropy_kB': total classical entropy in kB
+                'total_quantum_entropy_kB': total quantum entropy in kB
+                'bond_entropies_kB': per-bond classical entropy
+                'angle_entropies_kB': per-angle classical entropy
+                'torsion_entropies_kB': per-torsion classical entropy
+                'force_constants': dict from getInternalForceConstants
+                'effective_masses': effective mass per DOF in daltons
+                'frequencies_cm1': vibrational frequency per DOF in cm^-1
+                'n_negative': count of DOF with negative force constants
+        """
+        import numpy as np
+
+        fc_dict = self.getInternalForceConstants(context)
+        n_atoms = system.getNumParticles()
+        nb = self.getNumBonds()
+        na = self.getNumAngles()
+        nt = self.getNumTorsions()
+        n_dof = nb + na + nt
+
+        B = self.getWilsonBMatrix(context, system)
+        effective_masses = self.getEffectiveMasses(context, system)
 
         # Start with bonded force constants
         f_total = fc_dict['all'].copy()
