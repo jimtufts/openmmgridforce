@@ -431,7 +431,7 @@ __device__ void triquinticInterpolateTiled(
  * Computes forces using tile-based grid storage.
  */
 extern "C" __global__ void computeGridForceTiled(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     unsigned long long* __restrict__ forceBuffers,
     const int* __restrict__ gridCounts,        // Full grid dimensions
     const float* __restrict__ gridSpacing,
@@ -443,7 +443,7 @@ extern "C" __global__ void computeGridForceTiled(
     const float originX,
     const float originY,
     const float originZ,
-    float* __restrict__ energyBuffer,
+    mixed* __restrict__ energyBuffer,
     const int numAtoms,
     const int paddedNumAtoms,
     const int* __restrict__ particleIndices,
@@ -477,7 +477,7 @@ extern "C" __global__ void computeGridForceTiled(
 
     const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
-    float4 posOrig = posq[particleIndex];
+    real4 posOrig = posq[particleIndex];
     float groupScale = 1.0f;
     if (groupScalingFactors != 0 && particleToGroupMap != 0) {
         int groupIdx = particleToGroupMap[particleIndex];
@@ -836,11 +836,11 @@ extern "C" __global__ void computeGridForceTiled(
             }
         } else {
             // Particle not in any group - add to total
-            atomicAdd(energyBuffer, threadEnergy);
+            atomicAdd(energyBuffer, (mixed)threadEnergy);
         }
     } else {
         // No group tracking - add to total
-        atomicAdd(energyBuffer, threadEnergy);
+        atomicAdd(energyBuffer, (mixed)threadEnergy);
     }
 
     // Convert force to fixed point and accumulate
