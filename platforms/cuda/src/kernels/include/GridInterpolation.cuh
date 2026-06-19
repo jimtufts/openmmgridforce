@@ -321,7 +321,7 @@ __device__ inline InterpolationResult tricubicInterpolate(
     const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
 
     // Storage: X[deriv*8 + corner] - DERIVATIVE-MAJOR (matches RASPA3/Lekien-Marsden)
-    float X[64];
+    TricubicAccum X[64];
     for (int d = 0; d < 8; d++) {
         for (int c = 0; c < 8; c++) {
             int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
@@ -329,42 +329,12 @@ __device__ inline InterpolationResult tricubicInterpolate(
         }
     }
 
-    // Multiply X by TRICUBIC_COEFFICIENTS matrix to get polynomial coefficients
-    float a[64];
-    for (int i = 0; i < 64; i++) {
-        a[i] = 0.0f;
-        for (int j = 0; j < 64; j++) {
-            a[i] += TRICUBIC_COEFFICIENTS[i][j] * X[j];
-        }
-    }
-
-    // Evaluate tricubic polynomial P(x,y,z) = sum_{i,j,k=0}^3 a_{ijk} * x^i * y^j * z^k
-    float interpolated = 0.0f;
-    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
-
-    for (int k = 0; k < 4; k++) {
-        float fz_pow_k = (k == 0) ? 1.0f : (k == 1) ? fz : (k == 2) ? fz*fz : fz*fz*fz;
-        float fz_pow_k_deriv = (k == 0) ? 0.0f : (k == 1) ? 1.0f : (k == 2) ? 2.0f*fz : 3.0f*fz*fz;
-
-        for (int j = 0; j < 4; j++) {
-            float fy_pow_j = (j == 0) ? 1.0f : (j == 1) ? fy : (j == 2) ? fy*fy : fy*fy*fy;
-            float fy_pow_j_deriv = (j == 0) ? 0.0f : (j == 1) ? 1.0f : (j == 2) ? 2.0f*fy : 3.0f*fy*fy;
-
-            for (int i = 0; i < 4; i++) {
-                float fx_pow_i = (i == 0) ? 1.0f : (i == 1) ? fx : (i == 2) ? fx*fx : fx*fx*fx;
-                float fx_pow_i_deriv = (i == 0) ? 0.0f : (i == 1) ? 1.0f : (i == 2) ? 2.0f*fx : 3.0f*fx*fx;
-
-                float coeff = a[i + 4*j + 16*k];
-
-                interpolated += coeff * fx_pow_i * fy_pow_j * fz_pow_k;
-                if (computeGradient) {
-                    dx += coeff * fx_pow_i_deriv * fy_pow_j * fz_pow_k;
-                    dy += coeff * fx_pow_i * fy_pow_j_deriv * fz_pow_k;
-                    dz += coeff * fx_pow_i * fy_pow_j * fz_pow_k_deriv;
-                }
-            }
-        }
-    }
+    // Assemble + evaluate via the shared double-precision helpers (the fp32
+    // 64-solve loses cross-cell C1 continuity and perturbs L-BFGS).
+    TricubicAccum a[64];
+    tricubicAssemble(X, a);
+    TricubicAccum interpolated, dx, dy, dz;
+    tricubicEvalVG(a, fx, fy, fz, &interpolated, &dx, &dy, &dz);
 
     result.value = interpolated;
 

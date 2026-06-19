@@ -166,4 +166,50 @@ __constant__ float TRICUBIC_COEFFICIENTS[64][64] = {
      2,  2,  -2, -2, 2,  -2, 2, -2, 2,  -2, 2,  -2, 1,  1,  1,  1,  1,  1,  1, 1}
 };
 
+// ---------------------------------------------------------------------------
+// Shared tricubic assembly + evaluation (precision-controlled).
+//
+// Same ill-conditioning as triquintic: the per-cell 64-coefficient solve
+// a = M * X loses cross-cell C1 continuity in fp32 (milder than triquintic --
+// C1 not C2, 64 vs 216 terms -- but still a discontinuity that perturbs L-BFGS).
+// Done in TricubicAccum = double (free: bandwidth-bound on the coefficient matrix).
+// Callers gather the 64 derivatives into X (site-specific), then use these.
+// ---------------------------------------------------------------------------
+typedef double TricubicAccum;
+
+__device__ inline void tricubicAssemble(const TricubicAccum X[64], TricubicAccum a[64]) {
+    for (int i = 0; i < 64; i++) {
+        TricubicAccum s = 0.0;
+        for (int j = 0; j < 64; j++) {
+            s += (TricubicAccum)TRICUBIC_COEFFICIENTS[i][j] * X[j];
+        }
+        a[i] = s;
+    }
+}
+
+// value + gradient w.r.t. fractional cell coords (fx,fy,fz in [0,1]).
+__device__ inline void tricubicEvalVG(
+    const TricubicAccum a[64], TricubicAccum fx, TricubicAccum fy, TricubicAccum fz,
+    TricubicAccum* value, TricubicAccum* gx, TricubicAccum* gy, TricubicAccum* gz)
+{
+    TricubicAccum px[4], py[4], pz[4], dpx[4], dpy[4], dpz[4];
+    px[0]=1.0; px[1]=fx; px[2]=fx*fx; px[3]=fx*fx*fx;
+    py[0]=1.0; py[1]=fy; py[2]=fy*fy; py[3]=fy*fy*fy;
+    pz[0]=1.0; pz[1]=fz; pz[2]=fz*fz; pz[3]=fz*fz*fz;
+    dpx[0]=0.0; dpx[1]=1.0; dpx[2]=2.0*fx; dpx[3]=3.0*fx*fx;
+    dpy[0]=0.0; dpy[1]=1.0; dpy[2]=2.0*fy; dpy[3]=3.0*fy*fy;
+    dpz[0]=0.0; dpz[1]=1.0; dpz[2]=2.0*fz; dpz[3]=3.0*fz*fz;
+    TricubicAccum v=0.0, vx=0.0, vy=0.0, vz=0.0;
+    for (int k = 0; k < 4; k++)
+        for (int j = 0; j < 4; j++)
+            for (int i = 0; i < 4; i++) {
+                TricubicAccum c = a[i + 4*j + 16*k];
+                v  += c * px[i]  * py[j]  * pz[k];
+                vx += c * dpx[i] * py[j]  * pz[k];
+                vy += c * px[i]  * dpy[j] * pz[k];
+                vz += c * px[i]  * py[j]  * dpz[k];
+            }
+    *value=v; *gx=vx; *gy=vy; *gz=vz;
+}
+
 #endif // TRICUBIC_COEFFICIENTS_CUH
