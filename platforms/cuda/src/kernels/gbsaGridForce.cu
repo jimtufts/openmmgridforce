@@ -712,54 +712,23 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                     float corr_d2xx = 0, corr_d2yy = 0, corr_d2zz = 0;
                     float corr_d2xy = 0, corr_d2xz = 0, corr_d2yz = 0;
 
-                    float sx_pow[6], sy_pow[6], sz_pow[6];
-                    sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
-                    for (int p = 1; p < 6; p++) {
-                        sx_pow[p] = sx_pow[p-1] * fx;
-                        sy_pow[p] = sy_pow[p-1] * fy;
-                        sz_pow[p] = sz_pow[p-1] * fz;
-                    }
-
                     // Evaluate each grid (HCT, N, A, B) separately
                     const float* gridPtrs[4] = {gridHctDerivatives, nGrid, aGrid, bGrid};
                     float coeffs[4] = {1.0f, dCorr_dN, dCorr_dA, dCorr_dB};
 
                     for (int g = 0; g < 4; g++) {
-                        float X[216];
+                        TriquinticAccum X[216];
                         for (int d = 0; d < 27; d++) {
                             for (int c = 0; c < 8; c++) {
                                 int pidx = corners[c][0]*nyz + corners[c][1]*nz + corners[c][2];
                                 X[d*8 + c] = gridPtrs[g][d * numPoints + pidx];
                             }
                         }
-                        float a[216];
-                        const float scale = 0.125f;
-                        for (int i = 0; i < 216; i++) {
-                            a[i] = 0.0f;
-                            for (int j = 0; j < 216; j++)
-                                a[i] += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
-                            a[i] *= scale;
-                        }
-
-                        float gv = 0, gdx = 0, gdy = 0, gdz = 0;
-                        float gd2xx = 0, gd2yy = 0, gd2zz = 0, gd2xy = 0, gd2xz = 0, gd2yz = 0;
-                        for (int kk = 0; kk < 6; kk++) {
-                            for (int jj = 0; jj < 6; jj++) {
-                                for (int ii = 0; ii < 6; ii++) {
-                                    float coeff = a[ii + 6*jj + 36*kk];
-                                    gv += coeff * sx_pow[ii] * sy_pow[jj] * sz_pow[kk];
-                                    if (ii >= 1) gdx += coeff * ii * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk];
-                                    if (jj >= 1) gdy += coeff * jj * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk];
-                                    if (kk >= 1) gdz += coeff * kk * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-1];
-                                    if (ii >= 2) gd2xx += coeff * (ii*(ii-1)) * sx_pow[ii-2] * sy_pow[jj] * sz_pow[kk];
-                                    if (jj >= 2) gd2yy += coeff * (jj*(jj-1)) * sx_pow[ii] * sy_pow[jj-2] * sz_pow[kk];
-                                    if (kk >= 2) gd2zz += coeff * (kk*(kk-1)) * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-2];
-                                    if (ii >= 1 && jj >= 1) gd2xy += coeff * (ii*jj) * sx_pow[ii-1] * sy_pow[jj-1] * sz_pow[kk];
-                                    if (ii >= 1 && kk >= 1) gd2xz += coeff * (ii*kk) * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk-1];
-                                    if (jj >= 1 && kk >= 1) gd2yz += coeff * (jj*kk) * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk-1];
-                                }
-                            }
-                        }
+                        TriquinticAccum a[216];
+                        triquinticAssemble(X, a);
+                        TriquinticAccum gv, gdx, gdy, gdz, gd2xx, gd2yy, gd2zz, gd2xy, gd2xz, gd2yz;
+                        triquinticEvalVGH(a, fx, fy, fz, &gv, &gdx, &gdy, &gdz,
+                                          &gd2xx, &gd2yy, &gd2zz, &gd2xy, &gd2xz, &gd2yz);
 
                         float w = coeffs[g];
                         if (g == 0) {
@@ -802,51 +771,22 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                     float corr_d2xx = 0, corr_d2yy = 0, corr_d2zz = 0;
                     float corr_d2xy = 0, corr_d2xz = 0, corr_d2yz = 0;
 
-                    float sx_pow[4], sy_pow[4], sz_pow[4];
-                    sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
-                    for (int p = 1; p < 4; p++) {
-                        sx_pow[p] = sx_pow[p-1] * fx;
-                        sy_pow[p] = sy_pow[p-1] * fy;
-                        sz_pow[p] = sz_pow[p-1] * fz;
-                    }
-
                     const float* gridPtrs[4] = {gridHctDerivatives, nGrid, aGrid, bGrid};
                     float wt[4] = {1.0f, dCorr_dN, dCorr_dA, dCorr_dB};
 
                     for (int g = 0; g < 4; g++) {
-                        float X[64];
+                        TricubicAccum X[64];
                         for (int d = 0; d < 8; d++) {
                             for (int c = 0; c < 8; c++) {
                                 int pidx = corners[c][0]*nyz + corners[c][1]*nz + corners[c][2];
                                 X[d*8 + c] = gridPtrs[g][derivMap[d] * numPoints + pidx];
                             }
                         }
-                        float a[64];
-                        for (int i = 0; i < 64; i++) {
-                            a[i] = 0.0f;
-                            for (int j = 0; j < 64; j++)
-                                a[i] += TRICUBIC_COEFFICIENTS[i][j] * X[j];
-                        }
-
-                        float gv = 0, gdx = 0, gdy = 0, gdz = 0;
-                        float gd2xx = 0, gd2yy = 0, gd2zz = 0, gd2xy = 0, gd2xz = 0, gd2yz = 0;
-                        for (int kk = 0; kk < 4; kk++) {
-                            for (int jj = 0; jj < 4; jj++) {
-                                for (int ii = 0; ii < 4; ii++) {
-                                    float coeff = a[ii + 4*jj + 16*kk];
-                                    gv += coeff * sx_pow[ii] * sy_pow[jj] * sz_pow[kk];
-                                    if (ii >= 1) gdx += coeff * ii * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk];
-                                    if (jj >= 1) gdy += coeff * jj * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk];
-                                    if (kk >= 1) gdz += coeff * kk * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-1];
-                                    if (ii >= 2) gd2xx += coeff * (ii*(ii-1)) * sx_pow[ii-2] * sy_pow[jj] * sz_pow[kk];
-                                    if (jj >= 2) gd2yy += coeff * (jj*(jj-1)) * sx_pow[ii] * sy_pow[jj-2] * sz_pow[kk];
-                                    if (kk >= 2) gd2zz += coeff * (kk*(kk-1)) * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-2];
-                                    if (ii >= 1 && jj >= 1) gd2xy += coeff * (ii*jj) * sx_pow[ii-1] * sy_pow[jj-1] * sz_pow[kk];
-                                    if (ii >= 1 && kk >= 1) gd2xz += coeff * (ii*kk) * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk-1];
-                                    if (jj >= 1 && kk >= 1) gd2yz += coeff * (jj*kk) * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk-1];
-                                }
-                            }
-                        }
+                        TricubicAccum a[64];
+                        tricubicAssemble(X, a);
+                        TricubicAccum gv, gdx, gdy, gdz, gd2xx, gd2yy, gd2zz, gd2xy, gd2xz, gd2yz;
+                        tricubicEvalVGH(a, fx, fy, fz, &gv, &gdx, &gdy, &gdz,
+                                        &gd2xx, &gd2yy, &gd2zz, &gd2xy, &gd2xz, &gd2yz);
 
                         float w = wt[g];
                         if (g == 0) {
@@ -888,78 +828,39 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
 
                 if (method == 3) {
                     // Triquintic HCT Hessian
-                    float X[216];
+                    TriquinticAccum X[216];
                     for (int d = 0; d < 27; d++) {
                         for (int c = 0; c < 8; c++) {
                             int pidx = corners[c][0]*nyz + corners[c][1]*nz + corners[c][2];
                             X[d*8+c] = gridHctDerivatives[d * totalPoints + pidx];
                         }
                     }
-                    float a[216];
-                    for (int i = 0; i < 216; i++) {
-                        a[i] = 0.0f;
-                        for (int j = 0; j < 216; j++) a[i] += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
-                        a[i] *= 0.125f;
-                    }
-                    float sx_pow[6], sy_pow[6], sz_pow[6];
-                    sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
-                    for (int p = 1; p < 6; p++) {
-                        sx_pow[p] = sx_pow[p-1] * fx; sy_pow[p] = sy_pow[p-1] * fy; sz_pow[p] = sz_pow[p-1] * fz;
-                    }
-                    for (int kk = 0; kk < 6; kk++) {
-                        for (int jj = 0; jj < 6; jj++) {
-                            for (int ii = 0; ii < 6; ii++) {
-                                float coeff = a[ii + 6*jj + 36*kk];
-                                hct_val += coeff * sx_pow[ii] * sy_pow[jj] * sz_pow[kk];
-                                if (ii >= 1) hct_dx += coeff * ii * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk];
-                                if (jj >= 1) hct_dy += coeff * jj * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk];
-                                if (kk >= 1) hct_dz += coeff * kk * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-1];
-                                if (ii >= 2) hct_d2xx += coeff * (ii*(ii-1)) * sx_pow[ii-2] * sy_pow[jj] * sz_pow[kk];
-                                if (jj >= 2) hct_d2yy += coeff * (jj*(jj-1)) * sx_pow[ii] * sy_pow[jj-2] * sz_pow[kk];
-                                if (kk >= 2) hct_d2zz += coeff * (kk*(kk-1)) * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-2];
-                                if (ii >= 1 && jj >= 1) hct_d2xy += coeff * (ii*jj) * sx_pow[ii-1] * sy_pow[jj-1] * sz_pow[kk];
-                                if (ii >= 1 && kk >= 1) hct_d2xz += coeff * (ii*kk) * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk-1];
-                                if (jj >= 1 && kk >= 1) hct_d2yz += coeff * (jj*kk) * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk-1];
-                            }
-                        }
-                    }
+                    TriquinticAccum a[216];
+                    triquinticAssemble(X, a);
+                    TriquinticAccum hv, hgx, hgy, hgz, h2xx, h2yy, h2zz, h2xy, h2xz, h2yz;
+                    triquinticEvalVGH(a, fx, fy, fz, &hv, &hgx, &hgy, &hgz,
+                                      &h2xx, &h2yy, &h2zz, &h2xy, &h2xz, &h2yz);
+                    hct_val = hv; hct_dx = hgx; hct_dy = hgy; hct_dz = hgz;
+                    hct_d2xx = h2xx; hct_d2yy = h2yy; hct_d2zz = h2zz;
+                    hct_d2xy = h2xy; hct_d2xz = h2xz; hct_d2yz = h2yz;
                 } else {
                     // Tricubic HCT Hessian
                     const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
-                    float X[64];
+                    TricubicAccum X[64];
                     for (int d = 0; d < 8; d++) {
                         for (int c = 0; c < 8; c++) {
                             int pidx = corners[c][0]*nyz + corners[c][1]*nz + corners[c][2];
                             X[d*8+c] = gridHctDerivatives[derivMap[d] * totalPoints + pidx];
                         }
                     }
-                    float a[64];
-                    for (int i = 0; i < 64; i++) {
-                        a[i] = 0.0f;
-                        for (int j = 0; j < 64; j++) a[i] += TRICUBIC_COEFFICIENTS[i][j] * X[j];
-                    }
-                    float sx_pow[4], sy_pow[4], sz_pow[4];
-                    sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
-                    for (int p = 1; p < 4; p++) {
-                        sx_pow[p] = sx_pow[p-1] * fx; sy_pow[p] = sy_pow[p-1] * fy; sz_pow[p] = sz_pow[p-1] * fz;
-                    }
-                    for (int kk = 0; kk < 4; kk++) {
-                        for (int jj = 0; jj < 4; jj++) {
-                            for (int ii = 0; ii < 4; ii++) {
-                                float coeff = a[ii + 4*jj + 16*kk];
-                                hct_val += coeff * sx_pow[ii] * sy_pow[jj] * sz_pow[kk];
-                                if (ii >= 1) hct_dx += coeff * ii * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk];
-                                if (jj >= 1) hct_dy += coeff * jj * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk];
-                                if (kk >= 1) hct_dz += coeff * kk * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-1];
-                                if (ii >= 2) hct_d2xx += coeff * (ii*(ii-1)) * sx_pow[ii-2] * sy_pow[jj] * sz_pow[kk];
-                                if (jj >= 2) hct_d2yy += coeff * (jj*(jj-1)) * sx_pow[ii] * sy_pow[jj-2] * sz_pow[kk];
-                                if (kk >= 2) hct_d2zz += coeff * (kk*(kk-1)) * sx_pow[ii] * sy_pow[jj] * sz_pow[kk-2];
-                                if (ii >= 1 && jj >= 1) hct_d2xy += coeff * (ii*jj) * sx_pow[ii-1] * sy_pow[jj-1] * sz_pow[kk];
-                                if (ii >= 1 && kk >= 1) hct_d2xz += coeff * (ii*kk) * sx_pow[ii-1] * sy_pow[jj] * sz_pow[kk-1];
-                                if (jj >= 1 && kk >= 1) hct_d2yz += coeff * (jj*kk) * sx_pow[ii] * sy_pow[jj-1] * sz_pow[kk-1];
-                            }
-                        }
-                    }
+                    TricubicAccum a[64];
+                    tricubicAssemble(X, a);
+                    TricubicAccum hv, hgx, hgy, hgz, h2xx, h2yy, h2zz, h2xy, h2xz, h2yz;
+                    tricubicEvalVGH(a, fx, fy, fz, &hv, &hgx, &hgy, &hgz,
+                                    &h2xx, &h2yy, &h2zz, &h2xy, &h2xz, &h2yz);
+                    hct_val = hv; hct_dx = hgx; hct_dy = hgy; hct_dz = hgz;
+                    hct_d2xx = h2xx; hct_d2yy = h2yy; hct_d2zz = h2zz;
+                    hct_d2xy = h2xy; hct_d2xz = h2xz; hct_d2yz = h2yz;
                 }
 
                 // Trilinear correction: combine N, A, B into one field at 8 corners

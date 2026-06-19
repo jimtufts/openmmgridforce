@@ -212,4 +212,37 @@ __device__ inline void tricubicEvalVG(
     *value=v; *gx=vx; *gy=vy; *gz=vz;
 }
 
+// value + gradient + Hessian (in-cell second derivatives; tricubic is C1, so these
+// are discontinuous across faces by design -- used only by GBSA's grid Hessian).
+__device__ inline void tricubicEvalVGH(
+    const TricubicAccum a[64], TricubicAccum fx, TricubicAccum fy, TricubicAccum fz,
+    TricubicAccum* value, TricubicAccum* gx, TricubicAccum* gy, TricubicAccum* gz,
+    TricubicAccum* hxx, TricubicAccum* hyy, TricubicAccum* hzz,
+    TricubicAccum* hxy, TricubicAccum* hxz, TricubicAccum* hyz)
+{
+    TricubicAccum px[4], py[4], pz[4];
+    px[0]=1.0; px[1]=fx; px[2]=fx*fx; px[3]=fx*fx*fx;
+    py[0]=1.0; py[1]=fy; py[2]=fy*fy; py[3]=fy*fy*fy;
+    pz[0]=1.0; pz[1]=fz; pz[2]=fz*fz; pz[3]=fz*fz*fz;
+    TricubicAccum v=0.0, vx=0.0, vy=0.0, vz=0.0;
+    TricubicAccum dxx=0.0, dyy=0.0, dzz=0.0, dxy=0.0, dxz=0.0, dyz=0.0;
+    for (int k = 0; k < 4; k++)
+        for (int j = 0; j < 4; j++)
+            for (int i = 0; i < 4; i++) {
+                TricubicAccum c = a[i + 4*j + 16*k];
+                v += c * px[i] * py[j] * pz[k];
+                if (i > 0) vx += c * i * px[i-1] * py[j] * pz[k];
+                if (j > 0) vy += c * j * px[i] * py[j-1] * pz[k];
+                if (k > 0) vz += c * k * px[i] * py[j] * pz[k-1];
+                if (i > 1) dxx += c * (i*(i-1)) * px[i-2] * py[j] * pz[k];
+                if (j > 1) dyy += c * (j*(j-1)) * px[i] * py[j-2] * pz[k];
+                if (k > 1) dzz += c * (k*(k-1)) * px[i] * py[j] * pz[k-2];
+                if (i > 0 && j > 0) dxy += c * (i*j) * px[i-1] * py[j-1] * pz[k];
+                if (i > 0 && k > 0) dxz += c * (i*k) * px[i-1] * py[j] * pz[k-1];
+                if (j > 0 && k > 0) dyz += c * (j*k) * px[i] * py[j-1] * pz[k-1];
+            }
+    *value=v; *gx=vx; *gy=vy; *gz=vz;
+    *hxx=dxx; *hyy=dyy; *hzz=dzz; *hxy=dxy; *hxz=dxz; *hyz=dyz;
+}
+
 #endif // TRICUBIC_COEFFICIENTS_CUH
