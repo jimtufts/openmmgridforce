@@ -24,9 +24,9 @@ extern "C" __global__ void computeIsolatedNonbonded(
     unsigned long long* __restrict__ forceBuffers,  // Force output buffers
     unsigned long long* __restrict__ fixedPointEnergy,  // Fixed-point energy accumulator
     const int* __restrict__ groupParticleIndices, // Particle indices per group [numGroups * numAtoms]
-    const real* __restrict__ charges,           // Partial charges [numAtoms] (template)
-    const real* __restrict__ sigmas,            // LJ sigma [numAtoms] (template)
-    const real* __restrict__ epsilons,          // LJ epsilon [numAtoms] (template)
+    const float* __restrict__ charges,           // Partial charges [numAtoms] (template)
+    const float* __restrict__ sigmas,            // LJ sigma [numAtoms] (template)
+    const float* __restrict__ epsilons,          // LJ epsilon [numAtoms] (template)
     const int2* __restrict__ exclusions,        // Excluded pairs [numExclusions] (template)
     const int2* __restrict__ exceptions,        // Exception pairs [numExceptions] (template)
     const float3* __restrict__ exceptionParams, // Exception parameters (chargeProd, sigma, epsilon) [numExceptions]
@@ -170,9 +170,9 @@ extern "C" __global__ void computeIsolatedNonbonded(
 extern "C" __global__ void computeIsolatedNonbondedHessians(
     const real4* __restrict__ posq,             // All positions in Context
     const int* __restrict__ particleIndices,    // Which particles this force applies to [numAtoms]
-    const real* __restrict__ charges,           // Partial charges [numAtoms]
-    const real* __restrict__ sigmas,            // LJ sigma [numAtoms]
-    const real* __restrict__ epsilons,          // LJ epsilon [numAtoms]
+    const float* __restrict__ charges,           // Partial charges [numAtoms]
+    const float* __restrict__ sigmas,            // LJ sigma [numAtoms]
+    const float* __restrict__ epsilons,          // LJ epsilon [numAtoms]
     const int2* __restrict__ exclusions,        // Excluded pairs [numExclusions]
     const int2* __restrict__ exceptions,        // Exception pairs [numExceptions]
     const float3* __restrict__ exceptionParams, // Exception parameters (chargeProd, sigma, epsilon) [numExceptions]
@@ -364,9 +364,9 @@ __device__ void addNBDiagBlock(float* diagHessian, int groupIdx, int localAtomId
 extern "C" __global__ void computeIsolatedNonbondedDiagHessian(
     const real4* __restrict__ posq,
     const int* __restrict__ groupParticleIndices,
-    const real* __restrict__ charges,
-    const real* __restrict__ sigmas,
-    const real* __restrict__ epsilons,
+    const float* __restrict__ charges,
+    const float* __restrict__ sigmas,
+    const float* __restrict__ epsilons,
     const int2* __restrict__ exclusions,
     const int2* __restrict__ exceptions,
     const float3* __restrict__ exceptionParams,

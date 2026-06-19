@@ -120,7 +120,7 @@ extern "C" __global__ void convertTiledHCTToDouble(
 // same Born radii JAX autodiffs against. Slower than the production
 // tiled kernel but only runs once per Hessian eval.
 extern "C" __global__ void computeHctReceptorPairwiseDouble(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const int* __restrict__ groupStart,
@@ -153,7 +153,7 @@ extern "C" __global__ void computeHctReceptorPairwiseDouble(
 
     int templateIdx = atomInGroup % templateNumAtoms;
     int particleIdx = particleIndices[idx];
-    float4 pos_f = posq[particleIdx];
+    real4 pos_f = posq[particleIdx];
     double pk_x = (double)pos_f.x;
     double pk_y = (double)pos_f.y;
     double pk_z = (double)pos_f.z;
@@ -193,7 +193,7 @@ extern "C" __global__ void computeHctReceptorPairwiseDouble(
 // computeIsolatedLigandHCT but every step is double-precision so the
 // Hessian's hctTotal = hctReceptor + hctLigand is consistent.
 extern "C" __global__ void computeHctLigandPairwiseDouble(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -224,7 +224,7 @@ extern "C" __global__ void computeHctLigandPairwiseDouble(
 
     int templateIdx_i = atomInGroup % templateNumAtoms;
     int particleIdx_i = particleIndices[idx];
-    float4 pos_f_i = posq[particleIdx_i];
+    real4 pos_f_i = posq[particleIdx_i];
     double pi_x = (double)pos_f_i.x;
     double pi_y = (double)pos_f_i.y;
     double pi_z = (double)pos_f_i.z;
@@ -237,7 +237,7 @@ extern "C" __global__ void computeHctLigandPairwiseDouble(
         int j = groupStartIdx + jLocal;
         int templateIdx_j = jLocal % templateNumAtoms;
         int particleIdx_j = particleIndices[j];
-        float4 pos_f_j = posq[particleIdx_j];
+        real4 pos_f_j = posq[particleIdx_j];
         double dx = pi_x - (double)pos_f_j.x;
         double dy = pi_y - (double)pos_f_j.y;
         double dz = pi_z - (double)pos_f_j.z;
@@ -368,7 +368,7 @@ extern "C" __global__ void prepareHessianIntermediatesDouble(
 // double-precision jacobian. Internal accumulators were already double
 // in the float version; here we also do the per-pair math in double.
 extern "C" __global__ void computeHCTJacobianPairwiseDouble(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ scaleFactors,
@@ -406,7 +406,7 @@ extern "C" __global__ void computeHCTJacobianPairwiseDouble(
 
     int particleIdx_k = particleIndices[idx];
     int templateIdx_k = atomInGroup % templateNumAtoms;
-    float4 pos_k_f = posq[particleIdx_k];
+    real4 pos_k_f = posq[particleIdx_k];
     double pk_x = (double)pos_k_f.x;
     double pk_y = (double)pos_k_f.y;
     double pk_z = (double)pos_k_f.z;
@@ -455,7 +455,7 @@ extern "C" __global__ void computeHCTJacobianPairwiseDouble(
         if (excluded) continue;
 
         int particleIdx_j = particleIndices[j];
-        float4 pos_j_f = posq[particleIdx_j];
+        real4 pos_j_f = posq[particleIdx_j];
         double pj_x = (double)pos_j_f.x;
         double pj_y = (double)pos_j_f.y;
         double pj_z = (double)pos_j_f.z;
@@ -491,7 +491,7 @@ extern "C" __global__ void computeHCTJacobianPairwiseDouble(
 
 // Mirrors computeReceptorPairwiseHessian but stores double output.
 extern "C" __global__ void computeReceptorPairwiseHessianDouble(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const int* __restrict__ groupStart,
@@ -520,7 +520,7 @@ extern "C" __global__ void computeReceptorPairwiseHessianDouble(
 
     int templateIdx = atomInGroup % templateNumAtoms;
     int particleIdx = particleIndices[idx];
-    float4 pk_f = posq[particleIdx];
+    real4 pk_f = posq[particleIdx];
     double pk_x = (double)pk_f.x;
     double pk_y = (double)pk_f.y;
     double pk_z = (double)pk_f.z;
@@ -577,7 +577,7 @@ extern "C" __global__ void computeReceptorPairwiseHessianDouble(
 // Mirrors computeBornCouplingMatrix; reads float bornRadii but does all
 // Still-pair math in double and stores double M.
 extern "C" __global__ void computeBornCouplingMatrixDouble(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const float* __restrict__ intrinsicRadii,
@@ -614,7 +614,7 @@ extern "C" __global__ void computeBornCouplingMatrixDouble(
 
     int templateIdx_k = atomInGroup % templateNumAtoms;
     int particleIdx_k = particleIndices[idx];
-    float4 pos_k_f = posq[particleIdx_k];
+    real4 pos_k_f = posq[particleIdx_k];
     double pk_x = (double)pos_k_f.x;
     double pk_y = (double)pos_k_f.y;
     double pk_z = (double)pos_k_f.z;
@@ -662,7 +662,7 @@ extern "C" __global__ void computeBornCouplingMatrixDouble(
         if (excluded) continue;
 
         int particleIdx_l = particleIndices[l];
-        float4 pos_l_f = posq[particleIdx_l];
+        real4 pos_l_f = posq[particleIdx_l];
         double pl_x = (double)pos_l_f.x;
         double pl_y = (double)pos_l_f.y;
         double pl_z = (double)pos_l_f.z;
@@ -716,7 +716,7 @@ extern "C" __global__ void computeBornCouplingMatrixDouble(
 // is returned to the host as doubles already; computeHessian only
 // needed to cast to double.
 extern "C" __global__ void assembleGBSAHessianDouble(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const double* __restrict__ bornRadii,
@@ -764,7 +764,7 @@ extern "C" __global__ void assembleGBSAHessianDouble(
 
     if (atom_i == atom_j) {
         int particleIdx_i = particleIndices[atom_i];
-        float4 pos_i_f = posq[particleIdx_i];
+        real4 pos_i_f = posq[particleIdx_i];
         double pix = (double)pos_i_f.x;
         double piy = (double)pos_i_f.y;
         double piz = (double)pos_i_f.z;
@@ -784,7 +784,7 @@ extern "C" __global__ void assembleGBSAHessianDouble(
                 if (exclusionAtoms[e] == tl) { excl = true; break; }
             if (excl) continue;
 
-            float4 pos_l_f = posq[particleIndices[l]];
+            real4 pos_l_f = posq[particleIndices[l]];
             double q_l = (double)charges[tl];
             double R_l = bornRadii[l];
             double dx = (double)pos_l_f.x - pix;
@@ -876,8 +876,8 @@ extern "C" __global__ void assembleGBSAHessianDouble(
             if (exclusionAtoms[e] == templateIdx_j) { excl_ij = true; break; }
 
         if (!excl_ij) {
-            float4 pos_i_f = posq[particleIndices[atom_i]];
-            float4 pos_j_f = posq[particleIndices[atom_j]];
+            real4 pos_i_f = posq[particleIndices[atom_i]];
+            real4 pos_j_f = posq[particleIndices[atom_j]];
             double q_i = (double)charges[templateIdx_i];
             double q_j = (double)charges[templateIdx_j];
             double R_i = bornRadii[atom_i];
@@ -924,8 +924,8 @@ extern "C" __global__ void assembleGBSAHessianDouble(
             }
         }
 
-        float4 pos_ii_f = posq[particleIndices[atom_i]];
-        float4 pos_jj_f = posq[particleIndices[atom_j]];
+        real4 pos_ii_f = posq[particleIndices[atom_i]];
+        real4 pos_jj_f = posq[particleIndices[atom_j]];
         double pii_x = (double)pos_ii_f.x;
         double pii_y = (double)pos_ii_f.y;
         double pii_z = (double)pos_ii_f.z;
@@ -943,7 +943,7 @@ extern "C" __global__ void assembleGBSAHessianDouble(
                 if (exclusionAtoms[e] == tl) { excl_l = true; break; }
             if (excl_l) continue;
 
-            float4 pos_l_f = posq[particleIndices[l]];
+            real4 pos_l_f = posq[particleIndices[l]];
             double R_ii = bornRadii[atom_i], R_l = bornRadii[l];
             double dx_ = (double)pos_l_f.x - pii_x;
             double dy_ = (double)pos_l_f.y - pii_y;
@@ -992,7 +992,7 @@ extern "C" __global__ void assembleGBSAHessianDouble(
                 if (exclusionAtoms[e] == tm) { excl_m = true; break; }
             if (excl_m) continue;
 
-            float4 pos_m_f = posq[particleIndices[m]];
+            real4 pos_m_f = posq[particleIndices[m]];
             double R_jj = bornRadii[atom_j], R_m = bornRadii[m];
             double dx_ = (double)pos_m_f.x - pjj_x;
             double dy_ = (double)pos_m_f.y - pjj_y;

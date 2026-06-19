@@ -146,7 +146,7 @@ __device__ void computeBondHessian(
  * Kernel to compute bond Hessians for all bonds in the system.
  */
 extern "C" __global__ void computeBondHessians(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ bondAtoms,      // [numBonds * 2]: atom indices
     const float* __restrict__ bondParams,   // [numBonds * 2]: k, r0
     unsigned long long* __restrict__ globalHessian,
@@ -159,8 +159,8 @@ extern "C" __global__ void computeBondHessians(
     int i1 = bondAtoms[bondIdx * 2 + 0];
     int i2 = bondAtoms[bondIdx * 2 + 1];
 
-    float4 pos1 = posq[i1];
-    float4 pos2 = posq[i2];
+    real4 pos1 = posq[i1];
+    real4 pos2 = posq[i2];
 
     float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
     float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
@@ -439,7 +439,7 @@ __device__ void computeAngleHessian(
  * Kernel to compute angle Hessians for all angles in the system.
  */
 extern "C" __global__ void computeAngleHessians(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ angleAtoms,      // [numAngles * 3]: atom indices
     const float* __restrict__ angleParams,   // [numAngles * 2]: k, theta0
     unsigned long long* __restrict__ globalHessian,
@@ -453,9 +453,9 @@ extern "C" __global__ void computeAngleHessians(
     int i2 = angleAtoms[angleIdx * 3 + 1];  // central atom
     int i3 = angleAtoms[angleIdx * 3 + 2];
 
-    float4 pos1 = posq[i1];
-    float4 pos2 = posq[i2];
-    float4 pos3 = posq[i3];
+    real4 pos1 = posq[i1];
+    real4 pos2 = posq[i2];
+    real4 pos3 = posq[i3];
 
     float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
     float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
@@ -917,7 +917,7 @@ __device__ void computeTorsionHessian(
  * @param numAtoms       Total number of atoms
  */
 extern "C" __global__ void computeTorsionHessians(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ torsionAtoms,      // [numTorsions * 4]: atom indices
     const float* __restrict__ torsionParams,   // [numTorsions * 3]: n, k, phi0
     unsigned long long* __restrict__ globalHessian,  // [numAtoms * 3 * numAtoms * 3]
@@ -934,10 +934,10 @@ extern "C" __global__ void computeTorsionHessians(
     int i4 = torsionAtoms[torsionIdx * 4 + 3];
 
     // Load positions
-    float4 pos1 = posq[i1];
-    float4 pos2 = posq[i2];
-    float4 pos3 = posq[i3];
-    float4 pos4 = posq[i4];
+    real4 pos1 = posq[i1];
+    real4 pos2 = posq[i2];
+    real4 pos3 = posq[i3];
+    real4 pos4 = posq[i4];
 
     float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
     float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
@@ -1000,7 +1000,7 @@ extern "C" __global__ void computeTorsionHessians(
  * Debug kernel that outputs ONLY the dihedral angle Hessian (H_phi) for inspection.
  */
 extern "C" __global__ void computeDihedralHessianBlocks(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ torsionAtoms,
     float* __restrict__ dihedralHessians,  // [numTorsions * 144]
     int numTorsions
@@ -1013,10 +1013,10 @@ extern "C" __global__ void computeDihedralHessianBlocks(
     int i3 = torsionAtoms[torsionIdx * 4 + 2];
     int i4 = torsionAtoms[torsionIdx * 4 + 3];
 
-    float4 pos1 = posq[i1];
-    float4 pos2 = posq[i2];
-    float4 pos3 = posq[i3];
-    float4 pos4 = posq[i4];
+    real4 pos1 = posq[i1];
+    real4 pos2 = posq[i2];
+    real4 pos3 = posq[i3];
+    real4 pos4 = posq[i4];
 
     float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
     float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
@@ -1030,7 +1030,7 @@ extern "C" __global__ void computeDihedralHessianBlocks(
 }
 
 extern "C" __global__ void computeTorsionHessianBlocks(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ torsionAtoms,
     const float* __restrict__ torsionParams,
     float* __restrict__ torsionHessians,  // [numTorsions * 144]
@@ -1046,10 +1046,10 @@ extern "C" __global__ void computeTorsionHessianBlocks(
     int i4 = torsionAtoms[torsionIdx * 4 + 3];
 
     // Load positions
-    float4 pos1 = posq[i1];
-    float4 pos2 = posq[i2];
-    float4 pos3 = posq[i3];
-    float4 pos4 = posq[i4];
+    real4 pos1 = posq[i1];
+    real4 pos2 = posq[i2];
+    real4 pos3 = posq[i3];
+    real4 pos4 = posq[i4];
 
     float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
     float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
@@ -1172,7 +1172,7 @@ __device__ void computeNonbondedPairHessian(
  * This handles 1-4 interactions and other exception pairs from NonbondedForce.
  */
 extern "C" __global__ void computeNonbondedPairHessians(
-    const float4* __restrict__ posq,           // positions and charges
+    const real4* __restrict__ posq,           // positions and charges
     const int* __restrict__ pairAtoms,         // [numPairs * 2]: atom indices
     const float* __restrict__ pairParams,      // [numPairs * 2]: sigma, epsilon
     unsigned long long* __restrict__ globalHessian,
@@ -1185,8 +1185,8 @@ extern "C" __global__ void computeNonbondedPairHessians(
     int i1 = pairAtoms[pairIdx * 2 + 0];
     int i2 = pairAtoms[pairIdx * 2 + 1];
 
-    float4 pos1 = posq[i1];
-    float4 pos2 = posq[i2];
+    real4 pos1 = posq[i1];
+    real4 pos2 = posq[i2];
 
     float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
     float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);

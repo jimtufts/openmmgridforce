@@ -998,7 +998,7 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
  * and use the same interpolation method as HCT. Otherwise uses binned format.
  */
 extern "C" __global__ void computeReceptorHCT(
-    const float4* __restrict__ posq,           // Positions (xyz) and charges (w)
+    const real4* __restrict__ posq,           // Positions (xyz) and charges (w)
     const int* __restrict__ particleIndices,   // Which particles to process
     const float* __restrict__ radii,           // Intrinsic radii (template)
     const int* __restrict__ gridCounts,        // [nx, ny, nz]
@@ -1040,7 +1040,7 @@ extern "C" __global__ void computeReceptorHCT(
     int templateIdx = atomInGroup % templateNumAtoms;  // For multi-ligand, wrap around
 
     // Get position
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float3 position = make_float3(pos.x, pos.y, pos.z);
 
     // Get radius and compute offset radius
@@ -1083,7 +1083,7 @@ extern "C" __global__ void computeReceptorHCT(
  * Uses standard HCT integral formula.
  */
 extern "C" __global__ void computeLigandHCT(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ scaleFactors,
@@ -1117,7 +1117,7 @@ extern "C" __global__ void computeLigandHCT(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float R_i = radii[templateIdx_i];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -1145,7 +1145,7 @@ extern "C" __global__ void computeLigandHCT(
         if (excluded) continue;
 
         int particleIdx_j = particleIndices[j];
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
 
         float dx = pos_i.x - pos_j.x;
         float dy = pos_i.y - pos_j.y;
@@ -1228,7 +1228,7 @@ extern "C" __global__ void computeBornRadii(
  * where f_gb = sqrt(r_ij^2 + R_i*R_j*exp(-r_ij^2/(4*R_i*R_j)))
  */
 extern "C" __global__ void computeGBEnergy(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const float* __restrict__ bornRadii,
@@ -1267,7 +1267,7 @@ extern "C" __global__ void computeGBEnergy(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float q_i = charges[templateIdx_i];
     float R_i = bornRadii[idx];
 
@@ -1297,7 +1297,7 @@ extern "C" __global__ void computeGBEnergy(
         if (excluded) continue;
 
         int particleIdx_j = particleIndices[j];
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float q_j = charges[templateIdx_j];
         float R_j = bornRadii[j];
 
@@ -1457,7 +1457,7 @@ extern "C" __global__ void accumulateSADerivatives(
  * and use the same interpolation method as HCT for smooth force continuity.
  */
 extern "C" __global__ void computeReceptorHCTGradientForce(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ bornRadii,
@@ -1502,7 +1502,7 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
     int particleIdx = particleIndices[idx];
     int templateIdx = atomInGroup % templateNumAtoms;
 
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float3 position = make_float3(pos.x, pos.y, pos.z);
 
     float R_i = radii[templateIdx];
@@ -1570,7 +1570,7 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
  * This must be called after computeGBEnergy to collect derivatives.
  */
 extern "C" __global__ void accumulateBornRadiiDerivatives(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const float* __restrict__ bornRadii,
@@ -1605,7 +1605,7 @@ extern "C" __global__ void accumulateBornRadiiDerivatives(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float q_i = charges[templateIdx_i];
     float R_i = bornRadii[idx];
 
@@ -1634,7 +1634,7 @@ extern "C" __global__ void accumulateBornRadiiDerivatives(
         if (excluded) continue;
 
         int particleIdx_j = particleIndices[j];
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float q_j = charges[templateIdx_j];
         float R_j = bornRadii[j];
 
@@ -1672,7 +1672,7 @@ extern "C" __global__ void accumulateBornRadiiDerivatives(
  * Must be called after accumulateBornRadiiDerivatives.
  */
 extern "C" __global__ void computeHCTChainRuleForces(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ scaleFactors,
@@ -1711,7 +1711,7 @@ extern "C" __global__ void computeHCTChainRuleForces(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float R_i = radii[templateIdx_i];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
     float S_i = R_i_off * scaleFactors[templateIdx_i];
@@ -1757,7 +1757,7 @@ extern "C" __global__ void computeHCTChainRuleForces(
         if (excluded) continue;
 
         int particleIdx_j = particleIndices[j];
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float R_j = radii[templateIdx_j];
         float R_j_off = R_j - DIELECTRIC_OFFSET;
         float S_j = R_j_off * scaleFactors[templateIdx_j];
@@ -1910,7 +1910,7 @@ extern "C" __global__ void prepareHessianIntermediates(
  * One thread per atom k fills its entire row J[k, :].
  */
 extern "C" __global__ void computeHCTJacobian(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ scaleFactors,
@@ -1961,7 +1961,7 @@ extern "C" __global__ void computeHCTJacobian(
 
     int particleIdx_k = particleIndices[idx];
     int templateIdx_k = atomInGroup % templateNumAtoms;
-    float4 pos_k = posq[particleIdx_k];
+    real4 pos_k = posq[particleIdx_k];
     float R_k = radii[templateIdx_k];
     float R_k_off = R_k - DIELECTRIC_OFFSET;
     float R_probe_off = probeRadiusVal - DIELECTRIC_OFFSET;
@@ -2007,7 +2007,7 @@ extern "C" __global__ void computeHCTJacobian(
         if (excluded) continue;
 
         int particleIdx_j = particleIndices[j];
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float R_j = radii[templateIdx_j];
         float R_j_off = R_j - DIELECTRIC_OFFSET;
         float S_j = R_j_off * scaleFactors[templateIdx_j];
@@ -2061,7 +2061,7 @@ extern "C" __global__ void computeHCTJacobian(
  * One thread per atom k.
  */
 extern "C" __global__ void computeReceptorGridHessian(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const int* __restrict__ groupStart,
@@ -2100,7 +2100,7 @@ extern "C" __global__ void computeReceptorGridHessian(
 
     int templateIdx = atomInGroup % templateNumAtoms;
     int particleIdx = particleIndices[idx];
-    float4 pk = posq[particleIdx];
+    real4 pk = posq[particleIdx];
     float R_k = radii[templateIdx];
     float R_k_off = R_k - DIELECTRIC_OFFSET;
     float R_probe_off = probeRadiusVal - DIELECTRIC_OFFSET;
@@ -2140,7 +2140,7 @@ extern "C" __global__ void computeReceptorGridHessian(
  * One thread per atom k computes row M[k, :].
  */
 extern "C" __global__ void computeBornCouplingMatrix(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const float* __restrict__ intrinsicRadii,
@@ -2177,7 +2177,7 @@ extern "C" __global__ void computeBornCouplingMatrix(
 
     int templateIdx_k = atomInGroup % templateNumAtoms;
     int particleIdx_k = particleIndices[idx];
-    float4 pos_k = posq[particleIdx_k];
+    real4 pos_k = posq[particleIdx_k];
     float q_k = charges[templateIdx_k];
     float R_k = bornRadii[idx];
     float R_k_intr = intrinsicRadii[templateIdx_k];
@@ -2228,7 +2228,7 @@ extern "C" __global__ void computeBornCouplingMatrix(
         if (excluded) continue;
 
         int particleIdx_l = particleIndices[l];
-        float4 pos_l = posq[particleIdx_l];
+        real4 pos_l = posq[particleIdx_l];
         float q_l = charges[templateIdx_l];
         float R_l = bornRadii[l];
         float dRl = dR_dPsi[l];
@@ -2286,7 +2286,7 @@ extern "C" __global__ void computeBornCouplingMatrix(
  * One thread per upper-triangle element of H[3N x 3N].
  */
 extern "C" __global__ void assembleGBSAHessian(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const float* __restrict__ bornRadii,
@@ -2344,7 +2344,7 @@ extern "C" __global__ void assembleGBSAHessian(
     if (atom_i == atom_j) {
         // Diagonal block: accumulate from all pairs involving atom_i
         int particleIdx_i = particleIndices[atom_i];
-        float4 pos_i = posq[particleIdx_i];
+        real4 pos_i = posq[particleIdx_i];
         float q_i = charges[templateIdx_i];
         float R_i = bornRadii[atom_i];
         int groupSize = groupEnd_i - groupStart_i;
@@ -2361,7 +2361,7 @@ extern "C" __global__ void assembleGBSAHessian(
                 if (exclusionAtoms[e] == tl) { excl = true; break; }
             if (excl) continue;
 
-            float4 pos_l = posq[particleIndices[l]];
+            real4 pos_l = posq[particleIndices[l]];
             float q_l = charges[tl];
             float R_l = bornRadii[l];
             float dx = pos_l.x - pos_i.x, dy = pos_l.y - pos_i.y, dz = pos_l.z - pos_i.z;
@@ -2462,8 +2462,8 @@ extern "C" __global__ void assembleGBSAHessian(
             if (exclusionAtoms[e] == templateIdx_j) { excl_ij = true; break; }
 
         if (!excl_ij) {
-            float4 pos_i = posq[particleIndices[atom_i]];
-            float4 pos_j = posq[particleIndices[atom_j]];
+            real4 pos_i = posq[particleIndices[atom_i]];
+            real4 pos_j = posq[particleIndices[atom_j]];
             float q_i = charges[templateIdx_i], q_j = charges[templateIdx_j];
             float R_i = bornRadii[atom_i], R_j = bornRadii[atom_j];
             float dx = pos_j.x-pos_i.x, dy = pos_j.y-pos_i.y, dz = pos_j.z-pos_i.z;
@@ -2510,8 +2510,8 @@ extern "C" __global__ void assembleGBSAHessian(
         // Term1[row, col] = Σ_{l: pair(atom_i,l)} (-D[α]/r) * (g_i*J[i,col] + g_l*J[l,col])
         // Term1^T[row, col] = Σ_{m: pair(atom_j,m)} (-D'[β]/r') * (g_j*J[j,row] + g_m*J[m,row])
 
-        float4 pos_ii = posq[particleIndices[atom_i]];
-        float4 pos_jj = posq[particleIndices[atom_j]];
+        real4 pos_ii = posq[particleIndices[atom_i]];
+        real4 pos_jj = posq[particleIndices[atom_j]];
 
         // Part A: all pairs involving atom_i → contributes dr/dx_i * v[col]
         for (int lLocal = 0; lLocal < groupSize; lLocal++) {
@@ -2523,7 +2523,7 @@ extern "C" __global__ void assembleGBSAHessian(
                 if (exclusionAtoms[e] == tl) { excl_l = true; break; }
             if (excl_l) continue;
 
-            float4 pos_l = posq[particleIndices[l]];
+            real4 pos_l = posq[particleIndices[l]];
             float R_ii = bornRadii[atom_i], R_l = bornRadii[l];
             float dx_ = pos_l.x-pos_ii.x, dy_ = pos_l.y-pos_ii.y, dz_ = pos_l.z-pos_ii.z;
             float r2_ = dx_*dx_+dy_*dy_+dz_*dz_, r_ = sqrtf(r2_);
@@ -2568,7 +2568,7 @@ extern "C" __global__ void assembleGBSAHessian(
                 if (exclusionAtoms[e] == tm) { excl_m = true; break; }
             if (excl_m) continue;
 
-            float4 pos_m = posq[particleIndices[m]];
+            real4 pos_m = posq[particleIndices[m]];
             float R_jj = bornRadii[atom_j], R_m = bornRadii[m];
             float dx_ = pos_m.x-pos_jj.x, dy_ = pos_m.y-pos_jj.y, dz_ = pos_m.z-pos_jj.z;
             float r2_ = dx_*dx_+dy_*dy_+dz_*dz_, r_ = sqrtf(r2_);

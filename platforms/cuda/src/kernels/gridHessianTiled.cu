@@ -92,7 +92,7 @@ __device__ __forceinline__ int tileIndexHessian(int lx, int ly, int lz, int tile
  * @param tileOverlap       Overlap for interpolation stencil
  */
 extern "C" __global__ void computeGridHessianTiled(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     float* __restrict__ hessianBuffer,  // 6 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
@@ -131,7 +131,7 @@ extern "C" __global__ void computeGridHessianTiled(
     const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
     // Load position and scaling factor (with per-group alchemical scaling)
-    float4 posOrig = posq[particleIndex];
+    real4 posOrig = posq[particleIndex];
     float groupScale = 1.0f;
     if (groupScalingFactors != 0 && particleToGroupMap != 0) {
         int groupIdx = particleToGroupMap[particleIndex];

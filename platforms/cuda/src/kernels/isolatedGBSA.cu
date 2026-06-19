@@ -897,7 +897,7 @@ extern "C" __global__ void computeReceptorDeDRSimple(
  * No exclusions - all pairs contribute to Born radii (physically correct for GBSA).
  */
 extern "C" __global__ void computeIsolatedLigandHCT(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ scaleFactors,
@@ -930,7 +930,7 @@ extern "C" __global__ void computeIsolatedLigandHCT(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float R_i = radii[templateIdx_i];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -946,7 +946,7 @@ extern "C" __global__ void computeIsolatedLigandHCT(
         int j = groupStartIdx + jLocal;
         int templateIdx_j = jLocal % templateNumAtoms;
         int particleIdx_j = particleIndices[j];
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
 
         float dx = pos_i.x - pos_j.x;
         float dy = pos_i.y - pos_j.y;
@@ -1012,7 +1012,7 @@ extern "C" __global__ void computeIsolatedLigandHCT(
  * Total tiles: tiles_per_group × K
  */
 extern "C" __global__ void computeReceptorLigandHCTTiled(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -1088,7 +1088,7 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
         bool validLig = (ligLocalIdx < groupSize);
         if (validLig) {
             int particleIdx = particleIndices[ligGlobalIdx];
-            float4 p = posq[particleIdx];
+            real4 p = posq[particleIdx];
             sLigPos[tbx + tgx] = make_float3(p.x, p.y, p.z);
             int templateIdx = ligLocalIdx % templateNumAtoms;
             float R = ligandRadii[templateIdx];
@@ -1200,7 +1200,7 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
  */
 extern "C" __global__ void addDistantHCTFromCache(
     const float* __restrict__ hctRecBlockCache,  // [totalParticles * numRecBlocks]
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float4* __restrict__ recBlockBounds,   // [numRecBlocks]
     float localityCutoff,
@@ -1212,7 +1212,7 @@ extern "C" __global__ void addDistantHCTFromCache(
     if (ligIdx >= totalParticles) return;
 
     int particleIdx = particleIndices[ligIdx];
-    float4 p = posq[particleIdx];
+    real4 p = posq[particleIdx];
 
     float cachedSum = 0.0f;
     for (int b = 0; b < numRecBlocks; b++) {
@@ -1241,7 +1241,7 @@ extern "C" __global__ void addDistantHCTFromCache(
 extern "C" __global__ void restoreDistantLigToRecHCT(
     const float* __restrict__ ligToRecHCTCache,  // [K * N_rec] cached values
     float* __restrict__ ligandToReceptorHCT,     // [K * N_rec] current (post-conversion)
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float4* __restrict__ recBlockBounds,
     float localityCutoff,
@@ -1268,7 +1268,7 @@ extern "C" __global__ void restoreDistantLigToRecHCT(
     bool anyClose = false;
     for (int li = gs; li < ge && !anyClose; li++) {
         int particleIdx = particleIndices[li];
-        float4 p = posq[particleIdx];
+        real4 p = posq[particleIdx];
         float dx = p.x - bounds.x;
         float dy = p.y - bounds.y;
         float dz = p.z - bounds.z;
@@ -1307,7 +1307,7 @@ extern "C" __global__ void convertTiledHCTToFloat(
  *   ligandToReceptorHCT[groupIdx * N_rec + recIdx] = ligand→receptor HCT (direct write)
  */
 extern "C" __global__ void computeReceptorLigandHCTParallel(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -1366,7 +1366,7 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
             int ligGlobalIdx = ligGroupStart + i;
             int particleIdx = particleIndices[ligGlobalIdx];
             int templateIdx = (i % templateNumAtoms);
-            float4 p = posq[particleIdx];
+            real4 p = posq[particleIdx];
             sLigPos[i] = make_float3(p.x, p.y, p.z);
             float R = ligandRadii[templateIdx];
             sLigR_off[i] = R - DIELECTRIC_OFFSET;
@@ -1408,7 +1408,7 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
             int idx = ligGroupStart + li;
             int particleIdx = particleIndices[idx];
             int templateIdx = li % templateNumAtoms;
-            float4 p = posq[particleIdx];
+            real4 p = posq[particleIdx];
             ligPos = make_float3(p.x, p.y, p.z);
             float R = ligandRadii[templateIdx];
             ligR_off = R - DIELECTRIC_OFFSET;
@@ -1479,7 +1479,7 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
  *   ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx] += ligand→receptor HCT
  */
 extern "C" __global__ void computeFusedReceptorLigandHCT(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -1638,7 +1638,7 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
  * instead of O(N_rec).
  */
 extern "C" __global__ void computeIsolatedReceptorHCTCellList(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float3* __restrict__ receptorPositions,
@@ -1672,7 +1672,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTCellList(
     int templateIdx = atomInGroup % templateNumAtoms;
 
     int particleIdx = particleIndices[idx];
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float R_i = radii[templateIdx];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -1755,7 +1755,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTCellList(
  * Cost: O(atoms_in_neighborhood) instead of O(N_rec).
  */
 extern "C" __global__ void reconstructReceptorHCTCellList(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float3* __restrict__ receptorPositions,
@@ -1797,7 +1797,7 @@ extern "C" __global__ void reconstructReceptorHCTCellList(
     const float* myBaseline = hctPerAtomBaseline + idx * numReceptorAtoms;
 
     int particleIdx = particleIndices[idx];
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float R_i = radii[templateIdx];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -1898,7 +1898,7 @@ extern "C" __global__ void reconstructReceptorHCTCellList(
  * contributions come from the cached baseline in reconstructReceptorHCT).
  */
 extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float3* __restrict__ receptorPositions,
@@ -1940,7 +1940,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
     int templateIdx = atomInGroup % templateNumAtoms;
 
     int particleIdx = particleIndices[idx];
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float R_i = radii[templateIdx];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -2024,7 +2024,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
  * If isActiveRecAtom is non-null, only active receptor atoms contribute.
  */
 extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float3* __restrict__ receptorPositions,
@@ -2058,7 +2058,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
     int particleIdx = particleIndices[idx];
     int templateIdx = atomInGroup % templateNumAtoms;
 
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float3 pos_i = make_float3(pos.x, pos.y, pos.z);
     float R_i = radii[templateIdx];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
@@ -2186,7 +2186,7 @@ extern "C" __global__ void computeBornRadiiOBC(
  * Also tracks ligand self-energy separately.
  */
 extern "C" __global__ void computeIsolatedGBEnergy(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const float* __restrict__ bornRadii,
@@ -2228,7 +2228,7 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float q_i = charges[templateIdx_i];
     float R_i = bornRadii[idx];
 
@@ -2245,7 +2245,7 @@ extern "C" __global__ void computeIsolatedGBEnergy(
         int templateIdx_j = jLocal % templateNumAtoms;
         int particleIdx_j = particleIndices[j];
 
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float q_j = charges[templateIdx_j];
         float R_j = bornRadii[j];
 
@@ -2421,7 +2421,7 @@ extern "C" __global__ void computeReceptorDeltaSA(
  * Accumulate dE/dR_born from GB energy.
  */
 extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const float* __restrict__ bornRadii,
@@ -2458,7 +2458,7 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float q_i = charges[templateIdx_i];
     float R_i = bornRadii[idx];
 
@@ -2477,7 +2477,7 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
         int templateIdx_j = jLocal % templateNumAtoms;
         int particleIdx_j = particleIndices[j];
 
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float q_j = charges[templateIdx_j];
         float R_j = bornRadii[j];
 
@@ -2567,7 +2567,7 @@ extern "C" __global__ void accumulateIsolatedSADerivatives(
  * Where bornForces[i] = dE/dR_born * R_born² * obcChain
  */
 extern "C" __global__ void computeIsolatedHCTChainRuleForces(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ scaleFactors,
@@ -2604,7 +2604,7 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
     int particleIdx_i = particleIndices[idx];
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
-    float4 pos_i = posq[particleIdx_i];
+    real4 pos_i = posq[particleIdx_i];
     float R_i = radii[templateIdx_i];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
     float S_i = R_i_off * scaleFactors[templateIdx_i];
@@ -2641,7 +2641,7 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
         int templateIdx_j = jLocal % templateNumAtoms;
         int particleIdx_j = particleIndices[j];
 
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float R_j = radii[templateIdx_j];
         float R_j_off = R_j - DIELECTRIC_OFFSET;
         float S_j = R_j_off * scaleFactors[templateIdx_j];
@@ -2707,7 +2707,7 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
 
 // Placeholder kernels for GRID mode - reuse from gbsaGridForce.cu patterns
 extern "C" __global__ void computeIsolatedReceptorHCTGrid(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const int* __restrict__ gridCounts,
@@ -2749,7 +2749,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTGrid(
     int templateIdx = atomInGroup % templateNumAtoms;
 
     // Get position
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float3 position = make_float3(pos.x, pos.y, pos.z);
 
     // Get radius and compute offset radius
@@ -2789,7 +2789,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTGrid(
 }
 
 extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ bornRadii,
@@ -2832,7 +2832,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
 
     int particleIdx = particleIndices[idx];
     int templateIdx = atomInGroup % templateNumAtoms;
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float3 position = make_float3(pos.x, pos.y, pos.z);
 
     float R_i = radii[templateIdx];
@@ -2887,7 +2887,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
 }
 
 extern "C" __global__ void computeIsolatedReceptorHCTPairwiseChainRule(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ bornRadii,
@@ -3088,7 +3088,7 @@ extern "C" __global__ void computeReceptorReferenceEnergy(
  * Inactive atoms get ligandToReceptorHCT = 0.
  */
 extern "C" __global__ void computeLigandToReceptorHCT(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -3133,7 +3133,7 @@ extern "C" __global__ void computeLigandToReceptorHCT(
             int particleIdx = particleIndices[k];
             int templateIdx = (k - groupStartIdx) % templateNumAtoms;
 
-            float4 pos_lig = posq[particleIdx];
+            real4 pos_lig = posq[particleIdx];
             float dx = pos_rec.x - pos_lig.x;
             float dy = pos_rec.y - pos_lig.y;
             float dz = pos_rec.z - pos_lig.z;
@@ -3308,7 +3308,7 @@ extern "C" __global__ void computeReceptorGBEnergy(
  * Uses combined Born radii from receptor (with ligand screening) and ligand.
  */
 extern "C" __global__ void computeCrossTermGBEnergy(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandCharges,
     const float* __restrict__ ligandBornRadii,
@@ -3353,7 +3353,7 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
-    float4 pos_lig = posq[particleIdx_lig];
+    real4 pos_lig = posq[particleIdx_lig];
     float q_lig = ligandCharges[templateIdx_lig];
     float R_lig = ligandBornRadii[idx];
 
@@ -3418,7 +3418,7 @@ extern "C" __global__ void computeCrossTermGBEnergy(
  * kernel propagates both self-GB and cross-term derivatives.
  */
 extern "C" __global__ void accumulateCrossTermBornDerivatives(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandCharges,
     const float* __restrict__ ligandBornRadii,
@@ -3457,7 +3457,7 @@ extern "C" __global__ void accumulateCrossTermBornDerivatives(
     int particleIdx = particleIndices[idx];
     int templateIdx = atomInGroup % templateNumAtoms;
 
-    float4 pos_lig = posq[particleIdx];
+    real4 pos_lig = posq[particleIdx];
     float q_lig = ligandCharges[templateIdx];
     float R_lig = ligandBornRadii[idx];
 
@@ -3509,7 +3509,7 @@ extern "C" __global__ void accumulateCrossTermBornDerivatives(
  * This kernel computes the full chain for each ligand atom.
  */
 extern "C" __global__ void computeReceptorDesolvationForces(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -3550,7 +3550,7 @@ extern "C" __global__ void computeReceptorDesolvationForces(
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
-    float4 pos_lig = posq[particleIdx_lig];
+    real4 pos_lig = posq[particleIdx_lig];
     float R_lig = ligandRadii[templateIdx_lig];
     float R_lig_off = R_lig - DIELECTRIC_OFFSET;
     float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
@@ -3687,7 +3687,7 @@ extern "C" __global__ void computeReceptorDesolvationForces(
  * needed; global memory traffic is the bottleneck.
  */
 extern "C" __global__ void accumulateCrossTermReceptorDeDR(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float3* __restrict__ receptorPositions,
     const float* __restrict__ ligandCharges,
@@ -3725,7 +3725,7 @@ extern "C" __global__ void accumulateCrossTermReceptorDeDR(
             int ligGlobal = gs + li;
             int particleIdx = particleIndices[ligGlobal];
             int templateIdx = li % templateNumAtoms;
-            float4 p = posq[particleIdx];
+            real4 p = posq[particleIdx];
             float qLig = ligandCharges[templateIdx];
             float R_lig_born = ligandBornRadii[ligGlobal];
 
@@ -3816,7 +3816,7 @@ extern "C" __global__ void precomputeReceptorBornForces(
  * Replaces: computeReceptorDesolvationForcesOptimized + computeCrossTermChainRuleForces
  */
 extern "C" __global__ void computeFusedReceptorForces(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -3863,7 +3863,7 @@ extern "C" __global__ void computeFusedReceptorForces(
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
-    float4 pos_lig = posq[particleIdx_lig];
+    real4 pos_lig = posq[particleIdx_lig];
     float R_lig = ligandRadii[templateIdx_lig];
     float R_lig_off = R_lig - DIELECTRIC_OFFSET;
     float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
@@ -3980,7 +3980,7 @@ extern "C" __global__ void computeFusedReceptorForces(
         int templateIdx_j = jLocal % templateNumAtoms;
         int particleIdx_j = particleIndices[j];
 
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float R_j = ligandRadii[templateIdx_j];
         float R_j_off = R_j - DIELECTRIC_OFFSET;
         float S_j = R_j_off * ligandScaleFactors[templateIdx_j];
@@ -4029,7 +4029,7 @@ extern "C" __global__ void computeFusedReceptorForces(
  * Uses pre-computed bornForces per receptor atom (no OBC chain rule in inner loop).
  */
 extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -4071,7 +4071,7 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
-    float4 pos_lig = posq[particleIdx_lig];
+    real4 pos_lig = posq[particleIdx_lig];
     float R_lig = ligandRadii[templateIdx_lig];
     float R_lig_off = R_lig - DIELECTRIC_OFFSET;
     float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
@@ -4131,7 +4131,7 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
  * dE_cross/dR_born_lig and dE_cross/dR_born_rec, then chain through HCT.
  */
 extern "C" __global__ void computeCrossTermChainRuleForces(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -4183,7 +4183,7 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     int particleIdx_lig = particleIndices[idx];
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
-    float4 pos_lig = posq[particleIdx_lig];
+    real4 pos_lig = posq[particleIdx_lig];
     float R_lig = ligandRadii[templateIdx_lig];
     float R_lig_off = R_lig - DIELECTRIC_OFFSET;
     float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
@@ -4242,7 +4242,7 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
         int templateIdx_j = jLocal % templateNumAtoms;
         int particleIdx_j = particleIndices[j];
 
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float R_j = ligandRadii[templateIdx_j];
         float R_j_off = R_j - DIELECTRIC_OFFSET;
         float S_j = R_j_off * ligandScaleFactors[templateIdx_j];
@@ -4423,7 +4423,7 @@ extern "C" __global__ void accumulateCrossTermOnGPU(
  * Called once at first execute to build the baseline.
  */
 extern "C" __global__ void computeReceptorHCTPerAtom(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float3* __restrict__ receptorPositions,
@@ -4460,7 +4460,7 @@ extern "C" __global__ void computeReceptorHCTPerAtom(
         int templateIdx = atomInGroup % templateNumAtoms;
 
         int particleIdx = particleIndices[ligIdx];
-        float4 pos = posq[particleIdx];
+        real4 pos = posq[particleIdx];
         float R_i = radii[templateIdx];
         float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -4507,7 +4507,7 @@ extern "C" __global__ void computeReceptorHCTPerAtom(
  * Active atoms use freshly computed values; inactive atoms use cached baseline.
  */
 extern "C" __global__ void reconstructReceptorHCT(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float3* __restrict__ receptorPositions,
@@ -4541,7 +4541,7 @@ extern "C" __global__ void reconstructReceptorHCT(
     const int* activeMask = isActiveRecAtom + myGroupIdx * numReceptorAtoms;
 
     int particleIdx = particleIndices[idx];
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float R_i = radii[templateIdx];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -4631,7 +4631,7 @@ extern "C" __global__ void computeBaselineHCTSum(
  * Uses tiled shared memory for active receptor atoms.
  */
 extern "C" __global__ void reconstructReceptorHCTFast(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float3* __restrict__ receptorPositions,
@@ -4667,7 +4667,7 @@ extern "C" __global__ void reconstructReceptorHCTFast(
     const float* myBaseline = hctPerAtomBaseline + idx * numReceptorAtoms;
 
     int particleIdx = particleIndices[idx];
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float R_i = radii[templateIdx];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
 
@@ -4745,7 +4745,7 @@ extern "C" __global__ void reconstructReceptorHCTFast(
  * at low alpha.
  */
 extern "C" __global__ void computeActiveReceptorAtoms(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float3* __restrict__ receptorPositions,
     int numReceptorAtoms,
@@ -4776,7 +4776,7 @@ extern "C" __global__ void computeActiveReceptorAtoms(
         int ge = groupStart[g + 1];
         for (int k = gs; k < ge && !active; k++) {
             int particleIdx = particleIndices[k];
-            float4 pos_lig = posq[particleIdx];
+            real4 pos_lig = posq[particleIdx];
             float dx = pos_rec.x - pos_lig.x;
             float dy = pos_rec.y - pos_lig.y;
             float dz = pos_rec.z - pos_lig.z;
@@ -5004,7 +5004,7 @@ extern "C" __global__ void computeReceptorDeDRActive(
  *   dEdR_crossTerm[ligGlobalIdx]: accumulated dE_cross/dR_born_lig (fixed-point)
  */
 extern "C" __global__ void computePairwiseGBForceTiled(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -5073,7 +5073,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             int ligGlobal = gs + i;
             int particleIdx = particleIndices[ligGlobal];
             int templateIdx = i % templateNumAtoms;
-            float4 p = posq[particleIdx];
+            real4 p = posq[particleIdx];
             sLigPos[sBase + i] = make_float3(p.x, p.y, p.z);
             sLigCharge[sBase + i] = ligandCharges[templateIdx];
             sLigBornR[sBase + i] = ligandBornRadii[ligGlobal];
@@ -5217,7 +5217,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
  */
 extern "C" __global__ void addDistantCrossTermFromCache(
     const float* __restrict__ crossTermBlockCache,  // [numGroups * numRecBlocks]
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float4* __restrict__ recBlockBounds,
     float localityCutoff,
@@ -5247,7 +5247,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     bool anyClose = false;
     for (int li = gs; li < ge && !anyClose; li++) {
         int particleIdx = particleIndices[li];
-        float4 p = posq[particleIdx];
+        real4 p = posq[particleIdx];
         float dx = p.x - bounds.x;
         float dy = p.y - bounds.y;
         float dz = p.z - bounds.z;
@@ -5337,7 +5337,7 @@ extern "C" __global__ void reduceLigandBornForce(
  * Same tile structure as pass 1.
  */
 extern "C" __global__ void computePairwiseChainRuleTiled(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ ligandRadii,
     const float* __restrict__ ligandScaleFactors,
@@ -5394,7 +5394,7 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
             int ligGlobal = gs + i;
             int particleIdx = particleIndices[ligGlobal];
             int templateIdx = i % templateNumAtoms;
-            float4 p = posq[particleIdx];
+            real4 p = posq[particleIdx];
             sLigPos[sBase + i] = make_float3(p.x, p.y, p.z);
             float R = ligandRadii[templateIdx];
             sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
@@ -5489,7 +5489,7 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
  * all receptor dependence is already baked into the scalar field.
  */
 extern "C" __global__ void computeCrossTermFromGrid(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ charges,
     const int* __restrict__ groupStart,
@@ -5536,7 +5536,7 @@ extern "C" __global__ void computeCrossTermFromGrid(
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     int particleIdx = particleIndices[idx];
-    float4 pos = posq[particleIdx];
+    real4 pos = posq[particleIdx];
     float q_i = charges[binIdx];
 
     // --- Trilinear interpolation + analytic gradient on G[binIdx] ---
@@ -5667,7 +5667,7 @@ extern "C" __global__ void computeCrossTermFromGrid(
 // ============================================================================
 
 extern "C" __global__ void computeHCTJacobianPairwise(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const float* __restrict__ scaleFactors,
@@ -5706,7 +5706,7 @@ extern "C" __global__ void computeHCTJacobianPairwise(
 
     int particleIdx_k = particleIndices[idx];
     int templateIdx_k = atomInGroup % templateNumAtoms;
-    float4 pos_k = posq[particleIdx_k];
+    real4 pos_k = posq[particleIdx_k];
     float R_k = radii[templateIdx_k];
     float R_k_off = R_k - DIELECTRIC_OFFSET;
 
@@ -5769,7 +5769,7 @@ extern "C" __global__ void computeHCTJacobianPairwise(
         if (excluded) continue;
 
         int particleIdx_j = particleIndices[j];
-        float4 pos_j = posq[particleIdx_j];
+        real4 pos_j = posq[particleIdx_j];
         float R_j = radii[templateIdx_j];
         float R_j_off = R_j - DIELECTRIC_OFFSET;
         float S_j = R_j_off * scaleFactors[templateIdx_j];
@@ -5815,7 +5815,7 @@ extern "C" __global__ void computeHCTJacobianPairwise(
 
 
 extern "C" __global__ void computeReceptorPairwiseHessian(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float* __restrict__ radii,
     const int* __restrict__ groupStart,
@@ -5844,7 +5844,7 @@ extern "C" __global__ void computeReceptorPairwiseHessian(
 
     int templateIdx = atomInGroup % templateNumAtoms;
     int particleIdx = particleIndices[idx];
-    float4 pk = posq[particleIdx];
+    real4 pk = posq[particleIdx];
     float R_k = radii[templateIdx];
     float R_k_off = R_k - DIELECTRIC_OFFSET;
 

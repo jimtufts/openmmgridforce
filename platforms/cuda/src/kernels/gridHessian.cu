@@ -124,7 +124,7 @@ __device__ inline void applyRuntimeCapHessianChainRule(
  * @param particleIndices   Optional particle index filtering
  */
 extern "C" __global__ void computeGridHessian(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     float* __restrict__ hessianBuffer,  // 6 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
@@ -157,7 +157,7 @@ extern "C" __global__ void computeGridHessian(
     const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
     // Load position and scaling factor (with per-group alchemical scaling)
-    float4 posOrig = posq[particleIndex];
+    real4 posOrig = posq[particleIndex];
     float groupScale = 1.0f;
     if (groupScalingFactors != 0 && particleToGroupMap != 0) {
         int groupIdx = particleToGroupMap[particleIndex];
@@ -697,7 +697,7 @@ __device__ inline void applyThirdDerivChainRule(
  * Parameters match computeGridHessian exactly, except output buffer has 10 components per atom.
  */
 extern "C" __global__ void computeGridThirdDerivatives(
-    const float4* __restrict__ posq,
+    const real4* __restrict__ posq,
     float* __restrict__ thirdDerivBuffer,  // 10 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
@@ -721,7 +721,7 @@ extern "C" __global__ void computeGridThirdDerivatives(
 
     const unsigned int particleIndex = (particleIndices != 0) ? particleIndices[index] : index;
 
-    float4 posOrig = posq[particleIndex];
+    real4 posOrig = posq[particleIndex];
     float scalingFactor = scalingFactors[particleIndex];
 
     float3 pos;
