@@ -431,6 +431,60 @@ __device__ inline InterpolationResult triquinticInterpolate(
 }
 
 /**
+ * Tier 2 (compute precision): full real-precision triquintic value + physical gradient.
+ * Position and fractional coords are real (double in double mode), assembly/eval use the
+ * double helpers, and the result stays real end-to-end -- no float truncation through the
+ * (float) InterpolationResult struct. Grid derivative STORAGE is still float (Tier 3 is the
+ * decoupled f64-storage knob). Returns false if the position is outside the grid.
+ * Only valid for NONE inv_power mode with no arcsinh/cap (caller guards this).
+ */
+__device__ inline bool triquinticInterpolateReal(
+    const float* __restrict__ gridDerivatives,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridSpacing,
+    real originX, real originY, real originZ,
+    real3 position,
+    real* value, real* gx, real* gy, real* gz)
+{
+    if (gridDerivatives == 0) return false;
+    real rx = position.x - originX;
+    real ry = position.y - originY;
+    real rz = position.z - originZ;
+    real ex = (real)gridSpacing[0] * (gridCounts[0] - 1);
+    real ey = (real)gridSpacing[1] * (gridCounts[1] - 1);
+    real ez = (real)gridSpacing[2] * (gridCounts[2] - 1);
+    if (!(rx >= (real)0 && rx <= ex && ry >= (real)0 && ry <= ey && rz >= (real)0 && rz <= ez))
+        return false;
+    int ix = min(max((int)(rx / (real)gridSpacing[0]), 0), gridCounts[0] - 2);
+    int iy = min(max((int)(ry / (real)gridSpacing[1]), 0), gridCounts[1] - 2);
+    int iz = min(max((int)(rz / (real)gridSpacing[2]), 0), gridCounts[2] - 2);
+    real fx = rx / (real)gridSpacing[0] - ix; fx = min(max(fx, (real)0), (real)1);
+    real fy = ry / (real)gridSpacing[1] - iy; fy = min(max(fy, (real)0), (real)1);
+    real fz = rz / (real)gridSpacing[2] - iz; fz = min(max(fz, (real)0), (real)1);
+    int nyz = gridCounts[1] * gridCounts[2];
+    int totalPoints = gridCounts[0] * nyz;
+    int corners[8][3] = {
+        {ix, iy, iz}, {ix+1, iy, iz}, {ix, iy+1, iz}, {ix+1, iy+1, iz},
+        {ix, iy, iz+1}, {ix+1, iy, iz+1}, {ix, iy+1, iz+1}, {ix+1, iy+1, iz+1}
+    };
+    TriquinticAccum X[216];
+    for (int d = 0; d < 27; d++)
+        for (int c = 0; c < 8; c++) {
+            int pidx = corners[c][0]*nyz + corners[c][1]*gridCounts[2] + corners[c][2];
+            X[d*8 + c] = gridDerivatives[d * totalPoints + pidx];
+        }
+    TriquinticAccum a[216];
+    triquinticAssemble(X, a);
+    TriquinticAccum v, dvx, dvy, dvz;
+    triquinticEvalVG(a, fx, fy, fz, &v, &dvx, &dvy, &dvz);
+    *value = (real)v;
+    *gx = (real)dvx / (real)gridSpacing[0];
+    *gy = (real)dvy / (real)gridSpacing[1];
+    *gz = (real)dvz / (real)gridSpacing[2];
+    return true;
+}
+
+/**
  * Quintic B-spline interpolation (method 4).
  * Uses 6x6x6 = 216 grid points with quintic (degree 5) B-spline basis functions.
  * Requires prefiltered grid values (quintic B-spline prefilter, pentadiagonal solver).

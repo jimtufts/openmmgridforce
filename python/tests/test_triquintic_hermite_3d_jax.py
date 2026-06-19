@@ -191,7 +191,9 @@ def main():
         esys.addParticle(1.0)
         gridf.addParticleGroup('charge', [0], [1.0])  # E = 1.0 * V(pos)
         esys.addForce(gridf)
-        ctx = Context(esys, VerletIntegrator(0.001), platform)
+        _prec = sys.argv[1] if len(sys.argv) > 1 else 'single'
+        print(f"  (eval context Precision = {_prec})")
+        ctx = Context(esys, VerletIntegrator(0.001), platform, {'Precision': _prec})
         ctx.setPositions([mm.Vec3(*probe)] * 1 * nanometer)
         st = ctx.getState(getEnergy=True, getForces=True)
         E_plugin = st.getPotentialEnergy().value_in_unit(kilojoules_per_mole)

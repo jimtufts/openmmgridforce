@@ -84,10 +84,10 @@ extern "C" __global__ void computeGridForce(
     pos.y = posOrig.y - originY;
     pos.z = posOrig.z - originZ;
 
-    // Initialize force to zero
-    float3 atomForce = make_float3(0.0f, 0.0f, 0.0f);
-    float threadEnergy = 0.0f;
-    float threadUnscaledEnergy = 0.0f;
+    // Initialize force to zero (real/mixed so double mode keeps full precision)
+    real3 atomForce = make_real3((real)0, (real)0, (real)0);
+    mixed threadEnergy = (mixed)0;
+    mixed threadUnscaledEnergy = (mixed)0;
 
     // Check if the atom is inside the effective evaluation bounds.
     // Effective bounds default to the full grid extent but can be set smaller
@@ -103,7 +103,25 @@ extern "C" __global__ void computeGridForce(
         // =====================================================================
         // Fast path: Use shared GridInterpolation library when no inv_power transformation
         // =====================================================================
-        if (invPowerMode == 0) {
+        if (invPowerMode == 0 && interpolationMethod == 3 && gridDerivatives != 0 &&
+            arcsinhScale == 0.0f && effectiveCap <= 0.0f) {
+            // Tier 2: full real-precision triquintic (no arcsinh/cap). Position,
+            // fraction, eval, and force stay real/mixed -- double mode computes the
+            // force at the exact double position, not a float-truncated one.
+            real3 rpos = make_real3(posOrig.x, posOrig.y, posOrig.z);
+            real rval, rgx, rgy, rgz;
+            if (triquinticInterpolateReal(gridDerivatives, gridCounts, gridSpacing,
+                    (real)originX, (real)originY, (real)originZ, rpos, &rval, &rgx, &rgy, &rgz)) {
+                if (atomRawEnergyBuffer != 0)
+                    atomRawEnergyBuffer[index] = (float)(unscaledScaling * rval);
+                threadEnergy = scalingFactor * rval;
+                threadUnscaledEnergy = unscaledScaling * rval;
+                atomForce.x = -scalingFactor * rgx;
+                atomForce.y = -scalingFactor * rgy;
+                atomForce.z = -scalingFactor * rgz;
+            }
+        }
+        else if (invPowerMode == 0) {
             // No inv_power transformation - use shared library directly
             float3 absPosition = make_float3(posOrig.x, posOrig.y, posOrig.z);
 
