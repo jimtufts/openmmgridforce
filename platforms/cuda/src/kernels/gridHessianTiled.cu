@@ -157,6 +157,8 @@ extern "C" __global__ void computeGridHessianTiled(
     pos.z = posOrig.z - originZ;
 
     // Initialize Hessian components to zero
+    // PROTOTYPE(precision): triquintic 216-coeff assembly + eval temporaries in double
+    // (see gridHessian.cu); these accumulators stay float for downstream chain rule.
     float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
     float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
 
@@ -214,7 +216,7 @@ extern "C" __global__ void computeGridHessianTiled(
                 };
 
                 // Gather derivatives in DERIVATIVE-MAJOR layout
-                float X[216];
+                double X[216];
                 if (invPowerMode == 1) {
                     // RUNTIME mode: transform all 27 derivatives per corner
                     float p = 1.0f / invPower;
@@ -239,52 +241,15 @@ extern "C" __global__ void computeGridHessianTiled(
                     }
                 }
 
-                // Compute polynomial coefficients
-                float a[216];
-                const float scale = 0.125f;
-                for (int i = 0; i < 216; i++) {
-                    a[i] = 0.0f;
-                    for (int j = 0; j < 216; j++) {
-                        a[i] += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
-                    }
-                    a[i] *= scale;
-                }
-
-                // Precompute powers
-                float sx_pow[6], sy_pow[6], sz_pow[6];
-                sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
-                for (int p = 1; p < 6; p++) {
-                    sx_pow[p] = sx_pow[p-1] * fx;
-                    sy_pow[p] = sy_pow[p-1] * fy;
-                    sz_pow[p] = sz_pow[p-1] * fz;
-                }
-
-                // Evaluate polynomial value, first derivatives, and second derivatives
-                for (int k = 0; k < 6; k++) {
-                    for (int j = 0; j < 6; j++) {
-                        for (int i = 0; i < 6; i++) {
-                            int coeff_idx = i + 6*j + 36*k;
-                            float coeff = a[coeff_idx];
-                            float term = sx_pow[i] * sy_pow[j] * sz_pow[k];
-
-                            // Interpolated value
-                            interpolated += coeff * term;
-
-                            // First derivatives
-                            if (i >= 1) dx += coeff * i * sx_pow[i-1] * sy_pow[j] * sz_pow[k];
-                            if (j >= 1) dy += coeff * j * sx_pow[i] * sy_pow[j-1] * sz_pow[k];
-                            if (k >= 1) dz += coeff * k * sx_pow[i] * sy_pow[j] * sz_pow[k-1];
-
-                            // Second derivatives
-                            if (i >= 2) d2xx += coeff * (i * (i-1)) * sx_pow[i-2] * sy_pow[j] * sz_pow[k];
-                            if (j >= 2) d2yy += coeff * (j * (j-1)) * sx_pow[i] * sy_pow[j-2] * sz_pow[k];
-                            if (k >= 2) d2zz += coeff * (k * (k-1)) * sx_pow[i] * sy_pow[j] * sz_pow[k-2];
-                            if (i >= 1 && j >= 1) d2xy += coeff * (i * j) * sx_pow[i-1] * sy_pow[j-1] * sz_pow[k];
-                            if (i >= 1 && k >= 1) d2xz += coeff * (i * k) * sx_pow[i-1] * sy_pow[j] * sz_pow[k-1];
-                            if (j >= 1 && k >= 1) d2yz += coeff * (j * k) * sx_pow[i] * sy_pow[j-1] * sz_pow[k-1];
-                        }
-                    }
-                }
+                // Assemble + evaluate (value, gradient, Hessian) via the shared
+                // double-precision helpers; truncate into the float accumulators.
+                TriquinticAccum a[216];
+                triquinticAssemble(X, a);
+                TriquinticAccum v, gx, gy, gz, hxx, hyy, hzz, hxy, hxz, hyz;
+                triquinticEvalVGH(a, fx, fy, fz, &v, &gx, &gy, &gz,
+                                  &hxx, &hyy, &hzz, &hxy, &hxz, &hyz);
+                interpolated = v; dx = gx; dy = gy; dz = gz;
+                d2xx = hxx; d2yy = hyy; d2zz = hzz; d2xy = hxy; d2xz = hxz; d2yz = hyz;
 
                 // Back-convert from smoothed space to actual potential for RUNTIME mode
                 if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {

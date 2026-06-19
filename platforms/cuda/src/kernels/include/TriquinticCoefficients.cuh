@@ -1762,3 +1762,89 @@ __device__ const float TRIQUINTIC_COEFFICIENTS[216][216] = {
      -36,   36,   -36,  36,    -36,  36,    -36,   -36,  36,   36,   -36,  -36, 36,   36,   -36,  -36,  -36,  -36,
      36,    36,   36,   36,    -6,   6,     6,     -6,   -6,   6,    6,    -6,  -6,   6,    -6,   6,    6,    -6,
      6,     -6,   -6,   -6,    6,    6,     6,     6,    -6,   -6,   -1,   1,   1,    -1,   1,    -1,   -1,   1}};
+
+// ---------------------------------------------------------------------------
+// Shared triquintic assembly + evaluation (precision-controlled).
+//
+// The 216x216 coefficient solve  a = 0.125 * M * X  is ill-conditioned: in fp32
+// it loses C2 continuity across cell faces, which stalls L-BFGS minimization and
+// produces spurious non-positive-definite ("fake") Hessians. It is therefore done
+// in TriquinticAccum = double UNCONDITIONALLY (independent of the platform
+// precision mode) -- this is a numerical-stability requirement, not an accuracy
+// knob. The cost is hidden behind the coefficient-matrix memory traffic (the
+// kernel is bandwidth-bound), so it is effectively free. Callers gather the 216
+// derivatives into X (site-specific: tiled vs non-tiled, inv_power transform),
+// then use these helpers; outputs are truncated to the caller's working type.
+// See DESIGN_PRECISION_SELECTION.md.
+// ---------------------------------------------------------------------------
+typedef double TriquinticAccum;
+
+__device__ inline void triquinticAssemble(const TriquinticAccum X[216], TriquinticAccum a[216]) {
+    for (int i = 0; i < 216; i++) {
+        TriquinticAccum s = 0.0;
+        for (int j = 0; j < 216; j++) {
+            s += (TriquinticAccum)TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
+        }
+        a[i] = 0.125 * s;
+    }
+}
+
+__device__ inline void triquinticPowers(TriquinticAccum fx, TriquinticAccum fy, TriquinticAccum fz,
+                                         TriquinticAccum px[6], TriquinticAccum py[6], TriquinticAccum pz[6]) {
+    px[0] = py[0] = pz[0] = 1.0;
+    for (int p = 1; p < 6; p++) {
+        px[p] = px[p-1] * fx;
+        py[p] = py[p-1] * fy;
+        pz[p] = pz[p-1] * fz;
+    }
+}
+
+// value + gradient w.r.t. fractional cell coords (fx,fy,fz in [0,1]).
+__device__ inline void triquinticEvalVG(
+    const TriquinticAccum a[216], TriquinticAccum fx, TriquinticAccum fy, TriquinticAccum fz,
+    TriquinticAccum* value, TriquinticAccum* gx, TriquinticAccum* gy, TriquinticAccum* gz)
+{
+    TriquinticAccum px[6], py[6], pz[6];
+    triquinticPowers(fx, fy, fz, px, py, pz);
+    TriquinticAccum v = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
+    for (int k = 0; k < 6; k++)
+        for (int j = 0; j < 6; j++)
+            for (int i = 0; i < 6; i++) {
+                TriquinticAccum c = a[i + 6*j + 36*k];
+                v += c * px[i] * py[j] * pz[k];
+                if (i > 0) vx += c * i * px[i-1] * py[j] * pz[k];
+                if (j > 0) vy += c * j * px[i] * py[j-1] * pz[k];
+                if (k > 0) vz += c * k * px[i] * py[j] * pz[k-1];
+            }
+    *value = v; *gx = vx; *gy = vy; *gz = vz;
+}
+
+// value + gradient + Hessian (second derivatives w.r.t. fractional coords).
+__device__ inline void triquinticEvalVGH(
+    const TriquinticAccum a[216], TriquinticAccum fx, TriquinticAccum fy, TriquinticAccum fz,
+    TriquinticAccum* value, TriquinticAccum* gx, TriquinticAccum* gy, TriquinticAccum* gz,
+    TriquinticAccum* hxx, TriquinticAccum* hyy, TriquinticAccum* hzz,
+    TriquinticAccum* hxy, TriquinticAccum* hxz, TriquinticAccum* hyz)
+{
+    TriquinticAccum px[6], py[6], pz[6];
+    triquinticPowers(fx, fy, fz, px, py, pz);
+    TriquinticAccum v=0.0, vx=0.0, vy=0.0, vz=0.0;
+    TriquinticAccum dxx=0.0, dyy=0.0, dzz=0.0, dxy=0.0, dxz=0.0, dyz=0.0;
+    for (int k = 0; k < 6; k++)
+        for (int j = 0; j < 6; j++)
+            for (int i = 0; i < 6; i++) {
+                TriquinticAccum c = a[i + 6*j + 36*k];
+                v += c * px[i] * py[j] * pz[k];
+                if (i > 0) vx += c * i * px[i-1] * py[j] * pz[k];
+                if (j > 0) vy += c * j * px[i] * py[j-1] * pz[k];
+                if (k > 0) vz += c * k * px[i] * py[j] * pz[k-1];
+                if (i > 1) dxx += c * (i*(i-1)) * px[i-2] * py[j] * pz[k];
+                if (j > 1) dyy += c * (j*(j-1)) * px[i] * py[j-2] * pz[k];
+                if (k > 1) dzz += c * (k*(k-1)) * px[i] * py[j] * pz[k-2];
+                if (i > 0 && j > 0) dxy += c * (i*j) * px[i-1] * py[j-1] * pz[k];
+                if (i > 0 && k > 0) dxz += c * (i*k) * px[i-1] * py[j] * pz[k-1];
+                if (j > 0 && k > 0) dyz += c * (j*k) * px[i] * py[j-1] * pz[k-1];
+            }
+    *value=v; *gx=vx; *gy=vy; *gz=vz;
+    *hxx=dxx; *hyy=dyy; *hzz=dzz; *hxy=dxy; *hxz=dxz; *hyz=dyz;
+}

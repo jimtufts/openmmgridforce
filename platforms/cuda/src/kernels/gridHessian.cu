@@ -183,6 +183,10 @@ extern "C" __global__ void computeGridHessian(
     pos.z = posOrig.z - originZ;
 
     // Initialize interpolated value, first derivatives, and Hessian components to zero
+    // PROTOTYPE(precision): the triquintic 216-coeff assembly + eval temporaries are
+    // done in double (that fp32 solve corrupts 2nd derivs ~1e5 and breaks cross-cell
+    // C2 -> "fake" non-PD). These accumulators stay float for the downstream chain-rule
+    // helpers; consistency is preserved (both cells run identical double->float ops).
     float interpolated = 0.0f;
     float dx = 0.0f, dy = 0.0f, dz = 0.0f;
     float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
@@ -225,7 +229,7 @@ extern "C" __global__ void computeGridHessian(
             };
 
             // Gather derivatives - transform at corners for RUNTIME mode
-            float X[216];
+            double X[216];
             if (invPowerMode == 1) {
                 // RUNTIME mode: transform corners from G space to S space BEFORE interpolation
                 // p = 1/invPower transforms G → S = |G|^p
@@ -251,86 +255,17 @@ extern "C" __global__ void computeGridHessian(
                 }
             }
 
-            // Compute polynomial coefficients
-            float a[216];
-            const float scale = 0.125f;
-            for (int i = 0; i < 216; i++) {
-                a[i] = 0.0f;
-                for (int j = 0; j < 216; j++) {
-                    a[i] += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
-                }
-                a[i] *= scale;
-            }
-
-            // Precompute powers
-            float sx_pow[6], sy_pow[6], sz_pow[6];
-            sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
-            for (int p = 1; p < 6; p++) {
-                sx_pow[p] = sx_pow[p-1] * fx;
-                sy_pow[p] = sy_pow[p-1] * fy;
-                sz_pow[p] = sz_pow[p-1] * fz;
-            }
-
-            // Evaluate polynomial value, first derivatives, and second derivatives
-            // P(x,y,z) = sum_{i,j,k} a[i+6j+36k] * x^i * y^j * z^k
-
-            for (int k = 0; k < 6; k++) {
-                for (int j = 0; j < 6; j++) {
-                    for (int i = 0; i < 6; i++) {
-                        int coeff_idx = i + 6*j + 36*k;
-                        float coeff = a[coeff_idx];
-                        float term = sx_pow[i] * sy_pow[j] * sz_pow[k];
-
-                        // Interpolated value (needed for chain rule)
-                        interpolated += coeff * term;
-
-                        // dV/dx: need i >= 1
-                        if (i >= 1) {
-                            dx += coeff * i * sx_pow[i-1] * sy_pow[j] * sz_pow[k];
-                        }
-
-                        // dV/dy: need j >= 1
-                        if (j >= 1) {
-                            dy += coeff * j * sx_pow[i] * sy_pow[j-1] * sz_pow[k];
-                        }
-
-                        // dV/dz: need k >= 1
-                        if (k >= 1) {
-                            dz += coeff * k * sx_pow[i] * sy_pow[j] * sz_pow[k-1];
-                        }
-
-                        // d²V/dx²: need i >= 2
-                        if (i >= 2) {
-                            d2xx += coeff * (i * (i-1)) * sx_pow[i-2] * sy_pow[j] * sz_pow[k];
-                        }
-
-                        // d²V/dy²: need j >= 2
-                        if (j >= 2) {
-                            d2yy += coeff * (j * (j-1)) * sx_pow[i] * sy_pow[j-2] * sz_pow[k];
-                        }
-
-                        // d²V/dz²: need k >= 2
-                        if (k >= 2) {
-                            d2zz += coeff * (k * (k-1)) * sx_pow[i] * sy_pow[j] * sz_pow[k-2];
-                        }
-
-                        // d²V/dxdy: need i >= 1 and j >= 1
-                        if (i >= 1 && j >= 1) {
-                            d2xy += coeff * (i * j) * sx_pow[i-1] * sy_pow[j-1] * sz_pow[k];
-                        }
-
-                        // d²V/dxdz: need i >= 1 and k >= 1
-                        if (i >= 1 && k >= 1) {
-                            d2xz += coeff * (i * k) * sx_pow[i-1] * sy_pow[j] * sz_pow[k-1];
-                        }
-
-                        // d²V/dydz: need j >= 1 and k >= 1
-                        if (j >= 1 && k >= 1) {
-                            d2yz += coeff * (j * k) * sx_pow[i] * sy_pow[j-1] * sz_pow[k-1];
-                        }
-                    }
-                }
-            }
+            // Assemble + evaluate (value, gradient, Hessian) via the shared
+            // double-precision helpers; truncate into the float accumulators that
+            // the downstream chain-rule helpers expect (consistency preserved --
+            // both cells run identical double->float ops).
+            TriquinticAccum a[216];
+            triquinticAssemble(X, a);
+            TriquinticAccum v, gx, gy, gz, hxx, hyy, hzz, hxy, hxz, hyz;
+            triquinticEvalVGH(a, fx, fy, fz, &v, &gx, &gy, &gz,
+                              &hxx, &hyy, &hzz, &hxy, &hxz, &hyz);
+            interpolated = v; dx = gx; dy = gy; dz = gz;
+            d2xx = hxx; d2yy = hyy; d2zz = hzz; d2xy = hxy; d2xz = hxz; d2yz = hyz;
 
             // Undo transforms in reverse order of application during generation.
             // Generation order: inv_power → arcsinh → blur → prefilter.

@@ -426,8 +426,10 @@ __device__ inline InterpolationResult triquinticInterpolate(
         {ix, iy, iz+1}, {ix+1, iy, iz+1}, {ix, iy+1, iz+1}, {ix+1, iy+1, iz+1}
     };
 
-    // Gather derivatives in DERIVATIVE-MAJOR layout: X[deriv_idx * 8 + corner_idx]
-    float X[216];
+    // Gather the 216 stored derivatives (DERIVATIVE-MAJOR: X[deriv*8 + corner]),
+    // then assemble + evaluate via the shared double-precision helpers (the fp32
+    // 216-solve loses cross-cell C2 and breaks L-BFGS / fakes non-PD Hessians).
+    TriquinticAccum X[216];
     for (int d = 0; d < 27; d++) {
         for (int c = 0; c < 8; c++) {
             int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
@@ -435,44 +437,11 @@ __device__ inline InterpolationResult triquinticInterpolate(
         }
     }
 
-    // Compute polynomial coefficients: a = 0.125 * TRIQUINTIC_COEFFICIENTS * X
-    float a[216];
-    const float scale = 0.125f;
-    for (int i = 0; i < 216; i++) {
-        a[i] = 0.0f;
-        for (int j = 0; j < 216; j++) {
-            a[i] += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
-        }
-        a[i] *= scale;
-    }
+    TriquinticAccum a[216];
+    triquinticAssemble(X, a);
 
-    // Precompute powers of local coordinates
-    float sx_pow[6], sy_pow[6], sz_pow[6];
-    sx_pow[0] = sy_pow[0] = sz_pow[0] = 1.0f;
-    for (int p = 1; p < 6; p++) {
-        sx_pow[p] = sx_pow[p-1] * fx;
-        sy_pow[p] = sy_pow[p-1] * fy;
-        sz_pow[p] = sz_pow[p-1] * fz;
-    }
-
-    // Evaluate polynomial: sum over i,j,k of a[i+6j+36k] * fx^i * fy^j * fz^k
-    float value = 0.0f;
-    float dvalue_dx = 0.0f, dvalue_dy = 0.0f, dvalue_dz = 0.0f;
-
-    for (int k = 0; k < 6; k++) {
-        for (int j = 0; j < 6; j++) {
-            for (int i = 0; i < 6; i++) {
-                int coeff_idx = i + 6*j + 36*k;
-                float coeff = a[coeff_idx];
-                value += coeff * sx_pow[i] * sy_pow[j] * sz_pow[k];
-                if (computeGradient) {
-                    if (i > 0) dvalue_dx += coeff * i * sx_pow[i-1] * sy_pow[j] * sz_pow[k];
-                    if (j > 0) dvalue_dy += coeff * j * sx_pow[i] * sy_pow[j-1] * sz_pow[k];
-                    if (k > 0) dvalue_dz += coeff * k * sx_pow[i] * sy_pow[j] * sz_pow[k-1];
-                }
-            }
-        }
-    }
+    TriquinticAccum value, dvalue_dx, dvalue_dy, dvalue_dz;
+    triquinticEvalVG(a, fx, fy, fz, &value, &dvalue_dx, &dvalue_dy, &dvalue_dz);
 
     result.value = value;
 
