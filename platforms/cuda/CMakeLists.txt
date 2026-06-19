@@ -72,8 +72,13 @@ SET_TARGET_PROPERTIES(${SHARED_TARGET} PROPERTIES
     COMPILE_FLAGS "-DOPENMM_BUILDING_SHARED_LIBRARY ${EXTRA_COMPILE_FLAGS}"
     LINK_FLAGS "${EXTRA_COMPILE_FLAGS}")
 
-# Set CUDA compilation flags for compatibility with older drivers
-SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_35,code=sm_35 -gencode arch=compute_52,code=sm_52")
+# Set CUDA compilation flags for compatibility with older drivers.
+# sm_35 (Kepler) support was removed in CUDA 12.0, so only emit it on older
+# toolkits; sm_52 (Maxwell) is deprecated but still compiles on CUDA 12.x.
+IF(CUDAToolkit_VERSION VERSION_LESS "12.0")
+    SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_35,code=sm_35")
+ENDIF()
+SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_52,code=sm_52")
 IF(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
     SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_89,code=sm_89")
 ENDIF()
