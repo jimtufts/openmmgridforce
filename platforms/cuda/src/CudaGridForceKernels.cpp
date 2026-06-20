@@ -72,6 +72,27 @@ static size_t computeGridHash(const vector<int>& counts, const vector<double>& s
 CudaCalcGridForceKernel::~CudaCalcGridForceKernel() {
 }
 
+// Download atom positions as flat [x,y,z] floats, handling both posq element
+// types: float4 in single/mixed precision, double4 in double precision.
+static std::vector<float> downloadPositionsXYZ(OpenMM::CudaContext& cu) {
+    int n = cu.getNumAtoms();
+    std::vector<float> xyz(3 * (size_t)n);
+    if (cu.getUseDoublePrecision()) {
+        std::vector<double4> p(n);
+        cu.getPosq().download(p);
+        for (int i = 0; i < n; i++) {
+            xyz[3*i] = (float)p[i].x; xyz[3*i+1] = (float)p[i].y; xyz[3*i+2] = (float)p[i].z;
+        }
+    } else {
+        std::vector<float4> p(n);
+        cu.getPosq().download(p);
+        for (int i = 0; i < n; i++) {
+            xyz[3*i] = p[i].x; xyz[3*i+1] = p[i].y; xyz[3*i+2] = p[i].z;
+        }
+    }
+    return xyz;
+}
+
 // Initialize analysis-related members in constructor if needed
 // Note: analysisBuffersInitialized should be false by default
 
@@ -1234,9 +1255,7 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
 
         if (needsCpuRetile) {
             // CPU fallback: download positions and run prepareTiles()
-            int totalParticles = cu.getNumAtoms();
-            std::vector<float4> posqHost(totalParticles);
-            cu.getPosq().download(posqHost);
+            std::vector<float> posXYZ = downloadPositionsXYZ(cu);
 
             std::vector<float> positions;
             if (totalGroupParticles > 0) {
@@ -1245,23 +1264,23 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
                 positions.reserve(totalGroupParticles * 3);
                 for (int i = 0; i < totalGroupParticles; i++) {
                     int idx = groupIndicesHost[i];
-                    positions.push_back(posqHost[idx].x);
-                    positions.push_back(posqHost[idx].y);
-                    positions.push_back(posqHost[idx].z);
+                    positions.push_back(posXYZ[3*idx]);
+                    positions.push_back(posXYZ[3*idx+1]);
+                    positions.push_back(posXYZ[3*idx+2]);
                 }
             } else if (!particles.empty()) {
                 positions.reserve(particles.size() * 3);
                 for (int idx : particles) {
-                    positions.push_back(posqHost[idx].x);
-                    positions.push_back(posqHost[idx].y);
-                    positions.push_back(posqHost[idx].z);
+                    positions.push_back(posXYZ[3*idx]);
+                    positions.push_back(posXYZ[3*idx+1]);
+                    positions.push_back(posXYZ[3*idx+2]);
                 }
             } else {
                 positions.reserve(numAtoms * 3);
                 for (int i = 0; i < numAtoms; i++) {
-                    positions.push_back(posqHost[i].x);
-                    positions.push_back(posqHost[i].y);
-                    positions.push_back(posqHost[i].z);
+                    positions.push_back(posXYZ[3*i]);
+                    positions.push_back(posXYZ[3*i+1]);
+                    positions.push_back(posXYZ[3*i+2]);
                 }
             }
 
@@ -1536,9 +1555,7 @@ void CudaCalcGridForceKernel::computeHessian() {
         // Tiled execution path: determine required tiles and launch tiled Hessian kernel
 
         // Get particle positions from GPU
-        int totalParticles = cu.getNumAtoms();
-        std::vector<float4> posqHost(totalParticles);
-        cu.getPosq().download(posqHost);
+        std::vector<float> posXYZ = downloadPositionsXYZ(cu);
 
         // Extract positions for tile determination
         std::vector<float> positions;
@@ -1549,25 +1566,25 @@ void CudaCalcGridForceKernel::computeHessian() {
             positions.reserve(totalGroupParticles * 3);
             for (int i = 0; i < totalGroupParticles; i++) {
                 int idx = groupIndicesHost[i];
-                positions.push_back(posqHost[idx].x);
-                positions.push_back(posqHost[idx].y);
-                positions.push_back(posqHost[idx].z);
+                positions.push_back(posXYZ[3*idx]);
+                positions.push_back(posXYZ[3*idx+1]);
+                positions.push_back(posXYZ[3*idx+2]);
             }
         } else if (!particles.empty()) {
             // Filtered particles mode
             positions.reserve(particles.size() * 3);
             for (int idx : particles) {
-                positions.push_back(posqHost[idx].x);
-                positions.push_back(posqHost[idx].y);
-                positions.push_back(posqHost[idx].z);
+                positions.push_back(posXYZ[3*idx]);
+                positions.push_back(posXYZ[3*idx+1]);
+                positions.push_back(posXYZ[3*idx+2]);
             }
         } else {
             // All particles mode
             positions.reserve(numAtoms * 3);
             for (int i = 0; i < numAtoms; i++) {
-                positions.push_back(posqHost[i].x);
-                positions.push_back(posqHost[i].y);
-                positions.push_back(posqHost[i].z);
+                positions.push_back(posXYZ[3*i]);
+                positions.push_back(posXYZ[3*i+1]);
+                positions.push_back(posXYZ[3*i+2]);
             }
         }
 
