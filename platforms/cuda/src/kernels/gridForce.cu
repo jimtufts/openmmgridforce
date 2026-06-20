@@ -79,7 +79,7 @@ extern "C" __global__ void computeGridForce(
     }
 
     // Transform position to grid coordinates (relative to origin)
-    float3 pos;
+    real3 pos;
     pos.x = posOrig.x - originX;
     pos.y = posOrig.y - originY;
     pos.z = posOrig.z - originZ;
@@ -180,9 +180,9 @@ extern "C" __global__ void computeGridForce(
         int iz = min(max((int)(pos.z / gridSpacing[2]), 0), gridCounts[2] - 2);
 
         // Calculate fractional position within the cell
-        float fx = (pos.x / gridSpacing[0]) - ix;
-        float fy = (pos.y / gridSpacing[1]) - iy;
-        float fz = (pos.z / gridSpacing[2]) - iz;
+        real fx = (pos.x / gridSpacing[0]) - ix;
+        real fy = (pos.y / gridSpacing[1]) - iy;
+        real fz = (pos.z / gridSpacing[2]) - iz;
 
         fx = min(max(fx, 0.0f), 1.0f);
         fy = min(max(fy, 0.0f), 1.0f);
@@ -200,22 +200,22 @@ extern "C" __global__ void computeGridForce(
 #endif
 
         // Declare variables for interpolation
-        float interpolated = 0.0f;
-        float dx, dy, dz;
+        real interpolated = 0.0f;
+        real dx, dy, dz;
         int nyz = gridCounts[1] * gridCounts[2];
 
         if (interpolationMethod == 1) {
             // CUBIC B-SPLINE INTERPOLATION (4x4x4 = 64 points)
             // Precompute basis functions
-            float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
-            float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
-            float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+            real bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+            real by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+            real bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
 
-            float dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
-            float dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
-            float dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+            real dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+            real dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+            real dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
 
-            float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+            real dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
 
             // Tri-linear B-spline interpolation
             for (int i = 0; i < 4; i++) {
@@ -225,19 +225,19 @@ extern "C" __global__ void computeGridForce(
                     for (int k = 0; k < 4; k++) {
                         int gz = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
                         int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                        float val = gridValues[gridIdx];
+                        real val = gridValues[gridIdx];
 
                         // Apply RUNTIME inv_power transformation before interpolation
                         if (invPowerMode == 1) {  // RUNTIME mode
-                            float invN = 1.0f / invPower;
-                            if (fabsf(val) >= 1e-10f) {
-                                val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                            real invN = 1.0f / invPower;
+                            if (fabs(val) >= 1e-10f) {
+                                val = (val >= 0.0f ? 1.0f : -1.0f) * pow(fabs(val), invN);
                             } else {
                                 val = 0.0f;
                             }
                         }
 
-                        float weight = bx[i] * by[j] * bz[k];
+                        real weight = bx[i] * by[j] * bz[k];
                         interpolated += weight * val;
                         dvdx += dbx[i] * by[j] * bz[k] * val;
                         dvdy += bx[i] * dby[j] * bz[k] * val;
@@ -254,21 +254,21 @@ extern "C" __global__ void computeGridForce(
 
         } else if (interpolationMethod == 4) {
             // QUINTIC B-SPLINE INTERPOLATION (6x6x6 = 216 points)
-            float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+            real bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
                            qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
-            float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+            real by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
                            qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
-            float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+            real bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
                            qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
 
-            float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+            real dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
                             qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
-            float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+            real dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
                             qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
-            float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+            real dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
                             qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
 
-            float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+            real dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
 
             for (int i = 0; i < 6; i++) {
                 int gx = min(max(ix - 2 + i, 0), gridCounts[0] - 1);
@@ -277,19 +277,19 @@ extern "C" __global__ void computeGridForce(
                     for (int k = 0; k < 6; k++) {
                         int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
                         int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                        float val = gridValues[gridIdx];
+                        real val = gridValues[gridIdx];
 
                         // Apply RUNTIME inv_power transformation before interpolation
                         if (invPowerMode == 1) {
-                            float invN = 1.0f / invPower;
-                            if (fabsf(val) >= 1e-10f) {
-                                val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                            real invN = 1.0f / invPower;
+                            if (fabs(val) >= 1e-10f) {
+                                val = (val >= 0.0f ? 1.0f : -1.0f) * pow(fabs(val), invN);
                             } else {
                                 val = 0.0f;
                             }
                         }
 
-                        float weight = bx[i] * by[j] * bz[k];
+                        real weight = bx[i] * by[j] * bz[k];
                         interpolated += weight * val;
                         dvdx += dbx[i] * by[j] * bz[k] * val;
                         dvdy += bx[i] * dby[j] * bz[k] * val;
@@ -335,10 +335,10 @@ extern "C" __global__ void computeGridForce(
 
             if (invPowerMode == 1) {
                 // RUNTIME mode: transform all 27 derivatives per corner, then extract needed 8
-                float p = 1.0f / invPower;
+                real p = 1.0f / invPower;
                 for (int c = 0; c < 8; c++) {
                     int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
-                    float U_derivs[27], V_derivs[27];
+                    real U_derivs[27], V_derivs[27];
                     for (int d = 0; d < 27; d++) {
                         U_derivs[d] = gridDerivatives[d * totalPoints + point_idx];
                     }
@@ -385,10 +385,10 @@ extern "C" __global__ void computeGridForce(
             double X[216];
             if (invPowerMode == 1) {
                 // RUNTIME mode: transform all 27 derivatives per corner
-                float p = 1.0f / invPower;
+                real p = 1.0f / invPower;
                 for (int c = 0; c < 8; c++) {
                     int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
-                    float U_derivs[27], V_derivs[27];
+                    real U_derivs[27], V_derivs[27];
                     for (int d = 0; d < 27; d++) {
                         U_derivs[d] = gridDerivatives[d * totalPoints + point_idx];
                     }
@@ -430,9 +430,9 @@ extern "C" __global__ void computeGridForce(
             }
         } else {
             // TRILINEAR INTERPOLATION (default for method 0, 2x2x2 = 8 points)
-            float ox = 1.0f - fx;
-            float oy = 1.0f - fy;
-            float oz = 1.0f - fz;
+            real ox = 1.0f - fx;
+            real oy = 1.0f - fy;
+            real oz = 1.0f - fz;
 
             int baseIndex = ix * nyz + iy * gridCounts[2] + iz;
             int ip = baseIndex + nyz;           // ix+1
@@ -440,14 +440,14 @@ extern "C" __global__ void computeGridForce(
             int ipp = ip + gridCounts[2];       // ix+1, iy+1
 
             // Get grid values
-            float vmmm = gridValues[baseIndex];
-            float vmmp = gridValues[baseIndex + 1];
-            float vmpm = gridValues[imp];
-            float vmpp = gridValues[imp + 1];
-            float vpmm = gridValues[ip];
-            float vpmp = gridValues[ip + 1];
-            float vppm = gridValues[ipp];
-            float vppp = gridValues[ipp + 1];
+            real vmmm = gridValues[baseIndex];
+            real vmmp = gridValues[baseIndex + 1];
+            real vmpm = gridValues[imp];
+            real vmpp = gridValues[imp + 1];
+            real vpmm = gridValues[ip];
+            real vpmp = gridValues[ip + 1];
+            real vppm = gridValues[ipp];
+            real vppp = gridValues[ipp + 1];
 
 #if DEBUG_GRIDFORCE
             if (index == 0) {
@@ -460,23 +460,23 @@ extern "C" __global__ void computeGridForce(
             // RUNTIME mode: Transform grid values BEFORE interpolation
             // This makes interpolation smoother for steep potentials (e.g., LJ)
             if (invPowerMode == 1) {  // 1 = RUNTIME
-                float invN = 1.0f / invPower;
+                real invN = 1.0f / invPower;
                 // Transform each grid value: G -> sign(G) * |G|^(1/n)
-                if (fabsf(vmmm) >= 1e-10f) vmmm = (vmmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmm), invN);
+                if (fabs(vmmm) >= 1e-10f) vmmm = (vmmm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmmm), invN);
                 else vmmm = 0.0f;
-                if (fabsf(vmmp) >= 1e-10f) vmmp = (vmmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmp), invN);
+                if (fabs(vmmp) >= 1e-10f) vmmp = (vmmp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmmp), invN);
                 else vmmp = 0.0f;
-                if (fabsf(vmpm) >= 1e-10f) vmpm = (vmpm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpm), invN);
+                if (fabs(vmpm) >= 1e-10f) vmpm = (vmpm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmpm), invN);
                 else vmpm = 0.0f;
-                if (fabsf(vmpp) >= 1e-10f) vmpp = (vmpp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpp), invN);
+                if (fabs(vmpp) >= 1e-10f) vmpp = (vmpp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmpp), invN);
                 else vmpp = 0.0f;
-                if (fabsf(vpmm) >= 1e-10f) vpmm = (vpmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmm), invN);
+                if (fabs(vpmm) >= 1e-10f) vpmm = (vpmm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vpmm), invN);
                 else vpmm = 0.0f;
-                if (fabsf(vpmp) >= 1e-10f) vpmp = (vpmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmp), invN);
+                if (fabs(vpmp) >= 1e-10f) vpmp = (vpmp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vpmp), invN);
                 else vpmp = 0.0f;
-                if (fabsf(vppm) >= 1e-10f) vppm = (vppm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppm), invN);
+                if (fabs(vppm) >= 1e-10f) vppm = (vppm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vppm), invN);
                 else vppm = 0.0f;
-                if (fabsf(vppp) >= 1e-10f) vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppp), invN);
+                if (fabs(vppp) >= 1e-10f) vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vppp), invN);
                 else vppp = 0.0f;
             }
 
@@ -484,14 +484,14 @@ extern "C" __global__ void computeGridForce(
             // Cap operates in V-space, linear interp in V-space, no post-interp
             // back-transform. Matches trilinear_grid.c semantic.
             if (evaluateInVSpace && invPowerMode == 2) {
-                vmmm = (vmmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmm), invPower);
-                vmmp = (vmmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmmp), invPower);
-                vmpm = (vmpm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpm), invPower);
-                vmpp = (vmpp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vmpp), invPower);
-                vpmm = (vpmm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmm), invPower);
-                vpmp = (vpmp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vpmp), invPower);
-                vppm = (vppm >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppm), invPower);
-                vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(vppp), invPower);
+                vmmm = (vmmm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmmm), (real)invPower);
+                vmmp = (vmmp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmmp), (real)invPower);
+                vmpm = (vmpm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmpm), (real)invPower);
+                vmpp = (vmpp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vmpp), (real)invPower);
+                vpmm = (vpmm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vpmm), (real)invPower);
+                vpmp = (vpmp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vpmp), (real)invPower);
+                vppm = (vppm >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vppm), (real)invPower);
+                vppp = (vppp >= 0.0f ? 1.0f : -1.0f) * pow(fabs(vppp), (real)invPower);
             }
 
             // Apply runtime tanh cap PER CORNER before interpolation.
@@ -499,24 +499,24 @@ extern "C" __global__ void computeGridForce(
             // pre-capped grid approach) instead of capping the interpolated value
             // which kills the gradient when the interpolated value >> cap.
             if (effectiveCap > 0.0f) {
-                vmmm = effectiveCap * tanhf(vmmm / effectiveCap);
-                vmmp = effectiveCap * tanhf(vmmp / effectiveCap);
-                vmpm = effectiveCap * tanhf(vmpm / effectiveCap);
-                vmpp = effectiveCap * tanhf(vmpp / effectiveCap);
-                vpmm = effectiveCap * tanhf(vpmm / effectiveCap);
-                vpmp = effectiveCap * tanhf(vpmp / effectiveCap);
-                vppm = effectiveCap * tanhf(vppm / effectiveCap);
-                vppp = effectiveCap * tanhf(vppp / effectiveCap);
+                vmmm = effectiveCap * tanh(vmmm / effectiveCap);
+                vmmp = effectiveCap * tanh(vmmp / effectiveCap);
+                vmpm = effectiveCap * tanh(vmpm / effectiveCap);
+                vmpp = effectiveCap * tanh(vmpp / effectiveCap);
+                vpmm = effectiveCap * tanh(vpmm / effectiveCap);
+                vpmp = effectiveCap * tanh(vpmp / effectiveCap);
+                vppm = effectiveCap * tanh(vppm / effectiveCap);
+                vppp = effectiveCap * tanh(vppp / effectiveCap);
             }
 
             // Perform trilinear interpolation (in transformed/capped space)
-            float vmm = oz * vmmm + fz * vmmp;
-            float vmp = oz * vmpm + fz * vmpp;
-            float vpm = oz * vpmm + fz * vpmp;
-            float vpp = oz * vppm + fz * vppp;
+            real vmm = oz * vmmm + fz * vmmp;
+            real vmp = oz * vmpm + fz * vmpp;
+            real vpm = oz * vpmm + fz * vpmp;
+            real vpp = oz * vppm + fz * vppp;
 
-            float vm = oy * vmm + fy * vmp;
-            float vp = oy * vpm + fy * vpp;
+            real vm = oy * vmm + fy * vmp;
+            real vp = oy * vpm + fy * vpp;
 
             interpolated = ox * vm + fx * vp;
 
@@ -531,10 +531,10 @@ extern "C" __global__ void computeGridForce(
         // Undo arcsinh for stacked STORED + arcsinh mode.
         // Grid stores arcsinh(V^(1/n) / scale); undo arcsinh first → V^(1/n) space.
         if (arcsinhScale > 0.0f && invPowerMode == 2 && !evaluateInVSpace) {
-            float sinhG = sinhf(interpolated);
-            float coshG = coshf(interpolated);
+            real sinhG = sinh(interpolated);
+            real coshG = cosh(interpolated);
             interpolated = arcsinhScale * sinhG;
-            float chainFactor = arcsinhScale * coshG;
+            real chainFactor = arcsinhScale * coshG;
             dx *= chainFactor;
             dy *= chainFactor;
             dz *= chainFactor;
@@ -544,14 +544,14 @@ extern "C" __global__ void computeGridForce(
         // Both RUNTIME and STORED modes need this: val^(1/n) -> (val^(1/n))^n = val
         // Skipped when evaluateInVSpace is set (back-transform already done per-corner).
         if ((invPowerMode == 1 || invPowerMode == 2) && !evaluateInVSpace) {
-            float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
-            float absVal = fabsf(interpolated);
+            real sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+            real absVal = fabs(interpolated);
             if (absVal > 1e-10f) {
                 // Back-convert: val^(1/n) -> val^n recovers original energy
                 // Chain rule: if E = sign(v)*|v|^n, then dE/dx = n*|v|^(n-1) * dv/dx
                 // The sign cancels: d/dx[sign(v)*|v|^n] = sign(v) * n*|v|^(n-1) * sign(v) * d|v|/dx = n*|v|^(n-1) * dv/dx
-                float powerFactor = invPower * powf(absVal, invPower - 1.0f);
-                interpolated = sign * powf(absVal, invPower);
+                real powerFactor = invPower * pow(absVal, (real)invPower - (real)1.0f);
+                interpolated = sign * pow(absVal, (real)invPower);
                 // Apply chain rule to gradients BEFORE dividing by spacing
                 dx *= powerFactor;
                 dy *= powerFactor;
@@ -580,7 +580,7 @@ extern "C" __global__ void computeGridForce(
 
         // Debug: Print if forces are abnormally large
         // if (index == 0) {
-        //     float force_mag = sqrtf(atomForce.x*atomForce.x + atomForce.y*atomForce.y + atomForce.z*atomForce.z);
+        //     real force_mag = sqrtf(atomForce.x*atomForce.x + atomForce.y*atomForce.y + atomForce.z*atomForce.z);
         //     if (force_mag > 1e4f) {
         //         printf("[FORCE DEBUG] atom=0: mag=%.6e kJ/mol/nm\n", force_mag);
         //         printf("  Energy: %.6e, Force: (%.6e, %.6e, %.6e)\n",
@@ -593,7 +593,7 @@ extern "C" __global__ void computeGridForce(
         // Apply harmonic restraint outside effective bounds (if enabled)
         // NOTE: This restraint is NOT scaled by scalingFactor - it applies uniformly
         // to all particles to keep them within the evaluation boundaries
-        float3 dev = make_float3(0.0f, 0.0f, 0.0f);
+        real3 dev = make_real3((real)0, (real)0, (real)0);
 
         if (pos.x < effectiveMinX)
             dev.x = pos.x - effectiveMinX;

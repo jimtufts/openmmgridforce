@@ -113,6 +113,54 @@ def test_double_agrees(method):
     assert relf < 1e-3, f"{METHODS[method]}: double force rel {relf:.2e} too large"
 
 
+def _gen_invpower(prm, crd, pos_list, rec_atoms, origin, grid_file, mode, n):
+    g = gfp.GridForce()
+    g.setGridOrigin(*origin); g.addGridCounts(NX, NY, NZ); g.addGridSpacing(SP, SP, SP)
+    g.setAutoGenerateGrid(True); g.setGridType('ljr'); g.setComputeDerivatives(True)
+    g.setGridCap(1e30); g.setReceptorAtoms(rec_atoms)
+    g.setReceptorPositionsFromLists(pos_list); g.setInvPowerMode(mode, n)
+    gsys = prm.createSystem(nonbondedMethod=NoCutoff); gsys.addForce(g)
+    ctx = Context(gsys, VerletIntegrator(0.001), mm.Platform.getPlatformByName('CUDA'))
+    ctx.setPositions(crd.positions); ctx.getState(getEnergy=True)
+    g.saveToFile(grid_file); del ctx
+
+
+def _eval_invpower(grid_file, method, probe, precision, mode, n):
+    gf = gfp.GridForce(); gf.loadFromFile(grid_file); gf.setInterpolationMethod(method)
+    gf.setInvPowerMode(mode, n)
+    s = mm.System(); s.addParticle(1.0); gf.addParticleGroup('ljr', [0], [1.0]); s.addForce(gf)
+    ctx = Context(s, VerletIntegrator(0.001), mm.Platform.getPlatformByName('CUDA'),
+                  {'Precision': precision})
+    ctx.setPositions([mm.Vec3(*probe)] * 1 * nanometer)
+    f = np.array(ctx.getState(getForces=True).getForces(asNumpy=True).value_in_unit(
+        kilojoules_per_mole / nanometer))[0]
+    del ctx
+    return f
+
+
+@functools.lru_cache(maxsize=1)
+def _invpower_grid():
+    prm, crd, pos_list, rec_atoms, origin = _system()
+    tmp = tempfile.mkdtemp()
+    gfile = os.path.join(tmp, "ljr_rt.grid")
+    _gen_invpower(prm, crd, pos_list, rec_atoms, origin, gfile, gfp.InvPowerMode_RUNTIME, 6.0)
+    probe = (origin[0] + (NX // 2 + 0.37) * SP, origin[1] + (NY // 2 + 0.61) * SP,
+             origin[2] + (NZ // 2 + 0.52) * SP)
+    return gfile, probe
+
+
+@pytest.mark.parametrize("method", [0, 3])
+def test_invpower_runtime_precision(method):
+    """inv_power RUNTIME path: single==mixed, double agrees."""
+    gfile, probe = _invpower_grid()
+    fs = _eval_invpower(gfile, method, probe, 'single', gfp.InvPowerMode_RUNTIME, 6.0)
+    fm = _eval_invpower(gfile, method, probe, 'mixed', gfp.InvPowerMode_RUNTIME, 6.0)
+    fd = _eval_invpower(gfile, method, probe, 'double', gfp.InvPowerMode_RUNTIME, 6.0)
+    assert np.array_equal(fs, fm), f"invpower {METHODS[method]}: single/mixed differ"
+    relf = np.linalg.norm(fd - fs) / max(1.0, np.linalg.norm(fs))
+    assert relf < 1e-3, f"invpower {METHODS[method]}: double rel {relf:.2e}"
+
+
 if __name__ == "__main__":
     gf, probe = _grid(False)
     print(f"{'method':<12}{'single==mixed':<16}{'double rel(force)':<18}")
@@ -123,3 +171,12 @@ if __name__ == "__main__":
         ident = (es == em) and np.array_equal(fs, fm)
         relf = np.linalg.norm(fd - fs) / max(1.0, np.linalg.norm(fs))
         print(f"{name:<12}{str(ident):<16}{relf:<18.3e}")
+    print("\ninv_power RUNTIME (ljr):")
+    gfile, probe = _invpower_grid()
+    for m in (0, 3):
+        fs = _eval_invpower(gfile, m, probe, 'single', gfp.InvPowerMode_RUNTIME, 6.0)
+        fm = _eval_invpower(gfile, m, probe, 'mixed', gfp.InvPowerMode_RUNTIME, 6.0)
+        fd = _eval_invpower(gfile, m, probe, 'double', gfp.InvPowerMode_RUNTIME, 6.0)
+        ident = np.array_equal(fs, fm)
+        relf = np.linalg.norm(fd - fs) / max(1.0, np.linalg.norm(fs))
+        print(f"{METHODS[m]:<12}{str(ident):<16}{relf:<18.3e}")
