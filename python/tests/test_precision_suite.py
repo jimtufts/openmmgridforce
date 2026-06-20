@@ -206,6 +206,34 @@ def test_hessian_precision(method):
     assert relh < 1e-3, f"hessian {METHODS[method]}: double rel {relh:.2e}"
 
 
+def test_eigendecomposition_precision():
+    """GPU Hessian eigendecomposition: single==mixed, double finite and more precise."""
+    gf, probe = _grid(False)
+    rng = np.random.default_rng(3)
+    fr = 0.3 + 0.4 * rng.random((8, 3))
+    base = np.array(probe)
+    pts = [tuple(base + (f - 0.5) * 0.05) for f in fr]
+
+    def eig(prec):
+        g = gfp.GridForce(); g.loadFromFile(gf); g.setInterpolationMethod(3)
+        s = mm.System()
+        for _ in range(8):
+            s.addParticle(1.0)
+        g.addParticleGroup('charge', list(range(8)), [1.0] * 8)
+        s.addForce(g)
+        ctx = Context(s, VerletIntegrator(0.001), mm.Platform.getPlatformByName('CUDA'),
+                      {'Precision': prec})
+        ctx.setPositions([mm.Vec3(*p) for p in pts] * nanometer)
+        a = g.getHessianAnalysis(ctx, temperature=300.0)
+        del ctx
+        return np.array(a['eigenvalues']).ravel()
+
+    es, em, ed = eig('single'), eig('mixed'), eig('double')
+    assert np.all(np.isfinite(ed))
+    assert np.array_equal(es, em), "eigenvalues single/mixed differ"
+    assert np.linalg.norm(ed - es) / max(1.0, np.linalg.norm(es)) < 1e-3
+
+
 def test_double_generation_carries_f64():
     """Double generation produces genuine f64 derivatives (oracle-free check)."""
     import validate_double_generation as vdg

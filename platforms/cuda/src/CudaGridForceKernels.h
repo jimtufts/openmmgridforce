@@ -265,16 +265,16 @@ private:
     OpenMM::CudaArray numNegativeBuffer;         // [numAtoms] int
     OpenMM::CudaArray totalEntropyBuffer;        // [1] scalar
     bool analysisBuffersInitialized;             // Whether analysis buffers are allocated
-    std::vector<float> lastEigenvalues;
-    std::vector<float> lastEigenvectors;
-    std::vector<float> lastMeanCurvature;
-    std::vector<float> lastTotalCurvature;
-    std::vector<float> lastGaussianCurvature;
-    std::vector<float> lastFracAnisotropy;
-    std::vector<float> lastEntropy;
-    std::vector<float> lastMinEigenvalue;
+    std::vector<double> lastEigenvalues;
+    std::vector<double> lastEigenvectors;
+    std::vector<double> lastMeanCurvature;
+    std::vector<double> lastTotalCurvature;
+    std::vector<double> lastGaussianCurvature;
+    std::vector<double> lastFracAnisotropy;
+    std::vector<double> lastEntropy;
+    std::vector<double> lastMinEigenvalue;
     std::vector<int> lastNumNegative;
-    float lastTotalEntropy;
+    double lastTotalEntropy;
 
     bool skipGroupEnergyDownload_ = false;
 public:

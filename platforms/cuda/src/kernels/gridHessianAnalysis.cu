@@ -26,23 +26,23 @@
  * @param lambda         Output: 3 eigenvalues, sorted ascending
  */
 __device__ void eigenvalues_3x3_symmetric(
-    float dxx, float dyy, float dzz,
-    float dxy, float dxz, float dyz,
-    float* __restrict__ lambda
+    real dxx, real dyy, real dzz,
+    real dxy, real dxz, real dyz,
+    real* __restrict__ lambda
 ) {
     // Construct invariants
-    float trace = dxx + dyy + dzz;
-    float q = trace / 3.0f;
+    real trace = dxx + dyy + dzz;
+    real q = trace / 3.0f;
 
     // Shift matrix: A = H - qI (makes trace zero)
-    float a00 = dxx - q;
-    float a11 = dyy - q;
-    float a22 = dzz - q;
+    real a00 = dxx - q;
+    real a11 = dyy - q;
+    real a22 = dzz - q;
 
     // p² = (1/6) * ||A||²_F  (Frobenius norm of shifted matrix)
-    float p2 = (a00*a00 + a11*a11 + a22*a22 +
+    real p2 = (a00*a00 + a11*a11 + a22*a22 +
                 2.0f*(dxy*dxy + dxz*dxz + dyz*dyz)) / 6.0f;
-    float p = sqrtf(p2);
+    real p = sqrt(p2);
 
     if (p < 1e-10f) {
         // Matrix is already diagonal (or zero)
@@ -51,30 +51,30 @@ __device__ void eigenvalues_3x3_symmetric(
     }
 
     // B = (1/p) * A
-    float inv_p = 1.0f / p;
-    float b00 = a00 * inv_p;
-    float b11 = a11 * inv_p;
-    float b22 = a22 * inv_p;
-    float b01 = dxy * inv_p;
-    float b02 = dxz * inv_p;
-    float b12 = dyz * inv_p;
+    real inv_p = 1.0f / p;
+    real b00 = a00 * inv_p;
+    real b11 = a11 * inv_p;
+    real b22 = a22 * inv_p;
+    real b01 = dxy * inv_p;
+    real b02 = dxz * inv_p;
+    real b12 = dyz * inv_p;
 
     // r = det(B) / 2
-    float detB = b00 * (b11*b22 - b12*b12)
+    real detB = b00 * (b11*b22 - b12*b12)
                - b01 * (b01*b22 - b12*b02)
                + b02 * (b01*b12 - b11*b02);
-    float r = detB * 0.5f;
+    real r = detB * 0.5f;
 
     // Clamp r to [-1, 1] for numerical stability
-    r = fminf(1.0f, fmaxf(-1.0f, r));
+    r = fmin((real)1.0, fmax((real)-1.0, r));
 
     // phi = arccos(r) / 3
-    float phi = acosf(r) / 3.0f;
+    real phi = acos(r) / 3.0f;
 
     // Eigenvalues of shifted matrix (sorted descending from cosine formula)
-    float eig0 = 2.0f * p * cosf(phi);
-    float eig1 = 2.0f * p * cosf(phi - 2.0f * M_PI_F / 3.0f);
-    float eig2 = 2.0f * p * cosf(phi + 2.0f * M_PI_F / 3.0f);
+    real eig0 = 2.0f * p * cos(phi);
+    real eig1 = 2.0f * p * cos(phi - 2.0f * (real)3.14159265358979323846 / 3.0f);
+    real eig2 = 2.0f * p * cos(phi + 2.0f * (real)3.14159265358979323846 / 3.0f);
 
     // Shift back and sort ascending
     // Note: eig0 >= eig1 >= eig2 from the cosine formula
@@ -95,33 +95,33 @@ __device__ void eigenvalues_3x3_symmetric(
  * @param v                             Output: normalized eigenvector
  */
 __device__ void eigenvector_for_eigenvalue(
-    float dxx, float dyy, float dzz,
-    float dxy, float dxz, float dyz,
-    float lambda,
-    float* __restrict__ v
+    real dxx, real dyy, real dzz,
+    real dxy, real dxz, real dyz,
+    real lambda,
+    real* __restrict__ v
 ) {
     // Compute (H - λI) and find null space via cross product of rows
-    float a00 = dxx - lambda;
-    float a11 = dyy - lambda;
-    float a22 = dzz - lambda;
+    real a00 = dxx - lambda;
+    real a11 = dyy - lambda;
+    real a22 = dzz - lambda;
 
     // Row 0: (a00, dxy, dxz)
     // Row 1: (dxy, a11, dyz)
     // Row 2: (dxz, dyz, a22)
 
     // Try cross product of row 0 and row 1
-    float v0 = dxy * dyz - a11 * dxz;
-    float v1 = dxz * dxy - a00 * dyz;
-    float v2 = a00 * a11 - dxy * dxy;
+    real v0 = dxy * dyz - a11 * dxz;
+    real v1 = dxz * dxy - a00 * dyz;
+    real v2 = a00 * a11 - dxy * dxy;
 
-    float norm = sqrtf(v0*v0 + v1*v1 + v2*v2);
+    real norm = sqrt(v0*v0 + v1*v1 + v2*v2);
 
     if (norm < 1e-10f) {
         // Degenerate case: try row 0 × row 2
         v0 = dxy * a22 - dyz * dxz;
         v1 = dxz * dxz - a00 * a22;
         v2 = a00 * dyz - dxz * dxy;
-        norm = sqrtf(v0*v0 + v1*v1 + v2*v2);
+        norm = sqrt(v0*v0 + v1*v1 + v2*v2);
     }
 
     if (norm < 1e-10f) {
@@ -129,7 +129,7 @@ __device__ void eigenvector_for_eigenvalue(
         v0 = a11 * a22 - dyz * dyz;
         v1 = dyz * dxz - dxy * a22;
         v2 = dxy * dyz - a11 * dxz;
-        norm = sqrtf(v0*v0 + v1*v1 + v2*v2);
+        norm = sqrt(v0*v0 + v1*v1 + v2*v2);
     }
 
     if (norm < 1e-10f) {
@@ -138,7 +138,7 @@ __device__ void eigenvector_for_eigenvalue(
         return;
     }
 
-    float inv_norm = 1.0f / norm;
+    real inv_norm = 1.0f / norm;
     v[0] = v0 * inv_norm;
     v[1] = v1 * inv_norm;
     v[2] = v2 * inv_norm;
@@ -175,14 +175,14 @@ __device__ void eigenvector_for_eigenvalue(
  */
 extern "C" __global__ void analyzeHessianKernel(
     const mixed* __restrict__ hessianBlocks,
-    float* __restrict__ eigenvalues,
-    float* __restrict__ eigenvectors,
-    float* __restrict__ meanCurvature,
-    float* __restrict__ totalCurvature,
-    float* __restrict__ gaussianCurvature,
-    float* __restrict__ fracAnisotropy,
-    float* __restrict__ entropy,
-    float* __restrict__ minEigenvalue,
+    mixed* __restrict__ eigenvalues,
+    mixed* __restrict__ eigenvectors,
+    mixed* __restrict__ meanCurvature,
+    mixed* __restrict__ totalCurvature,
+    mixed* __restrict__ gaussianCurvature,
+    mixed* __restrict__ fracAnisotropy,
+    mixed* __restrict__ entropy,
+    mixed* __restrict__ minEigenvalue,
     int* __restrict__ numNegative,
     float kT,
     int numAtoms
@@ -192,15 +192,15 @@ extern "C" __global__ void analyzeHessianKernel(
 
     // Load Hessian block
     int base = 6 * idx;
-    float dxx = hessianBlocks[base + 0];
-    float dyy = hessianBlocks[base + 1];
-    float dzz = hessianBlocks[base + 2];
-    float dxy = hessianBlocks[base + 3];
-    float dxz = hessianBlocks[base + 4];
-    float dyz = hessianBlocks[base + 5];
+    real dxx = hessianBlocks[base + 0];
+    real dyy = hessianBlocks[base + 1];
+    real dzz = hessianBlocks[base + 2];
+    real dxy = hessianBlocks[base + 3];
+    real dxz = hessianBlocks[base + 4];
+    real dyz = hessianBlocks[base + 5];
 
     // Compute eigenvalues
-    float lambda[3];
+    real lambda[3];
     eigenvalues_3x3_symmetric(dxx, dyy, dzz, dxy, dxz, dyz, lambda);
 
     // Store eigenvalues
@@ -210,7 +210,7 @@ extern "C" __global__ void analyzeHessianKernel(
 
     // Compute eigenvectors if requested
     if (eigenvectors != 0) {
-        float v[3];
+        real v[3];
         for (int i = 0; i < 3; i++) {
             eigenvector_for_eigenvalue(dxx, dyy, dzz, dxy, dxz, dyz, lambda[i], v);
             eigenvectors[9*idx + 3*i + 0] = v[0];
@@ -221,9 +221,9 @@ extern "C" __global__ void analyzeHessianKernel(
 
     // ---- Curvature metrics ----
 
-    float mean = (lambda[0] + lambda[1] + lambda[2]) / 3.0f;
-    float total = lambda[0] + lambda[1] + lambda[2];
-    float gauss = lambda[0] * lambda[1] * lambda[2];
+    real mean = (lambda[0] + lambda[1] + lambda[2]) / 3.0f;
+    real total = lambda[0] + lambda[1] + lambda[2];
+    real gauss = lambda[0] * lambda[1] * lambda[2];
 
     meanCurvature[idx] = mean;
     totalCurvature[idx] = total;
@@ -237,15 +237,15 @@ extern "C" __global__ void analyzeHessianKernel(
     // ---- Fractional anisotropy ----
     // FA = sqrt[ sum(lambda_i - mean)^2 / (2 * sum(lambda_i^2)) ]
 
-    float diff0 = lambda[0] - mean;
-    float diff1 = lambda[1] - mean;
-    float diff2 = lambda[2] - mean;
-    float numerator = diff0*diff0 + diff1*diff1 + diff2*diff2;
-    float denominator = lambda[0]*lambda[0] + lambda[1]*lambda[1] + lambda[2]*lambda[2];
+    real diff0 = lambda[0] - mean;
+    real diff1 = lambda[1] - mean;
+    real diff2 = lambda[2] - mean;
+    real numerator = diff0*diff0 + diff1*diff1 + diff2*diff2;
+    real denominator = lambda[0]*lambda[0] + lambda[1]*lambda[1] + lambda[2]*lambda[2];
 
-    float fa = 0.0f;
+    real fa = 0.0f;
     if (denominator > 1e-20f) {
-        fa = sqrtf(numerator / (2.0f * denominator));
+        fa = sqrt(numerator / (2.0f * denominator));
     }
     fracAnisotropy[idx] = fa;
 
@@ -254,11 +254,11 @@ extern "C" __global__ void analyzeHessianKernel(
     // Only valid if all eigenvalues positive
 
     if (lambda[0] > 1e-10f && lambda[1] > 1e-10f && lambda[2] > 1e-10f) {
-        float two_pi_kT = 2.0f * M_PI_F * kT;
-        float S = 0.0f;
-        S += 0.5f * (1.0f + logf(two_pi_kT / lambda[0]));
-        S += 0.5f * (1.0f + logf(two_pi_kT / lambda[1]));
-        S += 0.5f * (1.0f + logf(two_pi_kT / lambda[2]));
+        real two_pi_kT = 2.0f * M_PI_F * kT;
+        real S = 0.0f;
+        S += 0.5f * (1.0f + log(two_pi_kT / lambda[0]));
+        S += 0.5f * (1.0f + log(two_pi_kT / lambda[1]));
+        S += 0.5f * (1.0f + log(two_pi_kT / lambda[2]));
         entropy[idx] = S;
     } else {
         entropy[idx] = nanf("");  // Undefined at saddle points
@@ -279,19 +279,19 @@ extern "C" __global__ void analyzeHessianKernel(
  * @param numAtoms      Number of atoms
  */
 extern "C" __global__ void sumEntropyKernel(
-    const float* __restrict__ entropy,
-    float* __restrict__ totalEntropy,
+    const mixed* __restrict__ entropy,
+    mixed* __restrict__ totalEntropy,
     int numAtoms
 ) {
-    extern __shared__ float sdata[];
+    extern __shared__ mixed sdata[];
 
     int tid = threadIdx.x;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     // Load and accumulate (skip NaN values)
-    float val = 0.0f;
+    real val = 0.0f;
     if (idx < numAtoms) {
-        float e = entropy[idx];
+        real e = entropy[idx];
         if (!isnan(e)) {
             val = e;
         }

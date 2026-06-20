@@ -1828,16 +1828,16 @@ void CudaCalcGridForceKernel::analyzeHessian(float temperature) {
 
     // Initialize analysis buffers if needed
     if (!analysisBuffersInitialized && kernelNumAtoms > 0) {
-        eigenvaluesBuffer.initialize<float>(cu, 3 * kernelNumAtoms, "eigenvalues");
-        eigenvectorsBuffer.initialize<float>(cu, 9 * kernelNumAtoms, "eigenvectors");
-        meanCurvatureBuffer.initialize<float>(cu, kernelNumAtoms, "meanCurvature");
-        totalCurvatureBuffer.initialize<float>(cu, kernelNumAtoms, "totalCurvature");
-        gaussianCurvatureBuffer.initialize<float>(cu, kernelNumAtoms, "gaussianCurvature");
-        fracAnisotropyBuffer.initialize<float>(cu, kernelNumAtoms, "fracAnisotropy");
-        entropyBuffer.initialize<float>(cu, kernelNumAtoms, "entropy");
-        minEigenvalueBuffer.initialize<float>(cu, kernelNumAtoms, "minEigenvalue");
+        initMixedEnergyBuffer(cu, eigenvaluesBuffer, 3 * kernelNumAtoms, "eigenvalues");
+        initMixedEnergyBuffer(cu, eigenvectorsBuffer, 9 * kernelNumAtoms, "eigenvectors");
+        initMixedEnergyBuffer(cu, meanCurvatureBuffer, kernelNumAtoms, "meanCurvature");
+        initMixedEnergyBuffer(cu, totalCurvatureBuffer, kernelNumAtoms, "totalCurvature");
+        initMixedEnergyBuffer(cu, gaussianCurvatureBuffer, kernelNumAtoms, "gaussianCurvature");
+        initMixedEnergyBuffer(cu, fracAnisotropyBuffer, kernelNumAtoms, "fracAnisotropy");
+        initMixedEnergyBuffer(cu, entropyBuffer, kernelNumAtoms, "entropy");
+        initMixedEnergyBuffer(cu, minEigenvalueBuffer, kernelNumAtoms, "minEigenvalue");
         numNegativeBuffer.initialize<int>(cu, kernelNumAtoms, "numNegative");
-        totalEntropyBuffer.initialize<float>(cu, 1, "totalEntropy");
+        initMixedEnergyBuffer(cu, totalEntropyBuffer, 1, "totalEntropy");
         analysisBuffersInitialized = true;
     }
 
@@ -1882,8 +1882,7 @@ void CudaCalcGridForceKernel::analyzeHessian(float temperature) {
     cu.executeKernel(analysisKernel, analysisArgs, kernelNumAtoms, 256);
 
     // Clear total entropy buffer and sum
-    vector<float> zeroEntropy(1, 0.0f);
-    totalEntropyBuffer.upload(zeroEntropy);
+    cu.clearBuffer(totalEntropyBuffer);
 
     int blockSize = 256;
     int numBlocks = (kernelNumAtoms + blockSize - 1) / blockSize;
@@ -1899,7 +1898,7 @@ void CudaCalcGridForceKernel::analyzeHessian(float temperature) {
         sumEntropyKernel,
         numBlocks, 1, 1,
         blockSize, 1, 1,
-        blockSize * sizeof(float),
+        blockSize * mixedEnergyElementSize(cu),
         cu.getCurrentStream(),
         sumArgs,
         NULL
@@ -1909,29 +1908,20 @@ void CudaCalcGridForceKernel::analyzeHessian(float temperature) {
         throw OpenMMException("Error launching sumEntropyKernel");
     }
 
-    // Download results
-    lastEigenvalues.resize(3 * kernelNumAtoms);
-    lastEigenvectors.resize(9 * kernelNumAtoms);
-    lastMeanCurvature.resize(kernelNumAtoms);
-    lastTotalCurvature.resize(kernelNumAtoms);
-    lastGaussianCurvature.resize(kernelNumAtoms);
-    lastFracAnisotropy.resize(kernelNumAtoms);
-    lastEntropy.resize(kernelNumAtoms);
-    lastMinEigenvalue.resize(kernelNumAtoms);
+    // Download results (analysis buffers are mixed; numNegative is int)
+    downloadMixedEnergy(cu, eigenvaluesBuffer, lastEigenvalues, 3 * kernelNumAtoms);
+    downloadMixedEnergy(cu, eigenvectorsBuffer, lastEigenvectors, 9 * kernelNumAtoms);
+    downloadMixedEnergy(cu, meanCurvatureBuffer, lastMeanCurvature, kernelNumAtoms);
+    downloadMixedEnergy(cu, totalCurvatureBuffer, lastTotalCurvature, kernelNumAtoms);
+    downloadMixedEnergy(cu, gaussianCurvatureBuffer, lastGaussianCurvature, kernelNumAtoms);
+    downloadMixedEnergy(cu, fracAnisotropyBuffer, lastFracAnisotropy, kernelNumAtoms);
+    downloadMixedEnergy(cu, entropyBuffer, lastEntropy, kernelNumAtoms);
+    downloadMixedEnergy(cu, minEigenvalueBuffer, lastMinEigenvalue, kernelNumAtoms);
     lastNumNegative.resize(kernelNumAtoms);
-
-    eigenvaluesBuffer.download(lastEigenvalues);
-    eigenvectorsBuffer.download(lastEigenvectors);
-    meanCurvatureBuffer.download(lastMeanCurvature);
-    totalCurvatureBuffer.download(lastTotalCurvature);
-    gaussianCurvatureBuffer.download(lastGaussianCurvature);
-    fracAnisotropyBuffer.download(lastFracAnisotropy);
-    entropyBuffer.download(lastEntropy);
-    minEigenvalueBuffer.download(lastMinEigenvalue);
     numNegativeBuffer.download(lastNumNegative);
 
-    vector<float> totalEntropyHost(1);
-    totalEntropyBuffer.download(totalEntropyHost);
+    vector<double> totalEntropyHost;
+    downloadMixedEnergy(cu, totalEntropyBuffer, totalEntropyHost, 1);
     lastTotalEntropy = totalEntropyHost[0];
 }
 
