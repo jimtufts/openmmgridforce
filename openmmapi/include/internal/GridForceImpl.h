@@ -77,7 +77,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForceImpl : public OpenMM::ForceImpl {
 
     std::vector<double> getParticleAtomEnergies();
 
-    std::vector<float> getParticleGroupAtomRawEnergies();
+    std::vector<double> getParticleGroupAtomRawEnergies();
 
     std::vector<int> getParticleOutOfBoundsFlags();
 

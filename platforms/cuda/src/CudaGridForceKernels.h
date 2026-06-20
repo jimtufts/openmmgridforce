@@ -62,7 +62,7 @@ public:
      *         (in the same order as particles were added to groups)
      */
     std::vector<double> getParticleAtomEnergies();
-    std::vector<float> getParticleGroupAtomRawEnergies();
+    std::vector<double> getParticleGroupAtomRawEnergies();
     /**
      * Get per-atom out-of-bounds flags for particles in groups.
      *
@@ -218,15 +218,15 @@ private:
     OpenMM::CudaArray particleToGroupMap;       // Map from particle index to group index
     OpenMM::CudaArray groupEnergyBuffer;        // Per-group energy accumulation (gets zeroed each execute)
     OpenMM::CudaArray groupUnscaledEnergyBuffer; // Per-group unscaled energy (no group scaling factor)
-    std::vector<float> lastGroupEnergies;        // Persistent copy of last group energies
-    std::vector<float> lastGroupUnscaledEnergies; // Persistent copy of last unscaled group energies
+    std::vector<double> lastGroupEnergies;        // Persistent copy of last group energies
+    std::vector<double> lastGroupUnscaledEnergies; // Persistent copy of last unscaled group energies
     int numParticleGroups;                       // Number of particle groups
 
     // Per-atom energy tracking (for debugging/analysis)
     OpenMM::CudaArray atomEnergyBuffer;         // Per-atom energy storage (post-cap)
-    std::vector<float> lastAtomEnergies;         // Persistent copy of last atom energies
+    std::vector<double> lastAtomEnergies;         // Persistent copy of last atom energies
     OpenMM::CudaArray atomRawEnergyBuffer;      // Per-atom raw (pre-cap) energy storage
-    std::vector<float> lastAtomRawEnergies;      // Persistent copy of last raw energies
+    std::vector<double> lastAtomRawEnergies;      // Persistent copy of last raw energies
 
     // Per-atom out-of-bounds tracking
     OpenMM::CudaArray outOfBoundsBuffer;        // Per-atom out-of-bounds flags (0=inside, 1=outside)

@@ -93,6 +93,28 @@ static std::vector<float> downloadPositionsXYZ(OpenMM::CudaContext& cu) {
     return xyz;
 }
 
+// Energy buffers follow the context precision (mixed = double in mixed/double,
+// float in single), so high-magnitude energies (e.g. alchemical clash states)
+// are accumulated and read back without an fp32 narrowing.
+static int mixedEnergyElementSize(OpenMM::CudaContext& cu) {
+    return (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) ? sizeof(double) : sizeof(float);
+}
+
+static void initMixedEnergyBuffer(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, int n, const char* name) {
+    buf.initialize(cu, n, mixedEnergyElementSize(cu), name);
+}
+
+static void downloadMixedEnergy(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, std::vector<double>& out, int n) {
+    out.resize(n);
+    if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
+        buf.download(out);
+    } else {
+        std::vector<float> tmp(n);
+        buf.download(tmp);
+        out.assign(tmp.begin(), tmp.end());
+    }
+}
+
 // Initialize analysis-related members in constructor if needed
 // Note: analysisBuffersInitialized should be false by default
 
@@ -300,9 +322,9 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         particleToGroupMap.initialize<int>(cu, numAtoms, "particleToGroupMap");
         particleToGroupMap.upload(particleToGroupMapHost);
 
-        // Initialize per-group energy buffers
-        groupEnergyBuffer.initialize<float>(cu, numParticleGroups, "groupEnergyBuffer");
-        groupUnscaledEnergyBuffer.initialize<float>(cu, numParticleGroups, "groupUnscaledEnergyBuffer");
+        // Initialize per-group energy buffers (mixed precision: double in mixed/double)
+        initMixedEnergyBuffer(cu, groupEnergyBuffer, numParticleGroups, "groupEnergyBuffer");
+        initMixedEnergyBuffer(cu, groupUnscaledEnergyBuffer, numParticleGroups, "groupUnscaledEnergyBuffer");
 
         // Initialize per-group scaling factors buffer
         std::vector<float> groupScalings(numParticleGroups, 1.0f);
@@ -322,11 +344,11 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 
         // Initialize per-atom energy buffer (for debugging/analysis)
         if (totalGroupParticles > 0) {
-            atomEnergyBuffer.initialize<float>(cu, totalGroupParticles, "atomEnergyBuffer");
-            lastAtomEnergies.resize(totalGroupParticles, 0.0f);
+            initMixedEnergyBuffer(cu, atomEnergyBuffer, totalGroupParticles, "atomEnergyBuffer");
+            lastAtomEnergies.resize(totalGroupParticles, 0.0);
             // Initialize per-atom raw (pre-cap) energy buffer
-            atomRawEnergyBuffer.initialize<float>(cu, totalGroupParticles, "atomRawEnergyBuffer");
-            lastAtomRawEnergies.resize(totalGroupParticles, 0.0f);
+            initMixedEnergyBuffer(cu, atomRawEnergyBuffer, totalGroupParticles, "atomRawEnergyBuffer");
+            lastAtomRawEnergies.resize(totalGroupParticles, 0.0);
             // Initialize per-atom out-of-bounds buffer
             outOfBoundsBuffer.initialize<int>(cu, totalGroupParticles, "outOfBoundsBuffer");
             lastOutOfBoundsFlags.resize(totalGroupParticles, 0);
@@ -1361,25 +1383,21 @@ double CudaCalcGridForceKernel::execute(ContextImpl& context, bool includeForces
     if (includeEnergy && numParticleGroups > 0 && groupEnergyBuffer.isInitialized()) {
         if (!skipGroupEnergyDownload_) {
             // Download and save group energies (buffer will be zeroed on next execute)
-            lastGroupEnergies.resize(numParticleGroups);
-            groupEnergyBuffer.download(lastGroupEnergies);
+            downloadMixedEnergy(cu, groupEnergyBuffer, lastGroupEnergies, numParticleGroups);
 
             // Download unscaled group energies
             if (groupUnscaledEnergyBuffer.isInitialized()) {
-                lastGroupUnscaledEnergies.resize(numParticleGroups);
-                groupUnscaledEnergyBuffer.download(lastGroupUnscaledEnergies);
+                downloadMixedEnergy(cu, groupUnscaledEnergyBuffer, lastGroupUnscaledEnergies, numParticleGroups);
             }
 
             // Download per-atom energies if buffer is initialized
             if (atomEnergyBuffer.isInitialized()) {
-                lastAtomEnergies.resize(totalGroupParticles);
-                atomEnergyBuffer.download(lastAtomEnergies);
+                downloadMixedEnergy(cu, atomEnergyBuffer, lastAtomEnergies, totalGroupParticles);
             }
 
             // Download per-atom raw (pre-cap) energies if buffer is initialized
             if (atomRawEnergyBuffer.isInitialized()) {
-                lastAtomRawEnergies.resize(totalGroupParticles);
-                atomRawEnergyBuffer.download(lastAtomRawEnergies);
+                downloadMixedEnergy(cu, atomRawEnergyBuffer, lastAtomRawEnergies, totalGroupParticles);
             }
 
             // Download per-atom out-of-bounds flags if buffer is initialized
@@ -1498,11 +1516,11 @@ vector<double> CudaCalcGridForceKernel::getParticleAtomEnergies() {
     return atomEnergies;
 }
 
-vector<float> CudaCalcGridForceKernel::getParticleGroupAtomRawEnergies() {
+vector<double> CudaCalcGridForceKernel::getParticleGroupAtomRawEnergies() {
     if (numParticleGroups > 0 && !lastAtomRawEnergies.empty()) {
         return lastAtomRawEnergies;
     }
-    return vector<float>();
+    return vector<double>();
 }
 
 vector<int> CudaCalcGridForceKernel::getParticleOutOfBoundsFlags() {

@@ -1392,7 +1392,7 @@ vector<double> GridForce::getAllParticleGroupRuntimeCaps() const {
     return caps;
 }
 
-vector<float> GridForce::getParticleGroupAtomRawEnergies(Context& context) const {
+vector<double> GridForce::getParticleGroupAtomRawEnergies(Context& context) const {
     return dynamic_cast<GridForceImpl&>(getImplInContext(context)).getParticleGroupAtomRawEnergies();
 }
 

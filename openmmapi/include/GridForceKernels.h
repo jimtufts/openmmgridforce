@@ -105,7 +105,7 @@ class CalcGridForceKernel : public OpenMM::KernelImpl {
      *
      * @return vector of raw energies, one per particle across all groups
      */
-    virtual std::vector<float> getParticleGroupAtomRawEnergies() = 0;
+    virtual std::vector<double> getParticleGroupAtomRawEnergies() = 0;
     /**
      * Get per-atom out-of-bounds flags for particles in groups.
      *

@@ -249,12 +249,12 @@ private:
     CUfunction computeHctLigandPairwiseDoubleKernel;        // ligand-ligand HCT in double
 
     // Host-side results cache
-    mutable std::vector<float> groupEnergiesHost;
-    mutable std::vector<float> groupLigandSelfEnergiesHost;
-    mutable std::vector<float> groupReceptorContributionsHost;
-    mutable std::vector<float> groupReceptorDesolvationsHost;
-    mutable std::vector<float> groupCrossTermEnergiesHost;
-    mutable std::vector<float> groupUnscaledEnergiesHost;
+    mutable std::vector<double> groupEnergiesHost;
+    mutable std::vector<double> groupLigandSelfEnergiesHost;
+    mutable std::vector<double> groupReceptorContributionsHost;
+    mutable std::vector<double> groupReceptorDesolvationsHost;
+    mutable std::vector<double> groupCrossTermEnergiesHost;
+    mutable std::vector<double> groupUnscaledEnergiesHost;
     mutable std::vector<std::vector<float>> groupBornRadiiHost;
     mutable std::vector<std::vector<float>> groupAtomEnergiesHost;
     mutable std::vector<std::vector<float>> groupReceptorBornRadiiHost;  // PAIRWISE mode only

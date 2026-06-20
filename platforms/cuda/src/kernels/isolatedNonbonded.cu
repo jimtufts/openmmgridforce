@@ -429,44 +429,44 @@ extern "C" __global__ void computeIsolatedNonbondedDiagHessian(
         real4 posqI = posq[particleI];
         real4 posqJ = posq[particleJ];
 
-        float dx = (float)(posqI.x - posqJ.x);
-        float dy = (float)(posqI.y - posqJ.y);
-        float dz = (float)(posqI.z - posqJ.z);
-        float r2 = dx*dx + dy*dy + dz*dz;
-        float invR2 = 1.0f / fmaxf(r2, 1e-20f);
-        float invR = sqrtf(invR2);
-        float r = r2 * invR;
+        real dx = (posqI.x - posqJ.x);
+        real dy = (posqI.y - posqJ.y);
+        real dz = (posqI.z - posqJ.z);
+        real r2 = dx*dx + dy*dy + dz*dz;
+        real invR2 = 1.0f / fmax(r2, (real)1e-20);
+        real invR = sqrt(invR2);
+        real r = r2 * invR;
 
         // LJ derivatives
-        float sig_r = sigma * invR;
-        float sig_r2 = sig_r * sig_r;
-        float sig_r6 = sig_r2 * sig_r2 * sig_r2;
-        float sig_r12 = sig_r6 * sig_r6;
+        real sig_r = sigma * invR;
+        real sig_r2 = sig_r * sig_r;
+        real sig_r6 = sig_r2 * sig_r2 * sig_r2;
+        real sig_r12 = sig_r6 * sig_r6;
 
-        float dE_dr_LJ = 4.0f * epsilon * (-12.0f * sig_r12 + 6.0f * sig_r6) * invR;
-        float d2E_dr2_LJ = 4.0f * epsilon * (156.0f * sig_r12 - 42.0f * sig_r6) * invR2;
+        real dE_dr_LJ = 4.0f * epsilon * (-12.0f * sig_r12 + 6.0f * sig_r6) * invR;
+        real d2E_dr2_LJ = 4.0f * epsilon * (156.0f * sig_r12 - 42.0f * sig_r6) * invR2;
 
         // Coulomb derivatives
-        float dE_dr_C = -COULOMB_CONST * qq * invR2;
-        float d2E_dr2_C = 2.0f * COULOMB_CONST * qq * invR2 * invR;
+        real dE_dr_C = -COULOMB_CONST * qq * invR2;
+        real d2E_dr2_C = 2.0f * COULOMB_CONST * qq * invR2 * invR;
 
-        float dE_dr = dE_dr_LJ + dE_dr_C;
-        float d2E_dr2 = d2E_dr2_LJ + d2E_dr2_C;
+        real dE_dr = dE_dr_LJ + dE_dr_C;
+        real d2E_dr2 = d2E_dr2_LJ + d2E_dr2_C;
 
         // Hessian: H_ab = term1 * n_a*n_b + term2 * delta_ab
-        float term1 = d2E_dr2 - dE_dr * invR;
-        float term2 = dE_dr * invR;
+        real term1 = d2E_dr2 - dE_dr * invR;
+        real term2 = dE_dr * invR;
 
-        float nx = dx * invR;
-        float ny = dy * invR;
-        float nz = dz * invR;
+        real nx = dx * invR;
+        real ny = dy * invR;
+        real nz = dz * invR;
 
-        float Hxx = term1 * nx * nx + term2;
-        float Hyy = term1 * ny * ny + term2;
-        float Hzz = term1 * nz * nz + term2;
-        float Hxy = term1 * nx * ny;
-        float Hxz = term1 * nx * nz;
-        float Hyz = term1 * ny * nz;
+        real Hxx = term1 * nx * nx + term2;
+        real Hyy = term1 * ny * ny + term2;
+        real Hzz = term1 * nz * nz + term2;
+        real Hxy = term1 * nx * ny;
+        real Hxz = term1 * nx * nz;
+        real Hyz = term1 * ny * nz;
 
         // Both atoms get the same diagonal block (H[i,i] = H[j,j] for pairwise)
         addNBDiagBlock(diagHessian, groupIdx, i, numAtoms,

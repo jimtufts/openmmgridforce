@@ -21,6 +21,26 @@ using namespace std;
 // Coulomb constant in kJ*nm/mol/e^2
 static const float ONE_4PI_EPS0 = 138.935456f;
 
+// Energy buffers follow the context precision (mixed = double in mixed/double),
+// so high-magnitude energies are not narrowed to fp32 on accumulation/readback.
+static int mixedEnergyElementSize(OpenMM::CudaContext& cu) {
+    return (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) ? sizeof(double) : sizeof(float);
+}
+
+static void initMixedEnergyBuffer(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, int n, const char* name) {
+    buf.initialize(cu, n, mixedEnergyElementSize(cu), name);
+}
+
+static void downloadMixedEnergy(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, std::vector<double>& out) {
+    if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
+        buf.download(out);
+    } else {
+        std::vector<float> tmp(out.size());
+        buf.download(tmp);
+        out.assign(tmp.begin(), tmp.end());
+    }
+}
+
 CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, const Platform& platform,
                                                                    CudaContext& cu)
     : CalcIsolatedGBSAForceKernel(name, platform), cu(cu), hasInitializedKernel(false),
@@ -376,13 +396,13 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         groupScalingFactorsBuffer.upload(groupScalingFactorsHostCopy);
     }
 
-    // Allocate per-group energy buffers
-    groupEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupEnergies");
-    groupLigandSelfEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupLigandSelfEnergies");
-    groupReceptorContributions.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorContributions");
-    groupReceptorDesolvations.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupReceptorDesolvations");
-    groupCrossTermEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupCrossTermEnergies");
-    groupUnscaledEnergies.initialize<float>(cu, numParticleGroups, "isolatedGbsaGroupUnscaledEnergies");
+    // Allocate per-group energy buffers (mixed precision: double in mixed/double)
+    initMixedEnergyBuffer(cu, groupEnergies, numParticleGroups, "isolatedGbsaGroupEnergies");
+    initMixedEnergyBuffer(cu, groupLigandSelfEnergies, numParticleGroups, "isolatedGbsaGroupLigandSelfEnergies");
+    initMixedEnergyBuffer(cu, groupReceptorContributions, numParticleGroups, "isolatedGbsaGroupReceptorContributions");
+    initMixedEnergyBuffer(cu, groupReceptorDesolvations, numParticleGroups, "isolatedGbsaGroupReceptorDesolvations");
+    initMixedEnergyBuffer(cu, groupCrossTermEnergies, numParticleGroups, "isolatedGbsaGroupCrossTermEnergies");
+    initMixedEnergyBuffer(cu, groupUnscaledEnergies, numParticleGroups, "isolatedGbsaGroupUnscaledEnergies");
 
     groupEnergiesHost.resize(numParticleGroups);
     groupLigandSelfEnergiesHost.resize(numParticleGroups);
@@ -1188,16 +1208,16 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
     // Download group energies only when energy is needed to avoid sync barriers
     if (includeEnergy && !skipGroupEnergyDownload_) {
-        groupEnergies.download(groupEnergiesHost);
-        groupLigandSelfEnergies.download(groupLigandSelfEnergiesHost);
-        groupUnscaledEnergies.download(groupUnscaledEnergiesHost);
+        downloadMixedEnergy(cu, groupEnergies, groupEnergiesHost);
+        downloadMixedEnergy(cu, groupLigandSelfEnergies, groupLigandSelfEnergiesHost);
+        downloadMixedEnergy(cu, groupUnscaledEnergies, groupUnscaledEnergiesHost);
 
         if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
-            groupReceptorDesolvations.download(groupReceptorDesolvationsHost);
-            groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
+            downloadMixedEnergy(cu, groupReceptorDesolvations, groupReceptorDesolvationsHost);
+            downloadMixedEnergy(cu, groupCrossTermEnergies, groupCrossTermEnergiesHost);
         } else if (receptorMode == IsolatedGBSAForce::GRID
                    && computeCrossTermGrid) {
-            groupCrossTermEnergies.download(groupCrossTermEnergiesHost);
+            downloadMixedEnergy(cu, groupCrossTermEnergies, groupCrossTermEnergiesHost);
         }
 
         // Sum total energy. In GRID+crossTerm mode the cross-term

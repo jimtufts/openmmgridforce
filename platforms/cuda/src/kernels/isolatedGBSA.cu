@@ -2195,12 +2195,12 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     int templateNumAtoms,
     float prefactor,
     unsigned long long* __restrict__ forceBuffer,
-    float* __restrict__ groupEnergies,
-    float* __restrict__ groupLigandSelfEnergies,
+    mixed* __restrict__ groupEnergies,
+    mixed* __restrict__ groupLigandSelfEnergies,
     int paddedNumAtoms,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupUnscaledEnergies
+    mixed* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2232,8 +2232,8 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     float q_i = charges[templateIdx_i];
     float R_i = bornRadii[idx];
 
-    float energy = 0.0f;
-    float3 force = make_float3(0.0f, 0.0f, 0.0f);
+    mixed energy = 0.0f;
+    real3 force = make_real3(0.0f, 0.0f, 0.0f);
 
     // Self energy term
     energy += 0.5f * prefactor * q_i * q_i / R_i;
@@ -2246,31 +2246,31 @@ extern "C" __global__ void computeIsolatedGBEnergy(
         int particleIdx_j = particleIndices[j];
 
         real4 pos_j = posq[particleIdx_j];
-        float q_j = charges[templateIdx_j];
-        float R_j = bornRadii[j];
+        real q_j = charges[templateIdx_j];
+        real R_j = bornRadii[j];
 
-        float dx = pos_j.x - pos_i.x;
-        float dy = pos_j.y - pos_i.y;
-        float dz = pos_j.z - pos_i.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-        float r = sqrtf(r2);
+        real dx = pos_j.x - pos_i.x;
+        real dy = pos_j.y - pos_i.y;
+        real dz = pos_j.z - pos_i.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
+        real r = sqrt(r2);
 
         // Still equation
-        float RiRj = R_i * R_j;
-        float expArg = -r2 / (4.0f * RiRj);
-        float expTerm = expf(expArg);
-        float f_gb2 = r2 + RiRj * expTerm;
-        float f_gb = sqrtf(f_gb2);
-        float invFgb = 1.0f / f_gb;
+        real RiRj = R_i * R_j;
+        real expArg = -r2 / (4.0f * RiRj);
+        real expTerm = exp(expArg);
+        real f_gb2 = r2 + RiRj * expTerm;
+        real f_gb = sqrt(f_gb2);
+        real invFgb = 1.0f / f_gb;
 
-        float pairEnergy = prefactor * q_i * q_j * invFgb;
+        real pairEnergy = prefactor * q_i * q_j * invFgb;
         energy += pairEnergy;
 
         // Force = -dE/dr scaled by alchemical factor
-        float dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
-        float dEdR = -prefactor * q_i * q_j * invFgb * invFgb * dFgbDr * scale;
+        real dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
+        real dEdR = -prefactor * q_i * q_j * invFgb * invFgb * dFgbDr * scale;
 
-        float invR = 1.0f / r;
+        real invR = 1.0f / r;
         force.x += dEdR * dx * invR;
         force.y += dEdR * dy * invR;
         force.z += dEdR * dz * invR;
@@ -2291,7 +2291,7 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     atomicAdd(&groupLigandSelfEnergies[groupIdx], energy * scale);
     // Accumulate unscaled energies (no per-group alchemical scaling)
     if (groupUnscaledEnergies != 0) {
-        float unscaledScale = globalScalingFactor;  // only global, no group scaling
+        mixed unscaledScale = globalScalingFactor;  // only global, no group scaling
         atomicAdd(&groupUnscaledEnergies[groupIdx], energy * unscaledScale);
     }
 }
@@ -2307,10 +2307,10 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     int templateNumAtoms,
     float surfaceTension,
     float probeRadius,
-    float* __restrict__ groupEnergies,
+    mixed* __restrict__ groupEnergies,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupUnscaledEnergies
+    mixed* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2378,9 +2378,9 @@ extern "C" __global__ void computeReceptorDeltaSA(
     float probeRadius,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupReceptorDesolvations,   // += ΔSA*scale
-    float* __restrict__ groupEnergies,               // += ΔSA*scale
-    float* __restrict__ groupUnscaledEnergies        // += ΔSA (no group scale)
+    mixed* __restrict__ groupReceptorDesolvations,   // += ΔSA*scale
+    mixed* __restrict__ groupEnergies,               // += ΔSA*scale
+    mixed* __restrict__ groupUnscaledEnergies        // += ΔSA (no group scale)
 ) {
     int totalWork = numGroups * numReceptorAtoms;
     for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -4347,9 +4347,9 @@ extern "C" __global__ void accumulateDesolvationOnGPU(
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupEnergies,
-    float* __restrict__ groupReceptorDesolvations,
-    float* __restrict__ groupUnscaledEnergies
+    mixed* __restrict__ groupEnergies,
+    mixed* __restrict__ groupReceptorDesolvations,
+    mixed* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -4372,9 +4372,9 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupEnergies,
-    float* __restrict__ groupReceptorDesolvations,
-    float* __restrict__ groupUnscaledEnergies
+    mixed* __restrict__ groupEnergies,
+    mixed* __restrict__ groupReceptorDesolvations,
+    mixed* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -4397,8 +4397,8 @@ extern "C" __global__ void accumulateCrossTermOnGPU(
     int numGroups,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupEnergies,
-    float* __restrict__ groupUnscaledEnergies
+    mixed* __restrict__ groupEnergies,
+    mixed* __restrict__ groupUnscaledEnergies
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -5502,12 +5502,12 @@ extern "C" __global__ void computeCrossTermFromGrid(
     const int* __restrict__ gridCounts,
     float gridSpacing,
     unsigned long long* __restrict__ forceBuffer,
-    float* __restrict__ groupEnergies,
-    float* __restrict__ groupCrossTermEnergies,
+    mixed* __restrict__ groupEnergies,
+    mixed* __restrict__ groupCrossTermEnergies,
     int paddedNumAtoms,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ groupUnscaledEnergies
+    mixed* __restrict__ groupUnscaledEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 

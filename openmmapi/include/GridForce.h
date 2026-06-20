@@ -1027,7 +1027,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @param context  the Context to query
      * @return         vector of raw energies, one per atom across all groups (K*N values)
      */
-    std::vector<float> getParticleGroupAtomRawEnergies(OpenMM::Context& context) const;
+    std::vector<double> getParticleGroupAtomRawEnergies(OpenMM::Context& context) const;
 
     /**
      * Compute Hessian (second derivative) blocks for each atom from the grid potential.

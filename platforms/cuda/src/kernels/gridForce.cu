@@ -33,9 +33,9 @@ extern "C" __global__ void computeGridForce(
     const int paddedNumAtoms,
     const int* __restrict__ particleIndices,  // Filtered particle indices (null = all particles)
     const int* __restrict__ particleToGroupMap,  // Map particle index to group index (null = no groups)
-    float* __restrict__ groupEnergyBuffer,  // Per-group energy buffer (null = no groups)
-    float* __restrict__ groupUnscaledEnergyBuffer,  // Per-group unscaled energy (no group scaling, null = don't store)
-    float* __restrict__ atomEnergyBuffer,   // Per-atom energy buffer (null = don't store)
+    mixed* __restrict__ groupEnergyBuffer,  // Per-group energy buffer (null = no groups)
+    mixed* __restrict__ groupUnscaledEnergyBuffer,  // Per-group unscaled energy (no group scaling, null = don't store)
+    mixed* __restrict__ atomEnergyBuffer,   // Per-atom energy buffer (null = don't store)
     int* __restrict__ outOfBoundsBuffer,    // Per-atom out-of-bounds flags (null = don't store)
     const int numGroups,  // Number of particle groups
     const float arcsinhScale,  // 0.0=disabled, >0.0=apply sinh inverse after interpolation
@@ -43,7 +43,7 @@ extern "C" __global__ void computeGridForce(
     const float* __restrict__ groupScalingFactors,  // Per-group alchemical scaling factors (null = no per-group scaling)
     const float runtimeCap,   // Global runtime cap (0=disabled)
     const float* __restrict__ groupRuntimeCaps,    // Per-group runtime caps (null = use global, 0 = use global)
-    float* __restrict__ atomRawEnergyBuffer,         // Per-atom raw (pre-cap) energy storage (null = don't store)
+    mixed* __restrict__ atomRawEnergyBuffer,         // Per-atom raw (pre-cap) energy storage (null = don't store)
     const int evaluateInVSpace,   // Per-corner ^n + V-space cap + no post-interp back-transform
     const float effectiveMinX, const float effectiveMinY, const float effectiveMinZ,  // Effective evaluation bounds (grid-local coords)
     const float effectiveMaxX, const float effectiveMaxY, const float effectiveMaxZ) {
@@ -111,7 +111,7 @@ extern "C" __global__ void computeGridForce(
             if (triquinticInterpolateReal(gridDerivatives, gridCounts, gridSpacing,
                     (real)originX, (real)originY, (real)originZ, rpos, &rval, &rgx, &rgy, &rgz)) {
                 if (atomRawEnergyBuffer != 0)
-                    atomRawEnergyBuffer[index] = (float)(unscaledScaling * rval);
+                    atomRawEnergyBuffer[index] = unscaledScaling * rval;
                 threadEnergy = scalingFactor * rval;
                 threadUnscaledEnergy = unscaledScaling * rval;
                 atomForce.x = -scalingFactor * rgx;
@@ -669,14 +669,14 @@ extern "C" __global__ void computeGridForce(
  */
 extern "C" __global__ void addGroupEnergiesToTotal(
     mixed* __restrict__ energyBuffer,
-    const float* __restrict__ groupEnergyBuffer,
+    const mixed* __restrict__ groupEnergyBuffer,
     const int numGroups)
 {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        float total = 0.0f;
+        mixed total = (mixed)0;
         for (int i = 0; i < numGroups; i++) {
             total += groupEnergyBuffer[i];
         }
-        atomicAdd(&energyBuffer[0], (mixed)total);
+        atomicAdd(&energyBuffer[0], total);
     }
 }

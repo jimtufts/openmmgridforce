@@ -89,7 +89,7 @@ std::vector<double> GridForceImpl::getParticleAtomEnergies() {
     return kernel.getAs<CalcGridForceKernel>().getParticleAtomEnergies();
 }
 
-std::vector<float> GridForceImpl::getParticleGroupAtomRawEnergies() {
+std::vector<double> GridForceImpl::getParticleGroupAtomRawEnergies() {
     return kernel.getAs<CalcGridForceKernel>().getParticleGroupAtomRawEnergies();
 }
 

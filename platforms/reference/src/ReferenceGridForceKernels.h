@@ -87,7 +87,7 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> getParticleGroupEnergies();
     std::vector<double> getParticleGroupUnscaledEnergies();
     std::vector<double> getParticleAtomEnergies();
-    std::vector<float> getParticleGroupAtomRawEnergies();
+    std::vector<double> getParticleGroupAtomRawEnergies();
     std::vector<int> getParticleOutOfBoundsFlags();
 
    private:

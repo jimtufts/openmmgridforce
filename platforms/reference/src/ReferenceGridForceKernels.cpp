@@ -1225,9 +1225,9 @@ vector<double> ReferenceCalcGridForceKernel::getParticleAtomEnergies() {
     return vector<double>();
 }
 
-vector<float> ReferenceCalcGridForceKernel::getParticleGroupAtomRawEnergies() {
+vector<double> ReferenceCalcGridForceKernel::getParticleGroupAtomRawEnergies() {
     // Reference platform does not support per-atom raw energy tracking yet
-    return vector<float>();
+    return vector<double>();
 }
 
 vector<int> ReferenceCalcGridForceKernel::getParticleOutOfBoundsFlags() {
