@@ -171,6 +171,41 @@ def test_tiled_force_precision(method):
     assert relf < 1e-3, f"tiled {METHODS[method]}: double rel {relf:.2e}"
 
 
+def _eval_hessian(grid_file, method, probe, precision, natoms=8):
+    rng = np.random.default_rng(1)
+    fr = 0.25 + 0.5 * rng.random((natoms, 3))
+    # all atoms near the probe cell, inside the interior
+    base = np.array(probe)
+    pts = [tuple(base + (f - 0.5) * 0.05) for f in fr]
+    gf = gfp.GridForce(); gf.loadFromFile(grid_file); gf.setInterpolationMethod(method)
+    s = mm.System()
+    for _ in range(natoms):
+        s.addParticle(1.0)
+    gf.addParticleGroup('charge', list(range(natoms)), [1.0] * natoms)
+    s.addForce(gf)
+    ctx = Context(s, VerletIntegrator(0.001), mm.Platform.getPlatformByName('CUDA'),
+                  {'Precision': precision})
+    ctx.setPositions([mm.Vec3(*p) for p in pts] * nanometer)
+    gf.computeHessian(ctx)
+    h = np.array(gf.getHessianBlocks(ctx))
+    del ctx
+    return h
+
+
+@pytest.mark.parametrize("method", [1, 3])
+def test_hessian_precision(method):
+    """Grid Hessian: single==mixed (per-atom, no summation), double finite and agrees.
+    The double output buffer (mixed) carries the double-precision Hessian values."""
+    gf, probe = _grid(False)
+    hs = _eval_hessian(gf, method, probe, 'single')
+    hm = _eval_hessian(gf, method, probe, 'mixed')
+    hd = _eval_hessian(gf, method, probe, 'double')
+    assert np.all(np.isfinite(hd))
+    assert np.array_equal(hs, hm), f"hessian {METHODS[method]}: single/mixed differ"
+    relh = np.linalg.norm(hd - hs) / max(1.0, np.linalg.norm(hs))
+    assert relh < 1e-3, f"hessian {METHODS[method]}: double rel {relh:.2e}"
+
+
 def test_double_generation_carries_f64():
     """Double generation produces genuine f64 derivatives (oracle-free check)."""
     import validate_double_generation as vdg

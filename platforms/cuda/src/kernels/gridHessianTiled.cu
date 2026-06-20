@@ -15,23 +15,24 @@
  * f(v) = C*tanh(v/C), f'(v) = sech²(v/C), f''(v) = -2*tanh(v/C)*sech²(v/C)/C
  * d^2f/dxi dxj = f'(v)*d^2v/dxi dxj + f''(v)*dv/dxi*dv/dxj
  */
+template<typename T>
 __device__ inline void applyRuntimeCapHessianChainRuleTiled(
-    float v, float dvdx, float dvdy, float dvdz,
-    float& d2xx, float& d2yy, float& d2zz,
-    float& d2xy, float& d2xz, float& d2yz,
-    float cap
+    T v, T dvdx, T dvdy, T dvdz,
+    T& d2xx, T& d2yy, T& d2zz,
+    T& d2xy, T& d2xz, T& d2yz,
+    T cap
 ) {
-    float t = tanhf(v / cap);
-    float sech2 = 1.0f - t * t;
-    float fPrime = sech2;
-    float fDoublePrime = -2.0f * t * sech2 / cap;
+    T t = tanh(v / cap);
+    T sech2 = 1.0f - t * t;
+    T fPrime = sech2;
+    T fDoublePrime = -2.0f * t * sech2 / cap;
 
-    float new_d2xx = fPrime * d2xx + fDoublePrime * dvdx * dvdx;
-    float new_d2yy = fPrime * d2yy + fDoublePrime * dvdy * dvdy;
-    float new_d2zz = fPrime * d2zz + fDoublePrime * dvdz * dvdz;
-    float new_d2xy = fPrime * d2xy + fDoublePrime * dvdx * dvdy;
-    float new_d2xz = fPrime * d2xz + fDoublePrime * dvdx * dvdz;
-    float new_d2yz = fPrime * d2yz + fDoublePrime * dvdy * dvdz;
+    T new_d2xx = fPrime * d2xx + fDoublePrime * dvdx * dvdx;
+    T new_d2yy = fPrime * d2yy + fDoublePrime * dvdy * dvdy;
+    T new_d2zz = fPrime * d2zz + fDoublePrime * dvdz * dvdz;
+    T new_d2xy = fPrime * d2xy + fDoublePrime * dvdx * dvdy;
+    T new_d2xz = fPrime * d2xz + fDoublePrime * dvdx * dvdz;
+    T new_d2yz = fPrime * d2yz + fDoublePrime * dvdy * dvdz;
 
     d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
     d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
@@ -93,7 +94,7 @@ __device__ __forceinline__ int tileIndexHessian(int lx, int ly, int lz, int tile
  */
 extern "C" __global__ void computeGridHessianTiled(
     const real4* __restrict__ posq,
-    float* __restrict__ hessianBuffer,  // 6 components per atom
+    mixed* __restrict__ hessianBuffer,  // 6 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     const float* __restrict__ scalingFactors,
@@ -142,7 +143,7 @@ extern "C" __global__ void computeGridHessianTiled(
     float scalingFactor = groupScale * scalingFactors[particleIndex];
 
     // Resolve effective runtime cap: per-group if available, else global
-    float effectiveCap = runtimeCap;
+    real effectiveCap = runtimeCap;
     if (groupRuntimeCaps != 0 && particleToGroupMap != 0) {
         int gIdx = particleToGroupMap[particleIndex];
         if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
@@ -151,14 +152,14 @@ extern "C" __global__ void computeGridHessianTiled(
     }
 
     // Transform to grid coordinates
-    float3 pos;
+    real3 pos;
     pos.x = posOrig.x - originX;
     pos.y = posOrig.y - originY;
     pos.z = posOrig.z - originZ;
 
-    // Hessian accumulators stay float for the downstream chain rule (assembly and eval are double).
-    float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
-    float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
+    // Hessian accumulators stay real for the downstream chain rule (assembly and eval are double).
+    real d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
+    real d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
 
     // Check against effective evaluation bounds
     bool isInside = (pos.x >= effectiveMinX && pos.x <= effectiveMaxX &&
@@ -172,9 +173,9 @@ extern "C" __global__ void computeGridHessianTiled(
         int iz = min(max((int)(pos.z / gridSpacing[2]), 0), gridCounts[2] - 2);
 
         // Fractional position [0, 1]
-        float fx = (pos.x / gridSpacing[0]) - ix;
-        float fy = (pos.y / gridSpacing[1]) - iy;
-        float fz = (pos.z / gridSpacing[2]) - iz;
+        real fx = (pos.x / gridSpacing[0]) - ix;
+        real fy = (pos.y / gridSpacing[1]) - iy;
+        real fz = (pos.z / gridSpacing[2]) - iz;
 
         fx = min(max(fx, 0.0f), 1.0f);
         fy = min(max(fy, 0.0f), 1.0f);
@@ -199,8 +200,8 @@ extern "C" __global__ void computeGridHessianTiled(
 
             int tilePoints = tileWithOverlap * tileWithOverlap * tileWithOverlap;
 
-            float interpolated = 0.0f;
-            float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+            real interpolated = 0.0f;
+            real dx = 0.0f, dy = 0.0f, dz = 0.0f;
 
             if (interpolationMethod == 3 && tileDerivatives != 0) {
                 // TRIQUINTIC HERMITE - Analytical second derivatives using tile data
@@ -217,10 +218,10 @@ extern "C" __global__ void computeGridHessianTiled(
                 double X[216];
                 if (invPowerMode == 1) {
                     // RUNTIME mode: transform all 27 derivatives per corner
-                    float p = 1.0f / invPower;
+                    real p = 1.0f / invPower;
                     for (int c = 0; c < 8; c++) {
                         int point_idx = tileIndexHessian(corners[c][0], corners[c][1], corners[c][2], tileWithOverlap);
-                        float G_derivs[27], S_derivs[27];
+                        real G_derivs[27], S_derivs[27];
                         for (int d = 0; d < 27; d++) {
                             G_derivs[d] = tileDerivatives[d * tilePoints + point_idx];
                         }
@@ -240,7 +241,7 @@ extern "C" __global__ void computeGridHessianTiled(
                 }
 
                 // Assemble + evaluate (value, gradient, Hessian) via the shared
-                // double-precision helpers; truncate into the float accumulators.
+                // double-precision helpers; truncate into the real accumulators.
                 TriquinticAccum a[216];
                 triquinticAssemble(X, a);
                 TriquinticAccum v, gx, gy, gz, hxx, hyy, hzz, hxy, hxz, hyz;
@@ -250,21 +251,21 @@ extern "C" __global__ void computeGridHessianTiled(
                 d2xx = hxx; d2yy = hyy; d2zz = hzz; d2xy = hxy; d2xz = hxz; d2yz = hyz;
 
                 // Back-convert from smoothed space to actual potential for RUNTIME mode
-                if (invPowerMode == 1 && fabsf(invPower) > 1e-10f) {
-                    float absU = fabsf(interpolated);
+                if (invPowerMode == 1 && fabs(invPower) > 1e-10f) {
+                    real absU = fabs(interpolated);
                     if (absU > 1e-10f) {
-                        float n = invPower;
-                        float absU_nm1 = powf(absU, n - 1.0f);
-                        float absU_nm2 = powf(absU, n - 2.0f);
-                        float f2_1 = n * (n - 1.0f) * absU_nm2;
-                        float f2_2 = n * absU_nm1;
+                        real n = invPower;
+                        real absU_nm1 = pow(absU, n - 1.0f);
+                        real absU_nm2 = pow(absU, n - 2.0f);
+                        real f2_1 = n * (n - 1.0f) * absU_nm2;
+                        real f2_2 = n * absU_nm1;
 
-                        float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
-                        float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
-                        float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
-                        float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
-                        float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
-                        float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
+                        real new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
+                        real new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
+                        real new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
+                        real new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
+                        real new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
+                        real new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
 
                         d2xx = new_d2xx;
                         d2yy = new_d2yy;
@@ -277,16 +278,16 @@ extern "C" __global__ void computeGridHessianTiled(
 
                 // Arcsinh chain rule: V = scale*sinh(g), d²V/dxi dxj = scale*[sinh(g)*dg_i*dg_j + cosh(g)*d²g_ij]
                 if (arcsinhScale > 0.0f) {
-                    float g = interpolated;
-                    float sinhG = sinhf(g);
-                    float coshG = coshf(g);
+                    real g = interpolated;
+                    real sinhG = sinh(g);
+                    real coshG = coshf(g);
 
-                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+                    real new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    real new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    real new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    real new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    real new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    real new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
                     dx = arcsinhScale * coshG * dx;
                     dy = arcsinhScale * coshG * dy;
@@ -297,15 +298,15 @@ extern "C" __global__ void computeGridHessianTiled(
                 }
 
                 // Convert from unit cell to physical coordinates
-                float inv_dx = 1.0f / gridSpacing[0];
-                float inv_dy = 1.0f / gridSpacing[1];
-                float inv_dz = 1.0f / gridSpacing[2];
-                float inv_dx2 = inv_dx * inv_dx;
-                float inv_dy2 = inv_dy * inv_dy;
-                float inv_dz2 = inv_dz * inv_dz;
-                float inv_dxdy = inv_dx * inv_dy;
-                float inv_dxdz = inv_dx * inv_dz;
-                float inv_dydz = inv_dy * inv_dz;
+                real inv_dx = 1.0f / gridSpacing[0];
+                real inv_dy = 1.0f / gridSpacing[1];
+                real inv_dz = 1.0f / gridSpacing[2];
+                real inv_dx2 = inv_dx * inv_dx;
+                real inv_dy2 = inv_dy * inv_dy;
+                real inv_dz2 = inv_dz * inv_dz;
+                real inv_dxdy = inv_dx * inv_dy;
+                real inv_dxdz = inv_dx * inv_dz;
+                real inv_dydz = inv_dy * inv_dz;
 
                 d2xx *= inv_dx2;
                 d2yy *= inv_dy2;
@@ -318,17 +319,17 @@ extern "C" __global__ void computeGridHessianTiled(
                 // CUBIC B-SPLINE - Analytical second derivatives using tile data
 
                 // Precompute basis functions and derivatives
-                float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
-                float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
-                float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+                real bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+                real by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+                real bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
 
-                float dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
-                float dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
-                float dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+                real dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+                real dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+                real dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
 
-                float d2bx[4] = {bspline_deriv2_0(fx), bspline_deriv2_1(fx), bspline_deriv2_2(fx), bspline_deriv2_3(fx)};
-                float d2by[4] = {bspline_deriv2_0(fy), bspline_deriv2_1(fy), bspline_deriv2_2(fy), bspline_deriv2_3(fy)};
-                float d2bz[4] = {bspline_deriv2_0(fz), bspline_deriv2_1(fz), bspline_deriv2_2(fz), bspline_deriv2_3(fz)};
+                real d2bx[4] = {bspline_deriv2_0(fx), bspline_deriv2_1(fx), bspline_deriv2_2(fx), bspline_deriv2_3(fx)};
+                real d2by[4] = {bspline_deriv2_0(fy), bspline_deriv2_1(fy), bspline_deriv2_2(fy), bspline_deriv2_3(fy)};
+                real d2bz[4] = {bspline_deriv2_0(fz), bspline_deriv2_1(fz), bspline_deriv2_2(fz), bspline_deriv2_3(fz)};
 
                 for (int i = 0; i < 4; i++) {
                     int lx = localX - 1 + i;
@@ -342,13 +343,13 @@ extern "C" __global__ void computeGridHessianTiled(
                             int lz = localZ - 1 + k;
                             lz = min(max(lz, 0), tileWithOverlap - 1);
 
-                            float val = tileValues[tileIndexHessian(lx, ly, lz, tileWithOverlap)];
+                            real val = tileValues[tileIndexHessian(lx, ly, lz, tileWithOverlap)];
 
                             // Apply RUNTIME inv_power transformation before interpolation
                             if (invPowerMode == 1) {
-                                float invN = 1.0f / invPower;
-                                if (fabsf(val) >= 1e-10f) {
-                                    val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                                real invN = 1.0f / invPower;
+                                if (fabs(val) >= 1e-10f) {
+                                    val = (val >= 0.0f ? 1.0f : -1.0f) * pow(fabs(val), invN);
                                 } else {
                                     val = 0.0f;
                                 }
@@ -376,16 +377,16 @@ extern "C" __global__ void computeGridHessianTiled(
                 // Undo transforms in reverse order: arcsinh first, then inv_power.
                 // (Matches gridHessian.cu and gridForce.cu ordering)
                 if (arcsinhScale > 0.0f) {
-                    float g = interpolated;
-                    float sinhG = sinhf(g);
-                    float coshG = coshf(g);
+                    real g = interpolated;
+                    real sinhG = sinh(g);
+                    real coshG = coshf(g);
 
-                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+                    real new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    real new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    real new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    real new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    real new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    real new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
                     interpolated = arcsinhScale * sinhG;
                     dx = arcsinhScale * coshG * dx;
@@ -396,28 +397,28 @@ extern "C" __global__ void computeGridHessianTiled(
                     d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
                 }
 
-                if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
-                    float absU = fabsf(interpolated);
+                if ((invPowerMode == 1 || invPowerMode == 2) && fabs(invPower) > 1e-10f) {
+                    real absU = fabs(interpolated);
                     if (absU > 1e-10f) {
-                        float n = invPower;
-                        float absU_nm1 = powf(absU, n - 1.0f);
-                        float absU_nm2 = powf(absU, n - 2.0f);
-                        float f2_1 = n * (n - 1.0f) * absU_nm2;
-                        float f2_2 = n * absU_nm1;
+                        real n = invPower;
+                        real absU_nm1 = pow(absU, n - 1.0f);
+                        real absU_nm2 = pow(absU, n - 2.0f);
+                        real f2_1 = n * (n - 1.0f) * absU_nm2;
+                        real f2_2 = n * absU_nm1;
 
-                        float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
-                        float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
-                        float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
-                        float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
-                        float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
-                        float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
+                        real new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
+                        real new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
+                        real new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
+                        real new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
+                        real new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
+                        real new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
 
                         dx *= f2_2;
                         dy *= f2_2;
                         dz *= f2_2;
 
-                        float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
-                        interpolated = sign * powf(absU, n);
+                        real sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                        interpolated = sign * pow(absU, n);
 
                         d2xx = new_d2xx; d2yy = new_d2yy; d2zz = new_d2zz;
                         d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
@@ -428,8 +429,8 @@ extern "C" __global__ void computeGridHessianTiled(
                 if (effectiveCap > 0.0f) {
                     applyRuntimeCapHessianChainRuleTiled(interpolated, dx, dy, dz,
                         d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
-                    float t = tanhf(interpolated / effectiveCap);
-                    float gradFactor = 1.0f - t * t;
+                    real t = tanh(interpolated / effectiveCap);
+                    real gradFactor = 1.0f - t * t;
                     interpolated = effectiveCap * t;
                     dx *= gradFactor;
                     dy *= gradFactor;
@@ -437,15 +438,15 @@ extern "C" __global__ void computeGridHessianTiled(
                 }
 
                 // Convert to physical coordinates
-                float inv_dx = 1.0f / gridSpacing[0];
-                float inv_dy = 1.0f / gridSpacing[1];
-                float inv_dz = 1.0f / gridSpacing[2];
-                float inv_dx2 = inv_dx * inv_dx;
-                float inv_dy2 = inv_dy * inv_dy;
-                float inv_dz2 = inv_dz * inv_dz;
-                float inv_dxdy = inv_dx * inv_dy;
-                float inv_dxdz = inv_dx * inv_dz;
-                float inv_dydz = inv_dy * inv_dz;
+                real inv_dx = 1.0f / gridSpacing[0];
+                real inv_dy = 1.0f / gridSpacing[1];
+                real inv_dz = 1.0f / gridSpacing[2];
+                real inv_dx2 = inv_dx * inv_dx;
+                real inv_dy2 = inv_dy * inv_dy;
+                real inv_dz2 = inv_dz * inv_dz;
+                real inv_dxdy = inv_dx * inv_dy;
+                real inv_dxdz = inv_dx * inv_dz;
+                real inv_dydz = inv_dy * inv_dz;
 
                 d2xx *= inv_dx2;
                 d2yy *= inv_dy2;
@@ -457,25 +458,25 @@ extern "C" __global__ void computeGridHessianTiled(
             } else if (interpolationMethod == 4) {
                 // QUINTIC B-SPLINE - Analytical second derivatives from 6-point stencil
 
-                float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+                real bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
                                qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
-                float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+                real by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
                                qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
-                float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+                real bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
                                qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
 
-                float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+                real dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
                                 qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
-                float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+                real dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
                                 qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
-                float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+                real dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
                                 qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
 
-                float d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
+                real d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
                                  qbspline_deriv2_3(fx), qbspline_deriv2_4(fx), qbspline_deriv2_5(fx)};
-                float d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
+                real d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
                                  qbspline_deriv2_3(fy), qbspline_deriv2_4(fy), qbspline_deriv2_5(fy)};
-                float d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
+                real d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
                                  qbspline_deriv2_3(fz), qbspline_deriv2_4(fz), qbspline_deriv2_5(fz)};
 
                 for (int i = 0; i < 6; i++) {
@@ -490,12 +491,12 @@ extern "C" __global__ void computeGridHessianTiled(
                             int lz = localZ - 2 + k;
                             lz = min(max(lz, 0), tileWithOverlap - 1);
 
-                            float val = tileValues[tileIndexHessian(lx, ly, lz, tileWithOverlap)];
+                            real val = tileValues[tileIndexHessian(lx, ly, lz, tileWithOverlap)];
 
                             if (invPowerMode == 1) {
-                                float invN = 1.0f / invPower;
-                                if (fabsf(val) >= 1e-10f) {
-                                    val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                                real invN = 1.0f / invPower;
+                                if (fabs(val) >= 1e-10f) {
+                                    val = (val >= 0.0f ? 1.0f : -1.0f) * pow(fabs(val), invN);
                                 } else {
                                     val = 0.0f;
                                 }
@@ -517,16 +518,16 @@ extern "C" __global__ void computeGridHessianTiled(
 
                 // Undo transforms in reverse order: arcsinh first, then inv_power.
                 if (arcsinhScale > 0.0f) {
-                    float g = interpolated;
-                    float sinhG = sinhf(g);
-                    float coshG = coshf(g);
+                    real g = interpolated;
+                    real sinhG = sinh(g);
+                    real coshG = coshf(g);
 
-                    float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                    float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                    float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                    float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                    float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                    float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+                    real new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                    real new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                    real new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                    real new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                    real new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                    real new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
                     interpolated = arcsinhScale * sinhG;
                     dx = arcsinhScale * coshG * dx;
@@ -537,26 +538,26 @@ extern "C" __global__ void computeGridHessianTiled(
                     d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
                 }
 
-                if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
-                    float absU = fabsf(interpolated);
+                if ((invPowerMode == 1 || invPowerMode == 2) && fabs(invPower) > 1e-10f) {
+                    real absU = fabs(interpolated);
                     if (absU > 1e-10f) {
-                        float n = invPower;
-                        float absU_nm1 = powf(absU, n - 1.0f);
-                        float absU_nm2 = powf(absU, n - 2.0f);
-                        float f2_1 = n * (n - 1.0f) * absU_nm2;
-                        float f2_2 = n * absU_nm1;
+                        real n = invPower;
+                        real absU_nm1 = pow(absU, n - 1.0f);
+                        real absU_nm2 = pow(absU, n - 2.0f);
+                        real f2_1 = n * (n - 1.0f) * absU_nm2;
+                        real f2_2 = n * absU_nm1;
 
-                        float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
-                        float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
-                        float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
-                        float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
-                        float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
-                        float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
+                        real new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
+                        real new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
+                        real new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
+                        real new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
+                        real new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
+                        real new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
 
                         // Update value and first derivatives to post-inv_power
-                        float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
-                        float pf = n * absU_nm1;
-                        interpolated = sign * powf(absU, n);
+                        real sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                        real pf = n * absU_nm1;
+                        interpolated = sign * pow(absU, n);
                         dx *= pf;
                         dy *= pf;
                         dz *= pf;
@@ -570,8 +571,8 @@ extern "C" __global__ void computeGridHessianTiled(
                 if (effectiveCap > 0.0f) {
                     applyRuntimeCapHessianChainRuleTiled(interpolated, dx, dy, dz,
                         d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
-                    float t = tanhf(interpolated / effectiveCap);
-                    float gradFactor = 1.0f - t * t;
+                    real t = tanh(interpolated / effectiveCap);
+                    real gradFactor = 1.0f - t * t;
                     interpolated = effectiveCap * t;
                     dx *= gradFactor;
                     dy *= gradFactor;
@@ -579,9 +580,9 @@ extern "C" __global__ void computeGridHessianTiled(
                 }
 
                 // Convert to physical coordinates
-                float inv_dx = 1.0f / gridSpacing[0];
-                float inv_dy = 1.0f / gridSpacing[1];
-                float inv_dz = 1.0f / gridSpacing[2];
+                real inv_dx = 1.0f / gridSpacing[0];
+                real inv_dy = 1.0f / gridSpacing[1];
+                real inv_dz = 1.0f / gridSpacing[2];
 
                 d2xx *= inv_dx * inv_dx;
                 d2yy *= inv_dy * inv_dy;

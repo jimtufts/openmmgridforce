@@ -987,7 +987,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         // Allocate Hessian buffer: 6 components per atom
         int hessianNumAtoms = (totalGroupParticles > 0) ? totalGroupParticles : numAtoms;
         if (hessianNumAtoms > 0) {
-            hessianBuffer.initialize<float>(cu, 6 * hessianNumAtoms, "hessianBuffer");
+            initMixedEnergyBuffer(cu, hessianBuffer, 6 * hessianNumAtoms, "hessianBuffer");
         }
 
         // Initialize analysis kernels for eigendecomposition and metrics
@@ -998,7 +998,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         if (interpolationMethod == 4) {
             thirdDerivKernel = cu.getKernel(module, "computeGridThirdDerivatives");
             if (hessianNumAtoms > 0) {
-                thirdDerivBuffer.initialize<float>(cu, 10 * hessianNumAtoms, "thirdDerivBuffer");
+                initMixedEnergyBuffer(cu, thirdDerivBuffer, 10 * hessianNumAtoms, "thirdDerivBuffer");
             }
         }
     }
@@ -1725,8 +1725,7 @@ void CudaCalcGridForceKernel::computeHessian() {
     }
 
     // Download results
-    lastHessianBlocks.resize(6 * kernelNumAtoms);
-    hessianBuffer.download(lastHessianBlocks);
+    downloadMixedEnergy(cu, hessianBuffer, lastHessianBlocks, 6 * kernelNumAtoms);
 }
 
 vector<double> CudaCalcGridForceKernel::getHessianBlocks() {
@@ -1798,8 +1797,7 @@ void CudaCalcGridForceKernel::computeThirdDerivatives() {
 
     cu.executeKernel(thirdDerivKernel, args, kernelNumAtoms, 256);
 
-    lastThirdDerivBlocks.resize(10 * kernelNumAtoms);
-    thirdDerivBuffer.download(lastThirdDerivBlocks);
+    downloadMixedEnergy(cu, thirdDerivBuffer, lastThirdDerivBlocks, 10 * kernelNumAtoms);
 }
 
 vector<double> CudaCalcGridForceKernel::getThirdDerivativeBlocks() {

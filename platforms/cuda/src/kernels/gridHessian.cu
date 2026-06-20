@@ -29,31 +29,32 @@
  * @param d2Uxx/yy/zz/xy/xz/yz  Stored second derivatives (modified in place)
  * @param p          Power parameter (1/invPower, e.g., -6 for inv_power=-6)
  */
+template<typename T>
 __device__ inline void applyHessianChainRule(
-    float U,
-    float dUdx, float dUdy, float dUdz,
-    float& d2xx, float& d2yy, float& d2zz,
-    float& d2xy, float& d2xz, float& d2yz,
-    float p
+    T U,
+    T dUdx, T dUdy, T dUdz,
+    T& d2xx, T& d2yy, T& d2zz,
+    T& d2xy, T& d2xz, T& d2yz,
+    T p
 ) {
-    float absU = fabsf(U);
+    T absU = fabs(U);
     if (absU < 1e-10f) absU = 1e-10f;  // Clamp to avoid divide by zero
 
     // Precompute powers
-    float absU_pm1 = powf(absU, p - 1.0f);
-    float absU_pm2 = powf(absU, p - 2.0f);
+    T absU_pm1 = pow(absU, p - 1.0f);
+    T absU_pm2 = pow(absU, p - 2.0f);
 
     // Chain rule coefficients
-    float f2_1 = p * (p - 1.0f) * absU_pm2;  // For (dU/dx)² terms
-    float f2_2 = p * absU_pm1;                // For d²U/dx² terms
+    T f2_1 = p * (p - 1.0f) * absU_pm2;  // For (dU/dx)² terms
+    T f2_2 = p * absU_pm1;                // For d²U/dx² terms
 
     // Apply chain rule to each Hessian component
-    float new_d2xx = f2_1 * dUdx * dUdx + f2_2 * d2xx;
-    float new_d2yy = f2_1 * dUdy * dUdy + f2_2 * d2yy;
-    float new_d2zz = f2_1 * dUdz * dUdz + f2_2 * d2zz;
-    float new_d2xy = f2_1 * dUdx * dUdy + f2_2 * d2xy;
-    float new_d2xz = f2_1 * dUdx * dUdz + f2_2 * d2xz;
-    float new_d2yz = f2_1 * dUdy * dUdz + f2_2 * d2yz;
+    T new_d2xx = f2_1 * dUdx * dUdx + f2_2 * d2xx;
+    T new_d2yy = f2_1 * dUdy * dUdy + f2_2 * d2yy;
+    T new_d2zz = f2_1 * dUdz * dUdz + f2_2 * d2zz;
+    T new_d2xy = f2_1 * dUdx * dUdy + f2_2 * d2xy;
+    T new_d2xz = f2_1 * dUdx * dUdz + f2_2 * d2xz;
+    T new_d2yz = f2_1 * dUdy * dUdz + f2_2 * d2yz;
 
     d2xx = new_d2xx;
     d2yy = new_d2yy;
@@ -79,24 +80,25 @@ __device__ inline void applyHessianChainRule(
  * @param d2xx/...   Second derivatives (modified in place)
  * @param cap       Runtime cap value C (must be > 0)
  */
+template<typename T>
 __device__ inline void applyRuntimeCapHessianChainRule(
-    float v,
-    float dvdx, float dvdy, float dvdz,
-    float& d2xx, float& d2yy, float& d2zz,
-    float& d2xy, float& d2xz, float& d2yz,
-    float cap
+    T v,
+    T dvdx, T dvdy, T dvdz,
+    T& d2xx, T& d2yy, T& d2zz,
+    T& d2xy, T& d2xz, T& d2yz,
+    T cap
 ) {
-    float t = tanhf(v / cap);
-    float sech2 = 1.0f - t * t;
-    float fPrime = sech2;
-    float fDoublePrime = -2.0f * t * sech2 / cap;
+    T t = tanh(v / cap);
+    T sech2 = 1.0f - t * t;
+    T fPrime = sech2;
+    T fDoublePrime = -2.0f * t * sech2 / cap;
 
-    float new_d2xx = fPrime * d2xx + fDoublePrime * dvdx * dvdx;
-    float new_d2yy = fPrime * d2yy + fDoublePrime * dvdy * dvdy;
-    float new_d2zz = fPrime * d2zz + fDoublePrime * dvdz * dvdz;
-    float new_d2xy = fPrime * d2xy + fDoublePrime * dvdx * dvdy;
-    float new_d2xz = fPrime * d2xz + fDoublePrime * dvdx * dvdz;
-    float new_d2yz = fPrime * d2yz + fDoublePrime * dvdy * dvdz;
+    T new_d2xx = fPrime * d2xx + fDoublePrime * dvdx * dvdx;
+    T new_d2yy = fPrime * d2yy + fDoublePrime * dvdy * dvdy;
+    T new_d2zz = fPrime * d2zz + fDoublePrime * dvdz * dvdz;
+    T new_d2xy = fPrime * d2xy + fDoublePrime * dvdx * dvdy;
+    T new_d2xz = fPrime * d2xz + fDoublePrime * dvdx * dvdz;
+    T new_d2yz = fPrime * d2yz + fDoublePrime * dvdy * dvdz;
 
     d2xx = new_d2xx;
     d2yy = new_d2yy;
@@ -125,7 +127,7 @@ __device__ inline void applyRuntimeCapHessianChainRule(
  */
 extern "C" __global__ void computeGridHessian(
     const real4* __restrict__ posq,
-    float* __restrict__ hessianBuffer,  // 6 components per atom
+    mixed* __restrict__ hessianBuffer,  // 6 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     const float* __restrict__ gridValues,
@@ -168,7 +170,7 @@ extern "C" __global__ void computeGridHessian(
     float scalingFactor = groupScale * scalingFactors[particleIndex];
 
     // Resolve effective runtime cap: per-group if available, else global
-    float effectiveCap = runtimeCap;
+    real effectiveCap = runtimeCap;
     if (groupRuntimeCaps != 0 && particleToGroupMap != 0) {
         int gIdx = particleToGroupMap[particleIndex];
         if (gIdx >= 0 && gIdx < numGroups && groupRuntimeCaps[gIdx] > 0.0f) {
@@ -177,17 +179,17 @@ extern "C" __global__ void computeGridHessian(
     }
 
     // Transform to grid coordinates
-    float3 pos;
+    real3 pos;
     pos.x = posOrig.x - originX;
     pos.y = posOrig.y - originY;
     pos.z = posOrig.z - originZ;
 
-    // Accumulators stay float for the downstream chain-rule helpers (the triquintic
+    // Accumulators stay real for the downstream chain-rule helpers (the triquintic
     // assembly and eval temporaries are double).
-    float interpolated = 0.0f;
-    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
-    float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
-    float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
+    real interpolated = 0.0f;
+    real dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    real d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
+    real d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
 
     // Check against effective evaluation bounds
     bool isInside = (pos.x >= effectiveMinX && pos.x <= effectiveMaxX &&
@@ -201,9 +203,9 @@ extern "C" __global__ void computeGridHessian(
         int iz = min(max((int)(pos.z / gridSpacing[2]), 0), gridCounts[2] - 2);
 
         // Fractional position [0, 1]
-        float fx = (pos.x / gridSpacing[0]) - ix;
-        float fy = (pos.y / gridSpacing[1]) - iy;
-        float fz = (pos.z / gridSpacing[2]) - iz;
+        real fx = (pos.x / gridSpacing[0]) - ix;
+        real fy = (pos.y / gridSpacing[1]) - iy;
+        real fz = (pos.z / gridSpacing[2]) - iz;
 
         fx = min(max(fx, 0.0f), 1.0f);
         fy = min(max(fy, 0.0f), 1.0f);
@@ -230,10 +232,10 @@ extern "C" __global__ void computeGridHessian(
             if (invPowerMode == 1) {
                 // RUNTIME mode: transform corners from G space to S space BEFORE interpolation
                 // p = 1/invPower transforms G → S = |G|^p
-                float p = 1.0f / invPower;
+                real p = 1.0f / invPower;
                 for (int c = 0; c < 8; c++) {
                     int point_idx = corners[c][0] * nyz + corners[c][1] * gridCounts[2] + corners[c][2];
-                    float G_derivs[27], S_derivs[27];
+                    real G_derivs[27], S_derivs[27];
                     for (int d = 0; d < 27; d++) {
                         G_derivs[d] = gridDerivatives[d * totalPoints + point_idx];
                     }
@@ -253,9 +255,9 @@ extern "C" __global__ void computeGridHessian(
             }
 
             // Assemble + evaluate (value, gradient, Hessian) via the shared
-            // double-precision helpers; truncate into the float accumulators that
+            // double-precision helpers; truncate into the real accumulators that
             // the downstream chain-rule helpers expect (consistency preserved --
-            // both cells run identical double->float ops).
+            // both cells run identical double->real ops).
             TriquinticAccum a[216];
             triquinticAssemble(X, a);
             TriquinticAccum v, gx, gy, gz, hxx, hyy, hzz, hxy, hxz, hyz;
@@ -270,16 +272,16 @@ extern "C" __global__ void computeGridHessian(
 
             // Arcsinh chain rule: V = scale*sinh(g), d²V/dxi dxj = scale*[sinh(g)*dg_i*dg_j + cosh(g)*d²g_ij]
             if (arcsinhScale > 0.0f) {
-                float g = interpolated;
-                float sinhG = sinhf(g);
-                float coshG = coshf(g);
+                real g = interpolated;
+                real sinhG = sinh(g);
+                real coshG = coshf(g);
 
-                float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+                real new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                real new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                real new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                real new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                real new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                real new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
                 interpolated = arcsinhScale * sinhG;
                 dx = arcsinhScale * coshG * dx;
@@ -294,23 +296,23 @@ extern "C" __global__ void computeGridHessian(
             // S = V^(1/n), G = sign(S)*|S|^n
             //   dG/dx = n*|S|^(n-1) * dS/dx
             //   d²G/dx² = n*(n-1)*|S|^(n-2)*(dS/dx)² + n*|S|^(n-1)*d²S/dx²
-            if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
-                float absU = fabsf(interpolated);
+            if ((invPowerMode == 1 || invPowerMode == 2) && fabs(invPower) > 1e-10f) {
+                real absU = fabs(interpolated);
                 if (absU > 1e-10f) {
-                    float n = invPower;
+                    real n = invPower;
 
-                    float absU_nm1 = powf(absU, n - 1.0f);
-                    float absU_nm2 = powf(absU, n - 2.0f);
+                    real absU_nm1 = pow(absU, n - 1.0f);
+                    real absU_nm2 = pow(absU, n - 2.0f);
 
-                    float f2_1 = n * (n - 1.0f) * absU_nm2;
-                    float f2_2 = n * absU_nm1;
+                    real f2_1 = n * (n - 1.0f) * absU_nm2;
+                    real f2_2 = n * absU_nm1;
 
-                    float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
-                    float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
-                    float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
-                    float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
-                    float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
-                    float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
+                    real new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
+                    real new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
+                    real new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
+                    real new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
+                    real new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
+                    real new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
 
                     dx *= f2_2;
                     dy *= f2_2;
@@ -326,15 +328,15 @@ extern "C" __global__ void computeGridHessian(
             }
 
             // NOW convert from unit cell to physical coordinates
-            float inv_dx = 1.0f / gridSpacing[0];
-            float inv_dy = 1.0f / gridSpacing[1];
-            float inv_dz = 1.0f / gridSpacing[2];
-            float inv_dx2 = inv_dx * inv_dx;
-            float inv_dy2 = inv_dy * inv_dy;
-            float inv_dz2 = inv_dz * inv_dz;
-            float inv_dxdy = inv_dx * inv_dy;
-            float inv_dxdz = inv_dx * inv_dz;
-            float inv_dydz = inv_dy * inv_dz;
+            real inv_dx = 1.0f / gridSpacing[0];
+            real inv_dy = 1.0f / gridSpacing[1];
+            real inv_dz = 1.0f / gridSpacing[2];
+            real inv_dx2 = inv_dx * inv_dx;
+            real inv_dy2 = inv_dy * inv_dy;
+            real inv_dz2 = inv_dz * inv_dz;
+            real inv_dxdy = inv_dx * inv_dy;
+            real inv_dxdz = inv_dx * inv_dz;
+            real inv_dydz = inv_dy * inv_dz;
 
             // First derivatives
             dx *= inv_dx;
@@ -353,18 +355,18 @@ extern "C" __global__ void computeGridHessian(
             // CUBIC B-SPLINE - Analytical second derivatives
 
             // Precompute basis functions and second derivatives
-            float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
-            float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
-            float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+            real bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+            real by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+            real bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
 
-            float dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
-            float dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
-            float dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+            real dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+            real dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+            real dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
 
             // Second derivatives of B-spline basis functions
-            float d2bx[4] = {bspline_deriv2_0(fx), bspline_deriv2_1(fx), bspline_deriv2_2(fx), bspline_deriv2_3(fx)};
-            float d2by[4] = {bspline_deriv2_0(fy), bspline_deriv2_1(fy), bspline_deriv2_2(fy), bspline_deriv2_3(fy)};
-            float d2bz[4] = {bspline_deriv2_0(fz), bspline_deriv2_1(fz), bspline_deriv2_2(fz), bspline_deriv2_3(fz)};
+            real d2bx[4] = {bspline_deriv2_0(fx), bspline_deriv2_1(fx), bspline_deriv2_2(fx), bspline_deriv2_3(fx)};
+            real d2by[4] = {bspline_deriv2_0(fy), bspline_deriv2_1(fy), bspline_deriv2_2(fy), bspline_deriv2_3(fy)};
+            real d2bz[4] = {bspline_deriv2_0(fz), bspline_deriv2_1(fz), bspline_deriv2_2(fz), bspline_deriv2_3(fz)};
 
             for (int i = 0; i < 4; i++) {
                 int gx = min(max(ix - 1 + i, 0), gridCounts[0] - 1);
@@ -373,14 +375,14 @@ extern "C" __global__ void computeGridHessian(
                     for (int k = 0; k < 4; k++) {
                         int gz = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
                         int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                        float val = gridValues[gridIdx];
+                        real val = gridValues[gridIdx];
 
                         // Apply RUNTIME inv_power transformation before interpolation
                         // (matching force kernel behavior for consistency)
                         if (invPowerMode == 1) {
-                            float invN = 1.0f / invPower;
-                            if (fabsf(val) >= 1e-10f) {
-                                val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                            real invN = 1.0f / invPower;
+                            if (fabs(val) >= 1e-10f) {
+                                val = (val >= 0.0f ? 1.0f : -1.0f) * pow(fabs(val), invN);
                             } else {
                                 val = 0.0f;
                             }
@@ -407,16 +409,16 @@ extern "C" __global__ void computeGridHessian(
 
             // Undo transforms in reverse order: arcsinh first, then inv_power.
             if (arcsinhScale > 0.0f) {
-                float g = interpolated;
-                float sinhG = sinhf(g);
-                float coshG = coshf(g);
+                real g = interpolated;
+                real sinhG = sinh(g);
+                real coshG = coshf(g);
 
-                float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+                real new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                real new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                real new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                real new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                real new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                real new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
                 interpolated = arcsinhScale * sinhG;
                 dx = arcsinhScale * coshG * dx;
@@ -427,29 +429,29 @@ extern "C" __global__ void computeGridHessian(
                 d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
             }
 
-            if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
-                float absU = fabsf(interpolated);
+            if ((invPowerMode == 1 || invPowerMode == 2) && fabs(invPower) > 1e-10f) {
+                real absU = fabs(interpolated);
                 if (absU > 1e-10f) {
-                    float n = invPower;
-                    float absU_nm1 = powf(absU, n - 1.0f);
-                    float absU_nm2 = powf(absU, n - 2.0f);
-                    float f2_1 = n * (n - 1.0f) * absU_nm2;
-                    float f2_2 = n * absU_nm1;
+                    real n = invPower;
+                    real absU_nm1 = pow(absU, n - 1.0f);
+                    real absU_nm2 = pow(absU, n - 2.0f);
+                    real f2_1 = n * (n - 1.0f) * absU_nm2;
+                    real f2_2 = n * absU_nm1;
 
-                    float new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
-                    float new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
-                    float new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
-                    float new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
-                    float new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
-                    float new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
+                    real new_d2xx = f2_1 * dx * dx + f2_2 * d2xx;
+                    real new_d2yy = f2_1 * dy * dy + f2_2 * d2yy;
+                    real new_d2zz = f2_1 * dz * dz + f2_2 * d2zz;
+                    real new_d2xy = f2_1 * dx * dy + f2_2 * d2xy;
+                    real new_d2xz = f2_1 * dx * dz + f2_2 * d2xz;
+                    real new_d2yz = f2_1 * dy * dz + f2_2 * d2yz;
 
                     dx *= f2_2;
                     dy *= f2_2;
                     dz *= f2_2;
 
                     // Update interpolated to post-inv_power value
-                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
-                    interpolated = sign * powf(absU, n);
+                    real sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    interpolated = sign * pow(absU, n);
 
                     d2xx = new_d2xx;
                     d2yy = new_d2yy;
@@ -464,8 +466,8 @@ extern "C" __global__ void computeGridHessian(
             if (effectiveCap > 0.0f) {
                 applyRuntimeCapHessianChainRule(interpolated, dx, dy, dz,
                     d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
-                float t = tanhf(interpolated / effectiveCap);
-                float gradFactor = 1.0f - t * t;
+                real t = tanh(interpolated / effectiveCap);
+                real gradFactor = 1.0f - t * t;
                 interpolated = effectiveCap * t;
                 dx *= gradFactor;
                 dy *= gradFactor;
@@ -473,15 +475,15 @@ extern "C" __global__ void computeGridHessian(
             }
 
             // Convert to physical coordinates
-            float inv_dx = 1.0f / gridSpacing[0];
-            float inv_dy = 1.0f / gridSpacing[1];
-            float inv_dz = 1.0f / gridSpacing[2];
-            float inv_dx2 = inv_dx * inv_dx;
-            float inv_dy2 = inv_dy * inv_dy;
-            float inv_dz2 = inv_dz * inv_dz;
-            float inv_dxdy = inv_dx * inv_dy;
-            float inv_dxdz = inv_dx * inv_dz;
-            float inv_dydz = inv_dy * inv_dz;
+            real inv_dx = 1.0f / gridSpacing[0];
+            real inv_dy = 1.0f / gridSpacing[1];
+            real inv_dz = 1.0f / gridSpacing[2];
+            real inv_dx2 = inv_dx * inv_dx;
+            real inv_dy2 = inv_dy * inv_dy;
+            real inv_dz2 = inv_dz * inv_dz;
+            real inv_dxdy = inv_dx * inv_dy;
+            real inv_dxdz = inv_dx * inv_dz;
+            real inv_dydz = inv_dy * inv_dz;
 
             // First derivatives
             dx *= inv_dx;
@@ -499,25 +501,25 @@ extern "C" __global__ void computeGridHessian(
         } else if (interpolationMethod == 4) {
             // QUINTIC B-SPLINE - Analytical second derivatives from 6-point stencil
 
-            float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+            real bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
                            qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
-            float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+            real by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
                            qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
-            float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+            real bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
                            qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
 
-            float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+            real dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
                             qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
-            float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+            real dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
                             qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
-            float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+            real dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
                             qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
 
-            float d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
+            real d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
                              qbspline_deriv2_3(fx), qbspline_deriv2_4(fx), qbspline_deriv2_5(fx)};
-            float d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
+            real d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
                              qbspline_deriv2_3(fy), qbspline_deriv2_4(fy), qbspline_deriv2_5(fy)};
-            float d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
+            real d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
                              qbspline_deriv2_3(fz), qbspline_deriv2_4(fz), qbspline_deriv2_5(fz)};
 
             for (int i = 0; i < 6; i++) {
@@ -527,12 +529,12 @@ extern "C" __global__ void computeGridHessian(
                     for (int k = 0; k < 6; k++) {
                         int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
                         int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                        float val = gridValues[gridIdx];
+                        real val = gridValues[gridIdx];
 
                         if (invPowerMode == 1) {
-                            float invN = 1.0f / invPower;
-                            if (fabsf(val) >= 1e-10f) {
-                                val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                            real invN = 1.0f / invPower;
+                            if (fabs(val) >= 1e-10f) {
+                                val = (val >= 0.0f ? 1.0f : -1.0f) * pow(fabs(val), invN);
                             } else {
                                 val = 0.0f;
                             }
@@ -554,16 +556,16 @@ extern "C" __global__ void computeGridHessian(
 
             // Undo transforms in reverse order: arcsinh first, then inv_power.
             if (arcsinhScale > 0.0f) {
-                float g = interpolated;
-                float sinhG = sinhf(g);
-                float coshG = coshf(g);
+                real g = interpolated;
+                real sinhG = sinh(g);
+                real coshG = coshf(g);
 
-                float new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
-                float new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
-                float new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
-                float new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
-                float new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
-                float new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
+                real new_d2xx = arcsinhScale * (sinhG * dx * dx + coshG * d2xx);
+                real new_d2yy = arcsinhScale * (sinhG * dy * dy + coshG * d2yy);
+                real new_d2zz = arcsinhScale * (sinhG * dz * dz + coshG * d2zz);
+                real new_d2xy = arcsinhScale * (sinhG * dx * dy + coshG * d2xy);
+                real new_d2xz = arcsinhScale * (sinhG * dx * dz + coshG * d2xz);
+                real new_d2yz = arcsinhScale * (sinhG * dy * dz + coshG * d2yz);
 
                 interpolated = arcsinhScale * sinhG;
                 dx = arcsinhScale * coshG * dx;
@@ -574,15 +576,15 @@ extern "C" __global__ void computeGridHessian(
                 d2xy = new_d2xy; d2xz = new_d2xz; d2yz = new_d2yz;
             }
 
-            if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
+            if ((invPowerMode == 1 || invPowerMode == 2) && fabs(invPower) > 1e-10f) {
                 applyHessianChainRule(interpolated, dx, dy, dz,
-                                     d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, invPower);
+                                     d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, (real)invPower);
                 // Update value and first derivatives to post-inv_power
-                float absU = fabsf(interpolated);
+                real absU = fabs(interpolated);
                 if (absU > 1e-10f) {
-                    float sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
-                    float pf = invPower * powf(absU, invPower - 1.0f);
-                    interpolated = sign * powf(absU, invPower);
+                    real sign = (interpolated >= 0.0f) ? 1.0f : -1.0f;
+                    real pf = invPower * pow(absU, (real)invPower - (real)1.0f);
+                    interpolated = sign * pow(absU, (real)invPower);
                     dx *= pf;
                     dy *= pf;
                     dz *= pf;
@@ -594,8 +596,8 @@ extern "C" __global__ void computeGridHessian(
                 applyRuntimeCapHessianChainRule(interpolated, dx, dy, dz,
                     d2xx, d2yy, d2zz, d2xy, d2xz, d2yz, effectiveCap);
                 // Update first derivatives for any downstream use
-                float t = tanhf(interpolated / effectiveCap);
-                float gradFactor = 1.0f - t * t;
+                real t = tanh(interpolated / effectiveCap);
+                real gradFactor = 1.0f - t * t;
                 interpolated = effectiveCap * t;
                 dx *= gradFactor;
                 dy *= gradFactor;
@@ -603,9 +605,9 @@ extern "C" __global__ void computeGridHessian(
             }
 
             // Convert to physical coordinates
-            float inv_dx = 1.0f / gridSpacing[0];
-            float inv_dy = 1.0f / gridSpacing[1];
-            float inv_dz = 1.0f / gridSpacing[2];
+            real inv_dx = 1.0f / gridSpacing[0];
+            real inv_dy = 1.0f / gridSpacing[1];
+            real inv_dz = 1.0f / gridSpacing[2];
 
             dx *= inv_dx;
             dy *= inv_dy;
@@ -649,27 +651,28 @@ extern "C" __global__ void computeGridHessian(
  * All input derivatives (dU*, d2U*, d3*) must be in the ORIGINAL (pre-transform) space.
  * The output d3* values are overwritten with the transformed derivatives.
  */
+template<typename T>
 __device__ inline void applyThirdDerivChainRule(
-    float U,
-    float dUdx, float dUdy, float dUdz,
-    float d2Uxx, float d2Uyy, float d2Uzz,
-    float d2Uxy, float d2Uxz, float d2Uyz,
-    float& d3xxx, float& d3yyy, float& d3zzz,
-    float& d3xxy, float& d3xxz, float& d3xyy,
-    float& d3xzz, float& d3yyz, float& d3yzz,
-    float& d3xyz,
-    float p
+    T U,
+    T dUdx, T dUdy, T dUdz,
+    T d2Uxx, T d2Uyy, T d2Uzz,
+    T d2Uxy, T d2Uxz, T d2Uyz,
+    T& d3xxx, T& d3yyy, T& d3zzz,
+    T& d3xxy, T& d3xxz, T& d3xyy,
+    T& d3xzz, T& d3yyz, T& d3yzz,
+    T& d3xyz,
+    T p
 ) {
-    float absU = fabsf(U);
+    T absU = fabs(U);
     if (absU < 1e-10f) absU = 1e-10f;
 
-    float absU_pm1 = powf(absU, p - 1.0f);
-    float absU_pm2 = powf(absU, p - 2.0f);
-    float absU_pm3 = powf(absU, p - 3.0f);
+    T absU_pm1 = pow(absU, p - 1.0f);
+    T absU_pm2 = pow(absU, p - 2.0f);
+    T absU_pm3 = pow(absU, p - 3.0f);
 
-    float f3_1 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
-    float f3_2 = p * (p - 1.0f) * absU_pm2;
-    float f3_3 = p * absU_pm1;
+    T f3_1 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    T f3_2 = p * (p - 1.0f) * absU_pm2;
+    T f3_3 = p * absU_pm1;
 
     d3xxx = f3_1*dUdx*dUdx*dUdx + 3.0f*f3_2*dUdx*d2Uxx                            + f3_3*d3xxx;
     d3yyy = f3_1*dUdy*dUdy*dUdy + 3.0f*f3_2*dUdy*d2Uyy                            + f3_3*d3yyy;
@@ -695,7 +698,7 @@ __device__ inline void applyThirdDerivChainRule(
  */
 extern "C" __global__ void computeGridThirdDerivatives(
     const real4* __restrict__ posq,
-    float* __restrict__ thirdDerivBuffer,  // 10 components per atom
+    mixed* __restrict__ thirdDerivBuffer,  // 10 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     const float* __restrict__ gridValues,
@@ -721,22 +724,22 @@ extern "C" __global__ void computeGridThirdDerivatives(
     real4 posOrig = posq[particleIndex];
     float scalingFactor = scalingFactors[particleIndex];
 
-    float3 pos;
+    real3 pos;
     pos.x = posOrig.x - originX;
     pos.y = posOrig.y - originY;
     pos.z = posOrig.z - originZ;
 
     // All derivatives initialized to zero
-    float interpolated = 0.0f;
-    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
-    float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
-    float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
-    float d3xxx = 0.0f, d3yyy = 0.0f, d3zzz = 0.0f;
-    float d3xxy = 0.0f, d3xxz = 0.0f, d3xyy = 0.0f;
-    float d3xzz = 0.0f, d3yyz = 0.0f, d3yzz = 0.0f;
-    float d3xyz = 0.0f;
+    real interpolated = 0.0f;
+    real dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    real d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
+    real d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
+    real d3xxx = 0.0f, d3yyy = 0.0f, d3zzz = 0.0f;
+    real d3xxy = 0.0f, d3xxz = 0.0f, d3xyy = 0.0f;
+    real d3xzz = 0.0f, d3yyz = 0.0f, d3yzz = 0.0f;
+    real d3xyz = 0.0f;
 
-    float3 gridCorner;
+    real3 gridCorner;
     gridCorner.x = gridSpacing[0] * (gridCounts[0] - 1);
     gridCorner.y = gridSpacing[1] * (gridCounts[1] - 1);
     gridCorner.z = gridSpacing[2] * (gridCounts[2] - 1);
@@ -750,9 +753,9 @@ extern "C" __global__ void computeGridThirdDerivatives(
         int iy = min(max((int)(pos.y / gridSpacing[1]), 0), gridCounts[1] - 2);
         int iz = min(max((int)(pos.z / gridSpacing[2]), 0), gridCounts[2] - 2);
 
-        float fx = (pos.x / gridSpacing[0]) - ix;
-        float fy = (pos.y / gridSpacing[1]) - iy;
-        float fz = (pos.z / gridSpacing[2]) - iz;
+        real fx = (pos.x / gridSpacing[0]) - ix;
+        real fy = (pos.y / gridSpacing[1]) - iy;
+        real fz = (pos.z / gridSpacing[2]) - iz;
 
         fx = min(max(fx, 0.0f), 1.0f);
         fy = min(max(fy, 0.0f), 1.0f);
@@ -761,32 +764,32 @@ extern "C" __global__ void computeGridThirdDerivatives(
         int nyz = gridCounts[1] * gridCounts[2];
 
         // Basis functions: value, 1st, 2nd, and 3rd derivatives
-        float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+        real bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
                        qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
-        float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+        real by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
                        qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
-        float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+        real bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
                        qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
 
-        float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+        real dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
                         qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
-        float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+        real dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
                         qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
-        float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+        real dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
                         qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
 
-        float d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
+        real d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
                          qbspline_deriv2_3(fx), qbspline_deriv2_4(fx), qbspline_deriv2_5(fx)};
-        float d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
+        real d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
                          qbspline_deriv2_3(fy), qbspline_deriv2_4(fy), qbspline_deriv2_5(fy)};
-        float d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
+        real d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
                          qbspline_deriv2_3(fz), qbspline_deriv2_4(fz), qbspline_deriv2_5(fz)};
 
-        float d3bx[6] = {qbspline_deriv3_0(fx), qbspline_deriv3_1(fx), qbspline_deriv3_2(fx),
+        real d3bx[6] = {qbspline_deriv3_0(fx), qbspline_deriv3_1(fx), qbspline_deriv3_2(fx),
                          qbspline_deriv3_3(fx), qbspline_deriv3_4(fx), qbspline_deriv3_5(fx)};
-        float d3by[6] = {qbspline_deriv3_0(fy), qbspline_deriv3_1(fy), qbspline_deriv3_2(fy),
+        real d3by[6] = {qbspline_deriv3_0(fy), qbspline_deriv3_1(fy), qbspline_deriv3_2(fy),
                          qbspline_deriv3_3(fy), qbspline_deriv3_4(fy), qbspline_deriv3_5(fy)};
-        float d3bz[6] = {qbspline_deriv3_0(fz), qbspline_deriv3_1(fz), qbspline_deriv3_2(fz),
+        real d3bz[6] = {qbspline_deriv3_0(fz), qbspline_deriv3_1(fz), qbspline_deriv3_2(fz),
                          qbspline_deriv3_3(fz), qbspline_deriv3_4(fz), qbspline_deriv3_5(fz)};
 
         for (int i = 0; i < 6; i++) {
@@ -796,12 +799,12 @@ extern "C" __global__ void computeGridThirdDerivatives(
                 for (int k = 0; k < 6; k++) {
                     int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
                     int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                    float val = gridValues[gridIdx];
+                    real val = gridValues[gridIdx];
 
                     if (invPowerMode == 1) {
-                        float invN = 1.0f / invPower;
-                        if (fabsf(val) >= 1e-10f) {
-                            val = (val >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(val), invN);
+                        real invN = 1.0f / invPower;
+                        if (fabs(val) >= 1e-10f) {
+                            val = (val >= 0.0f ? 1.0f : -1.0f) * pow(fabs(val), invN);
                         } else {
                             val = 0.0f;
                         }
@@ -841,31 +844,31 @@ extern "C" __global__ void computeGridThirdDerivatives(
 
         // 1. Arcsinh: V = scale * sinh(g)
         if (arcsinhScale > 0.0f) {
-            float g = interpolated;
-            float sinhG = sinhf(g);
-            float coshG = coshf(g);
-            float s = arcsinhScale;
+            real g = interpolated;
+            real sinhG = sinh(g);
+            real coshG = coshf(g);
+            real s = arcsinhScale;
 
             // Third derivatives (Faà di Bruno for sinh(g)):
             //   d³V/dxi dxj dxk = s * [cosh(g)*gi*gj*gk + sinh(g)*(gi*gjk + gj*gik + gk*gij) + cosh(g)*gijk]
-            float new_d3xxx = s*(coshG*dx*dx*dx + 3.0f*sinhG*dx*d2xx + coshG*d3xxx);
-            float new_d3yyy = s*(coshG*dy*dy*dy + 3.0f*sinhG*dy*d2yy + coshG*d3yyy);
-            float new_d3zzz = s*(coshG*dz*dz*dz + 3.0f*sinhG*dz*d2zz + coshG*d3zzz);
-            float new_d3xxy = s*(coshG*dx*dx*dy + sinhG*(2.0f*dx*d2xy + dy*d2xx) + coshG*d3xxy);
-            float new_d3xxz = s*(coshG*dx*dx*dz + sinhG*(2.0f*dx*d2xz + dz*d2xx) + coshG*d3xxz);
-            float new_d3xyy = s*(coshG*dx*dy*dy + sinhG*(dx*d2yy + 2.0f*dy*d2xy) + coshG*d3xyy);
-            float new_d3xzz = s*(coshG*dx*dz*dz + sinhG*(dx*d2zz + 2.0f*dz*d2xz) + coshG*d3xzz);
-            float new_d3yyz = s*(coshG*dy*dy*dz + sinhG*(2.0f*dy*d2yz + dz*d2yy) + coshG*d3yyz);
-            float new_d3yzz = s*(coshG*dy*dz*dz + sinhG*(dy*d2zz + 2.0f*dz*d2yz) + coshG*d3yzz);
-            float new_d3xyz = s*(coshG*dx*dy*dz + sinhG*(dx*d2yz + dy*d2xz + dz*d2xy) + coshG*d3xyz);
+            real new_d3xxx = s*(coshG*dx*dx*dx + 3.0f*sinhG*dx*d2xx + coshG*d3xxx);
+            real new_d3yyy = s*(coshG*dy*dy*dy + 3.0f*sinhG*dy*d2yy + coshG*d3yyy);
+            real new_d3zzz = s*(coshG*dz*dz*dz + 3.0f*sinhG*dz*d2zz + coshG*d3zzz);
+            real new_d3xxy = s*(coshG*dx*dx*dy + sinhG*(2.0f*dx*d2xy + dy*d2xx) + coshG*d3xxy);
+            real new_d3xxz = s*(coshG*dx*dx*dz + sinhG*(2.0f*dx*d2xz + dz*d2xx) + coshG*d3xxz);
+            real new_d3xyy = s*(coshG*dx*dy*dy + sinhG*(dx*d2yy + 2.0f*dy*d2xy) + coshG*d3xyy);
+            real new_d3xzz = s*(coshG*dx*dz*dz + sinhG*(dx*d2zz + 2.0f*dz*d2xz) + coshG*d3xzz);
+            real new_d3yyz = s*(coshG*dy*dy*dz + sinhG*(2.0f*dy*d2yz + dz*d2yy) + coshG*d3yyz);
+            real new_d3yzz = s*(coshG*dy*dz*dz + sinhG*(dy*d2zz + 2.0f*dz*d2yz) + coshG*d3yzz);
+            real new_d3xyz = s*(coshG*dx*dy*dz + sinhG*(dx*d2yz + dy*d2xz + dz*d2xy) + coshG*d3xyz);
 
             // Second derivatives
-            float new_d2xx = s*(sinhG*dx*dx + coshG*d2xx);
-            float new_d2yy = s*(sinhG*dy*dy + coshG*d2yy);
-            float new_d2zz = s*(sinhG*dz*dz + coshG*d2zz);
-            float new_d2xy = s*(sinhG*dx*dy + coshG*d2xy);
-            float new_d2xz = s*(sinhG*dx*dz + coshG*d2xz);
-            float new_d2yz = s*(sinhG*dy*dz + coshG*d2yz);
+            real new_d2xx = s*(sinhG*dx*dx + coshG*d2xx);
+            real new_d2yy = s*(sinhG*dy*dy + coshG*d2yy);
+            real new_d2zz = s*(sinhG*dz*dz + coshG*d2zz);
+            real new_d2xy = s*(sinhG*dx*dy + coshG*d2xy);
+            real new_d2xz = s*(sinhG*dx*dz + coshG*d2xz);
+            real new_d2yz = s*(sinhG*dy*dz + coshG*d2yz);
 
             // First derivatives and value
             interpolated = s*sinhG;
@@ -880,12 +883,12 @@ extern "C" __global__ void computeGridThirdDerivatives(
         }
 
         // 2. InvPower: V = sign(U)|U|^p, convert from smoothed to actual space
-        if ((invPowerMode == 1 || invPowerMode == 2) && fabsf(invPower) > 1e-10f) {
-            float p = invPower;
-            float absU = fabsf(interpolated);
+        if ((invPowerMode == 1 || invPowerMode == 2) && fabs(invPower) > 1e-10f) {
+            real p = invPower;
+            real absU = fabs(interpolated);
             if (absU < 1e-10f) absU = 1e-10f;
-            float absU_pm1 = powf(absU, p - 1.0f);
-            float absU_pm2 = powf(absU, p - 2.0f);
+            real absU_pm1 = pow(absU, p - 1.0f);
+            real absU_pm2 = pow(absU, p - 2.0f);
 
             // Third derivatives (uses original 1st, 2nd, 3rd)
             applyThirdDerivChainRule(interpolated, dx, dy, dz,
@@ -894,17 +897,17 @@ extern "C" __global__ void computeGridThirdDerivatives(
                                     d3xyy, d3xzz, d3yyz, d3yzz, d3xyz, p);
 
             // Second derivatives (uses original 1st, overwrites 2nd)
-            float f2_1 = p * (p - 1.0f) * absU_pm2;
-            float f2_2 = p * absU_pm1;
-            float new_d2xx = f2_1*dx*dx + f2_2*d2xx;
-            float new_d2yy = f2_1*dy*dy + f2_2*d2yy;
-            float new_d2zz = f2_1*dz*dz + f2_2*d2zz;
-            float new_d2xy = f2_1*dx*dy + f2_2*d2xy;
-            float new_d2xz = f2_1*dx*dz + f2_2*d2xz;
-            float new_d2yz = f2_1*dy*dz + f2_2*d2yz;
+            real f2_1 = p * (p - 1.0f) * absU_pm2;
+            real f2_2 = p * absU_pm1;
+            real new_d2xx = f2_1*dx*dx + f2_2*d2xx;
+            real new_d2yy = f2_1*dy*dy + f2_2*d2yy;
+            real new_d2zz = f2_1*dz*dz + f2_2*d2zz;
+            real new_d2xy = f2_1*dx*dy + f2_2*d2xy;
+            real new_d2xz = f2_1*dx*dz + f2_2*d2xz;
+            real new_d2yz = f2_1*dy*dz + f2_2*d2yz;
 
             // First derivatives
-            float f1 = p * absU_pm1;
+            real f1 = p * absU_pm1;
             dx = f1 * dx;
             dy = f1 * dy;
             dz = f1 * dz;
@@ -914,9 +917,9 @@ extern "C" __global__ void computeGridThirdDerivatives(
         }
 
         // 3. Convert from grid-cell coordinates to physical coordinates
-        float inv_dx = 1.0f / gridSpacing[0];
-        float inv_dy = 1.0f / gridSpacing[1];
-        float inv_dz = 1.0f / gridSpacing[2];
+        real inv_dx = 1.0f / gridSpacing[0];
+        real inv_dy = 1.0f / gridSpacing[1];
+        real inv_dz = 1.0f / gridSpacing[2];
 
         d3xxx *= inv_dx * inv_dx * inv_dx;
         d3yyy *= inv_dy * inv_dy * inv_dy;

@@ -174,7 +174,7 @@ __device__ void eigenvector_for_eigenvalue(
  * @param numAtoms           Number of atoms to process
  */
 extern "C" __global__ void analyzeHessianKernel(
-    const float* __restrict__ hessianBlocks,
+    const mixed* __restrict__ hessianBlocks,
     float* __restrict__ eigenvalues,
     float* __restrict__ eigenvectors,
     float* __restrict__ meanCurvature,
