@@ -35,6 +35,7 @@ constexpr int DEFAULT_TILE_SIZE = 32;
 // Flags for header
 constexpr uint32_t TILED_FLAG_HAS_DERIVATIVES = 0x01;
 constexpr uint32_t TILED_FLAG_COMPRESSED = 0x02;  // Future: per-tile compression
+constexpr uint32_t TILED_FLAG_DOUBLE_DERIVATIVES = 0x04;  // Derivatives stored as double
 
 /**
  * Entry in the tile index - describes location of one tile in the file.
@@ -114,18 +115,28 @@ public:
      */
     void beginWriting(const std::string& filename, bool hasDerivatives = true);
 
+    /** Store derivatives as double on disk (default false = float). Set before beginWriting. */
+    void setDoubleDerivatives(bool useDouble) { m_doubleDerivatives = useDouble; }
+
+    /** Whether this file's derivatives are stored as double. */
+    bool hasDoubleDerivatives() const { return m_doubleDerivatives; }
+
+    /** Size in bytes of one stored derivative element (4 float / 8 double). */
+    size_t derivativeElementSize() const { return m_doubleDerivatives ? sizeof(double) : sizeof(float); }
+
     /**
      * Write a single tile's data.
      * @param tileX, tileY, tileZ Tile coordinates
      * @param values Grid values for this tile (tileSize^3 floats, or actual size at boundaries)
-     * @param derivatives Optional derivatives (27 * numPoints floats)
+     * @param derivBytes Optional derivatives as raw bytes (27 * numPoints elements,
+     *        each derivativeElementSize() bytes); written verbatim
      *
      * Values layout: [z-fastest, then y, then x] within the tile
      * Derivatives layout: [deriv_idx * numPoints + point_idx]
      */
     void writeTile(int tileX, int tileY, int tileZ,
                    const std::vector<float>& values,
-                   const std::vector<float>& derivatives = {});
+                   const std::vector<char>& derivBytes = {});
 
     /**
      * Finish writing - writes tile index and closes file.
@@ -143,11 +154,11 @@ public:
      * Read a single tile's data.
      * @param tileX, tileY, tileZ Tile coordinates
      * @param values Output: grid values
-     * @param derivatives Output: derivatives (if file has them)
+     * @param derivBytes Output: raw derivative bytes in the file's element size (if present)
      */
     void readTile(int tileX, int tileY, int tileZ,
                   std::vector<float>& values,
-                  std::vector<float>& derivatives) const;
+                  std::vector<char>& derivBytes) const;
 
     /**
      * Check if a tile exists in the file.
@@ -228,6 +239,7 @@ private:
     int m_tileSize;
     int m_numTilesX, m_numTilesY, m_numTilesZ;
     bool m_hasDerivatives;
+    bool m_doubleDerivatives = false;  // Derivatives stored as double on disk
 
     // Transformation parameters
     double m_invPower;

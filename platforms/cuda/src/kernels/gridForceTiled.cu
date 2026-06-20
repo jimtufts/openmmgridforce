@@ -293,7 +293,7 @@ __device__ void quinticBsplineInterpolateTiled(
  */
 __device__ void tricubicInterpolateTiled(
     const float* __restrict__ tileValues,
-    const float* __restrict__ tileDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ tileDerivatives,
     int localX, int localY, int localZ,
     float fx, float fy, float fz,
     float* energy,
@@ -364,7 +364,7 @@ __device__ void tricubicInterpolateTiled(
  */
 __device__ void triquinticInterpolateTiled(
     const float* __restrict__ tileValues,
-    const float* __restrict__ tileDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ tileDerivatives,
     int localX, int localY, int localZ,
     float fx, float fy, float fz,
     float* energy,
@@ -531,7 +531,7 @@ extern "C" __global__ void computeGridForceTiled(
         if (tileIdx >= 0) {
             // Get tile data pointers
             const float* tileValues = (const float*)tileValuePtrs[tileIdx];
-            const float* tileDerivatives = (const float*)tileDerivPtrs[tileIdx];
+            const GRID_STORAGE_TYPE* tileDerivatives = (const GRID_STORAGE_TYPE*)tileDerivPtrs[tileIdx];
 
             // Convert global grid coordinates to tile-local coordinates
             // Add tileOverlap to account for the overlap region at the start

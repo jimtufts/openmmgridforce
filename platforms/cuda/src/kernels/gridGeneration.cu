@@ -384,7 +384,7 @@ extern "C" __global__ void generateGridKernel(
  * Output layout: [deriv_idx * tilePoints + localIdx] where localIdx is z-fastest
  */
 extern "C" __global__ void generateTileWithAnalyticalDerivatives(
-    float* __restrict__ tileData,           // Output: 27 values per tile point
+    GRID_STORAGE_TYPE* __restrict__ tileData,           // Output: 27 values per tile point
     const float3* __restrict__ receptorPositions,
     const float* __restrict__ receptorCharges,
     const float* __restrict__ receptorSigmas,
@@ -425,48 +425,51 @@ extern "C" __global__ void generateTileWithAnalyticalDerivatives(
     const int globalY = tileStartY + localY;
     const int globalZ = tileStartZ + localZ;
 
+    // Accumulate in the grid-storage precision (double when GRID_STORAGE_TYPE=double).
+    typedef GRID_STORAGE_TYPE GenT;
+
     // Calculate grid point position (in nm)
-    const float gridPos[3] = {
-        originX + globalX * spacingX,
-        originY + globalY * spacingY,
-        originZ + globalZ * spacingZ
+    const GenT gridPos[3] = {
+        (GenT)originX + globalX * (GenT)spacingX,
+        (GenT)originY + globalY * (GenT)spacingY,
+        (GenT)originZ + globalZ * (GenT)spacingZ
     };
 
     // Initialize accumulator for 27 Cartesian derivatives
-    float cartesian_derivs[27];
+    GenT cartesian_derivs[27];
     for (int idx = 0; idx < 27; idx++) {
-        cartesian_derivs[idx] = 0.0f;
+        cartesian_derivs[idx] = (GenT)0;
     }
 
     // Loop over all receptor atoms and accumulate contributions
     for (int atomIdx = 0; atomIdx < numReceptorAtoms; atomIdx++) {
         float3 atomPos = receptorPositions[atomIdx];
 
-        float dr[3] = {
-            gridPos[0] - atomPos.x,
-            gridPos[1] - atomPos.y,
-            gridPos[2] - atomPos.z
+        GenT dr[3] = {
+            gridPos[0] - (GenT)atomPos.x,
+            gridPos[1] - (GenT)atomPos.y,
+            gridPos[2] - (GenT)atomPos.z
         };
 
-        float r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2];
+        GenT r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2];
 
-        const float r2_min = 0.0004f;
+        const GenT r2_min = (GenT)0.0004;
         if (r2 < r2_min) {
             r2 = r2_min;
         }
 
-        float radial_derivs[7];
+        GenT radial_derivs[7];
 
         if (gridType == 0) {
-            float charge = receptorCharges[atomIdx];
+            GenT charge = (GenT)receptorCharges[atomIdx];
             computeCoulombRadialDerivatives(r2, charge, radial_derivs);
         } else if (gridType == 1) {
-            float epsilon = receptorEpsilons[atomIdx];
-            float sigma = receptorSigmas[atomIdx];
+            GenT epsilon = (GenT)receptorEpsilons[atomIdx];
+            GenT sigma = (GenT)receptorSigmas[atomIdx];
             computeGeometricLJRepulsionRadialDerivatives(r2, epsilon, sigma, radial_derivs);
         } else if (gridType == 2) {
-            float epsilon = receptorEpsilons[atomIdx];
-            float sigma = receptorSigmas[atomIdx];
+            GenT epsilon = (GenT)receptorEpsilons[atomIdx];
+            GenT sigma = (GenT)receptorSigmas[atomIdx];
             computeGeometricLJAttractionRadialDerivatives(r2, epsilon, sigma, radial_derivs);
         }
 
@@ -474,8 +477,8 @@ extern "C" __global__ void generateTileWithAnalyticalDerivatives(
     }
 
     // Apply tanh capping
-    float capped_derivs[27];
-    applyTanhChainRule(cartesian_derivs, gridCap, capped_derivs);
+    GenT capped_derivs[27];
+    applyTanhChainRule(cartesian_derivs, (GenT)gridCap, capped_derivs);
 
     for (int i = 0; i < 27; i++) {
         cartesian_derivs[i] = capped_derivs[i];
@@ -483,8 +486,8 @@ extern "C" __global__ void generateTileWithAnalyticalDerivatives(
 
     // Apply inverse power transformation if STORED mode
     if (invPower != 0.0f && invPowerMode == 2) {
-        float p = 1.0f / invPower;
-        float transformed_derivs[27];
+        GenT p = (GenT)1.0 / (GenT)invPower;
+        GenT transformed_derivs[27];
         applyInvPowerChainRule(cartesian_derivs, p, transformed_derivs);
 
         for (int i = 0; i < 27; i++) {
@@ -493,7 +496,7 @@ extern "C" __global__ void generateTileWithAnalyticalDerivatives(
     }
 
     // Scale derivatives to cell-fractional coordinates
-    const float dx = spacingX, dy = spacingY, dz = spacingZ;
+    const GenT dx = (GenT)spacingX, dy = (GenT)spacingY, dz = (GenT)spacingZ;
 
     cartesian_derivs[1] *= dx;
     cartesian_derivs[2] *= dy;

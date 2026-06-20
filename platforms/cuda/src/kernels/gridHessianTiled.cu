@@ -186,7 +186,7 @@ extern "C" __global__ void computeGridHessianTiled(
         if (tileIdx >= 0) {
             // Get tile data pointers
             const float* tileValues = (const float*)tileValuePtrs[tileIdx];
-            const float* tileDerivatives = (const float*)tileDerivPtrs[tileIdx];
+            const GRID_STORAGE_TYPE* tileDerivatives = (const GRID_STORAGE_TYPE*)tileDerivPtrs[tileIdx];
 
             // Convert global grid coordinates to tile-local coordinates
             int tileStartX = tileOffsets[tileIdx * 3 + 0];

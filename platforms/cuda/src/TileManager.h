@@ -135,7 +135,7 @@ public:
      */
     void getTileData(const TileID& id,
                      std::vector<float>& tileValues,
-                     std::vector<float>* tileDerivatives = nullptr) const;
+                     std::vector<char>* tileDerivBytes = nullptr) const;
 
     /**
      * Map world position to tile ID.
@@ -158,6 +158,8 @@ public:
     float3 getSpacing() const { return make_float3(spacingX_, spacingY_, spacingZ_); }
     float3 getOrigin() const { return make_float3(originX_, originY_, originZ_); }
     bool hasDerivatives() const { return hasDerivatives_; }
+    bool hasDoubleDerivatives() const { return doubleDerivatives_; }
+    size_t derivativeElementSize() const { return doubleDerivatives_ ? sizeof(double) : sizeof(float); }
     const TileConfig& getConfig() const { return config_; }
     bool isFileBacked() const { return fileBacked_; }
 
@@ -178,16 +180,17 @@ private:
     TileConfig config_;
     bool initialized_;
     bool hasDerivatives_;
+    bool doubleDerivatives_ = false;  // File stores derivatives as double
 
     // Helper for extracting tiles from memory-backed grid
     void getTileDataFromMemory(const TileID& id,
                                std::vector<float>& tileValues,
-                               std::vector<float>* tileDerivatives) const;
+                               std::vector<char>* tileDerivBytes) const;
 
     // Helper for reading tiles from file-backed grid
     void getTileDataFromFile(const TileID& id,
                              std::vector<float>& tileValues,
-                             std::vector<float>* tileDerivatives) const;
+                             std::vector<char>* tileDerivBytes) const;
 };
 
 /**
@@ -249,6 +252,7 @@ private:
     size_t maxMemory_;
     size_t currentMemory_;
     bool hasDerivatives_;
+    bool doubleDerivatives_ = false;  // GPU derivative buffers are double
 
     std::map<TileID, std::unique_ptr<GPUTile>> loadedTiles_;
     std::list<TileID> lruOrder_;  // Front = oldest, back = newest

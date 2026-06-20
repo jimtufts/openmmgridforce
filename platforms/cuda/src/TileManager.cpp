@@ -1,6 +1,7 @@
 #include "TileManager.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <sstream>
 #include <stdexcept>
 
@@ -80,6 +81,7 @@ void TiledGrid::initFromTiledFile(const std::string& filename, const TileConfig&
     originY_ = (float)origin[1];
     originZ_ = (float)origin[2];
     hasDerivatives_ = tiledFile_->hasDerivatives();
+    doubleDerivatives_ = tiledFile_->hasDoubleDerivatives();
 
     // Use config from file for tile size (should match)
     config_ = config;
@@ -126,21 +128,21 @@ int3 TiledGrid::getTileGridOffset(const TileID& id) const {
 
 void TiledGrid::getTileData(const TileID& id,
                             std::vector<float>& tileValues,
-                            std::vector<float>* tileDerivatives) const {
+                            std::vector<char>* tileDerivBytes) const {
     if (!initialized_) {
         throw std::runtime_error("TiledGrid not initialized");
     }
 
     if (fileBacked_) {
-        getTileDataFromFile(id, tileValues, tileDerivatives);
+        getTileDataFromFile(id, tileValues, tileDerivBytes);
     } else {
-        getTileDataFromMemory(id, tileValues, tileDerivatives);
+        getTileDataFromMemory(id, tileValues, tileDerivBytes);
     }
 }
 
 void TiledGrid::getTileDataFromMemory(const TileID& id,
                                       std::vector<float>& tileValues,
-                                      std::vector<float>* tileDerivatives) const {
+                                      std::vector<char>* tileDerivBytes) const {
     int tileWithOverlap = config_.getTileWithOverlap();
     int overlap = config_.overlap;
 
@@ -152,12 +154,14 @@ void TiledGrid::getTileDataFromMemory(const TileID& id,
     int srcStartY = offset.y - overlap;
     int srcStartZ = offset.z - overlap;
 
-    // Allocate tile arrays
+    // Allocate tile arrays. Memory-backed grids hold float derivatives.
     size_t tilePoints = tileWithOverlap * tileWithOverlap * tileWithOverlap;
     tileValues.resize(tilePoints);
 
-    if (tileDerivatives && derivatives_) {
-        tileDerivatives->resize(27 * tilePoints);
+    float* tileDerivs = nullptr;
+    if (tileDerivBytes && derivatives_) {
+        tileDerivBytes->resize(27 * tilePoints * sizeof(float));
+        tileDerivs = reinterpret_cast<float*>(tileDerivBytes->data());
     }
 
     // Extract tile data with boundary handling (clamp to edge)
@@ -178,9 +182,9 @@ void TiledGrid::getTileDataFromMemory(const TileID& id,
                 tileValues[tileIdx] = values_[gridIdx];
 
                 // Copy derivatives if present
-                if (tileDerivatives && derivatives_) {
+                if (tileDerivs) {
                     for (int d = 0; d < 27; d++) {
-                        (*tileDerivatives)[d * tilePoints + tileIdx] =
+                        tileDerivs[d * tilePoints + tileIdx] =
                             derivatives_[d * (nx_ * ny_ * nz_) + gridIdx];
                     }
                 }
@@ -191,7 +195,7 @@ void TiledGrid::getTileDataFromMemory(const TileID& id,
 
 void TiledGrid::getTileDataFromFile(const TileID& id,
                                     std::vector<float>& tileValues,
-                                    std::vector<float>* tileDerivatives) const {
+                                    std::vector<char>* tileDerivBytes) const {
     if (!tiledFile_) {
         throw std::runtime_error("TiledGrid: No tiled file open");
     }
@@ -201,12 +205,15 @@ void TiledGrid::getTileDataFromFile(const TileID& id,
 
     int tileWithOverlap = config_.getTileWithOverlap();
     int overlap = config_.overlap;
+    const size_t es = derivativeElementSize();  // derivative bytes per element
 
     // Allocate output arrays
     size_t tilePoints = tileWithOverlap * tileWithOverlap * tileWithOverlap;
     tileValues.resize(tilePoints);
-    if (tileDerivatives && hasDerivatives_) {
-        tileDerivatives->resize(27 * tilePoints);
+    char* dstDeriv = nullptr;
+    if (tileDerivBytes && hasDerivatives_) {
+        tileDerivBytes->resize(27 * tilePoints * es);
+        dstDeriv = tileDerivBytes->data();
     }
 
     // We need to read tile data from potentially 27 neighboring tiles
@@ -232,7 +239,7 @@ void TiledGrid::getTileDataFromFile(const TileID& id,
             for (int ntz = minTileZ; ntz <= maxTileZ; ntz++) {
                 // Read this neighbor tile
                 std::vector<float> neighborValues;
-                std::vector<float> neighborDerivs;
+                std::vector<char> neighborDerivs;
                 tiledFile_->readTile(ntx, nty, ntz, neighborValues, neighborDerivs);
 
                 // Get the grid range covered by this neighbor tile
@@ -268,11 +275,12 @@ void TiledGrid::getTileDataFromFile(const TileID& id,
 
                             tileValues[tileIdx] = neighborValues[neighborIdx];
 
-                            if (tileDerivatives && hasDerivatives_) {
+                            if (dstDeriv) {
                                 int neighborPoints = nSizeX * nSizeY * nSizeZ;
+                                const char* src = neighborDerivs.data();
                                 for (int d = 0; d < 27; d++) {
-                                    (*tileDerivatives)[d * tilePoints + tileIdx] =
-                                        neighborDerivs[d * neighborPoints + neighborIdx];
+                                    memcpy(dstDeriv + (d * tilePoints + tileIdx) * es,
+                                           src + (d * neighborPoints + neighborIdx) * es, es);
                                 }
                             }
                         }
@@ -312,10 +320,10 @@ void TiledGrid::getTileDataFromFile(const TileID& id,
                         int srcTileIdx = srcLx * tileWithOverlap * tileWithOverlap + srcLy * tileWithOverlap + srcLz;
                         tileValues[tileIdx] = tileValues[srcTileIdx];
 
-                        if (tileDerivatives && hasDerivatives_) {
+                        if (dstDeriv) {
                             for (int d = 0; d < 27; d++) {
-                                (*tileDerivatives)[d * tilePoints + tileIdx] =
-                                    (*tileDerivatives)[d * tilePoints + srcTileIdx];
+                                memcpy(dstDeriv + (d * tilePoints + tileIdx) * es,
+                                       dstDeriv + (d * tilePoints + srcTileIdx) * es, es);
                             }
                         }
                     }
@@ -358,6 +366,7 @@ GPUTile* TileCache::getTile(const TileID& id, const TiledGrid& hostGrid) {
 
 void TileCache::loadTiles(const std::vector<TileID>& tiles, const TiledGrid& hostGrid) {
     hasDerivatives_ = hostGrid.hasDerivatives();
+    doubleDerivatives_ = hostGrid.hasDoubleDerivatives();
 
     for (const TileID& id : tiles) {
         if (!hasTile(id)) {
@@ -369,6 +378,7 @@ void TileCache::loadTiles(const std::vector<TileID>& tiles, const TiledGrid& hos
 void TileCache::loadTile(const TileID& id, const TiledGrid& hostGrid) {
     const TileConfig& config = hostGrid.getConfig();
     hasDerivatives_ = hostGrid.hasDerivatives();
+    doubleDerivatives_ = hostGrid.hasDoubleDerivatives();
     size_t tileMemory = config.getTileTotalMemory(hasDerivatives_);
 
     // Evict tiles if needed
@@ -376,10 +386,10 @@ void TileCache::loadTile(const TileID& id, const TiledGrid& hostGrid) {
         evictOldest();
     }
 
-    // Get tile data from host
+    // Get tile data from host (derivatives as raw bytes in the file's element size)
     std::vector<float> values;
-    std::vector<float> derivatives;
-    hostGrid.getTileData(id, values, hasDerivatives_ ? &derivatives : nullptr);
+    std::vector<char> derivBytes;
+    hostGrid.getTileData(id, values, hasDerivatives_ ? &derivBytes : nullptr);
 
     // Create GPU tile
     std::unique_ptr<GPUTile> tile(new GPUTile());
@@ -391,10 +401,12 @@ void TileCache::loadTile(const TileID& id, const TiledGrid& hostGrid) {
     tile->values.reset(new CudaArray(cu_, values.size(), sizeof(float), "tileValues"));
     tile->values->upload(values);
 
-    // Upload derivatives if present
-    if (hasDerivatives_ && !derivatives.empty()) {
-        tile->derivatives.reset(new CudaArray(cu_, derivatives.size(), sizeof(float), "tileDerivatives"));
-        tile->derivatives->upload(derivatives);
+    // Upload derivatives at the file's element size
+    if (hasDerivatives_ && !derivBytes.empty()) {
+        size_t es = hostGrid.derivativeElementSize();
+        size_t numElems = derivBytes.size() / es;
+        tile->derivatives.reset(new CudaArray(cu_, numElems, es, "tileDerivatives"));
+        tile->derivatives->upload(derivBytes.data(), true);
     }
 
     currentMemory_ += tileMemory;

@@ -909,8 +909,21 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 #if DEBUG_GRIDFORCE
     defines["DEBUG_GRIDFORCE"] = "1";
 #endif
-    // Read grid derivatives as double. The tiled kernels use their own float buffers.
-    if (force.getUseDoubleStorage() && !willUseTiledMode)
+    // Read grid derivatives as double. For the non-tiled path this follows the force
+    // flag; for a tiled-input file it follows the precision the file was written in
+    // (a memory-backed tiled grid is always float).
+    bool wantDoubleStorage;
+    if (willUseTiledMode) {
+        wantDoubleStorage = false;
+        if (usingTiledInput) {
+            TiledGridData peek;
+            peek.openForReading(tiledInputFile);
+            wantDoubleStorage = peek.hasDoubleDerivatives();
+        }
+    } else {
+        wantDoubleStorage = force.getUseDoubleStorage();
+    }
+    if (wantDoubleStorage)
         defines["GRID_STORAGE_TYPE"] = "double";
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
@@ -2366,6 +2379,7 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
     tiledGrid.setOrigin(originX, originY, originZ);
     tiledGrid.setInvPower(invPower);
     tiledGrid.setInvPowerMode(static_cast<InvPowerMode>(invPowerMode));
+    tiledGrid.setDoubleDerivatives(useDoubleStorage);
     tiledGrid.beginWriting(outputFilename, computeDerivatives);
 
     int numTilesX = tiledGrid.getNumTilesX();
@@ -2414,10 +2428,13 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
     receptorSigmas.upload(sigmasVec);
     receptorEpsilons.upload(epsilonsVec);
 
-    // Get kernel module
+    // Generate the derivatives in double when double storage is enabled.
+    map<string, string> genDefines;
+    if (useDoubleStorage)
+        genDefines["GRID_STORAGE_TYPE"] = "double";
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::gridGenerationKernel);
+        CudaGridForceKernelSources::gridGenerationKernel, genDefines);
 
     float originXf = (float)originX;
     float originYf = (float)originY;
@@ -2448,9 +2465,12 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
                 int startX = range[0], startY = range[1], startZ = range[2];
 
                 if (computeDerivatives) {
-                    // Allocate GPU buffer for tile (27 values per point)
+                    // Allocate GPU buffer for tile (27 values per point), at storage precision
                     CudaArray tileDataGPU;
-                    tileDataGPU.initialize<float>(cu, 27 * tilePoints, "tileData");
+                    if (useDoubleStorage)
+                        tileDataGPU.initialize<double>(cu, 27 * tilePoints, "tileData");
+                    else
+                        tileDataGPU.initialize<float>(cu, 27 * tilePoints, "tileData");
 
                     CUfunction tileKernel = cu.getKernel(module, "generateTileWithAnalyticalDerivatives");
 
@@ -2495,25 +2515,25 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
 
                     cuStreamSynchronize(cu.getCurrentStream());
 
-                    // Download tile data
-                    std::vector<float> tileDataFloat(27 * tilePoints);
-                    tileDataGPU.download(tileDataFloat);
+                    // Download the 27 derivative channels as raw bytes (storage precision).
+                    // The kernel's [deriv_idx * tilePoints + point] layout is exactly the
+                    // file's derivative layout, so the block is the derivative bytes verbatim.
+                    size_t es = useDoubleStorage ? sizeof(double) : sizeof(float);
+                    std::vector<char> derivBytes((size_t)27 * tilePoints * es);
+                    tileDataGPU.download(derivBytes.data());
 
-                    // Extract values and derivatives
+                    // Values are derivative index 0 (energy), always stored as float
                     std::vector<float> values(tilePoints);
-                    std::vector<float> derivatives(27 * tilePoints);
-
-                    for (int i = 0; i < tilePoints; i++) {
-                        values[i] = tileDataFloat[0 * tilePoints + i];  // First derivative index is energy
-                    }
-                    for (int d = 0; d < 27; d++) {
-                        for (int i = 0; i < tilePoints; i++) {
-                            derivatives[d * tilePoints + i] = tileDataFloat[d * tilePoints + i];
-                        }
+                    if (useDoubleStorage) {
+                        const double* d = reinterpret_cast<const double*>(derivBytes.data());
+                        for (int i = 0; i < tilePoints; i++) values[i] = (float)d[i];
+                    } else {
+                        const float* f = reinterpret_cast<const float*>(derivBytes.data());
+                        for (int i = 0; i < tilePoints; i++) values[i] = f[i];
                     }
 
                     // Write tile to file
-                    tiledGrid.writeTile(tx, ty, tz, values, derivatives);
+                    tiledGrid.writeTile(tx, ty, tz, values, derivBytes);
 
                 } else {
                     // Values only

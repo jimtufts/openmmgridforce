@@ -119,6 +119,7 @@ void TiledGridData::writeHeader() {
     // Flags (4 bytes)
     uint32_t flags = 0;
     if (m_hasDerivatives) flags |= TILED_FLAG_HAS_DERIVATIVES;
+    if (m_doubleDerivatives) flags |= TILED_FLAG_DOUBLE_DERIVATIVES;
     m_file.write(reinterpret_cast<char*>(&flags), 4);
 
     // Tile size (4 bytes)
@@ -164,7 +165,7 @@ void TiledGridData::writeHeader() {
 
 void TiledGridData::writeTile(int tileX, int tileY, int tileZ,
                               const vector<float>& values,
-                              const vector<float>& derivatives) {
+                              const vector<char>& derivBytes) {
     if (!m_isWriting) {
         throw OpenMMException("TiledGridData: File not open for writing");
     }
@@ -186,10 +187,10 @@ void TiledGridData::writeTile(int tileX, int tileY, int tileZ,
     }
 
     if (m_hasDerivatives) {
-        size_t expectedDerivs = 27 * numPoints;
-        if (derivatives.size() != expectedDerivs) {
+        size_t expectedBytes = (size_t)27 * numPoints * derivativeElementSize();
+        if (derivBytes.size() != expectedBytes) {
             throw OpenMMException("TiledGridData: Derivatives size mismatch. Expected " +
-                                  to_string(expectedDerivs) + ", got " + to_string(derivatives.size()));
+                                  to_string(expectedBytes) + " bytes, got " + to_string(derivBytes.size()));
         }
     }
 
@@ -207,9 +208,9 @@ void TiledGridData::writeTile(int tileX, int tileY, int tileZ,
     // Write values
     m_file.write(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(float));
 
-    // Write derivatives if present
-    if (m_hasDerivatives && !derivatives.empty()) {
-        m_file.write(reinterpret_cast<const char*>(derivatives.data()), derivatives.size() * sizeof(float));
+    // Write derivative bytes verbatim (already in the file's element size)
+    if (m_hasDerivatives && !derivBytes.empty()) {
+        m_file.write(derivBytes.data(), derivBytes.size());
     }
 
     // Record data size
@@ -291,6 +292,7 @@ void TiledGridData::readHeader() {
     uint32_t flags;
     m_file.read(reinterpret_cast<char*>(&flags), 4);
     m_hasDerivatives = (flags & TILED_FLAG_HAS_DERIVATIVES) != 0;
+    m_doubleDerivatives = (flags & TILED_FLAG_DOUBLE_DERIVATIVES) != 0;
 
     // Tile size
     uint32_t tileSize;
@@ -355,7 +357,7 @@ void TiledGridData::readTileIndex() {
 
 void TiledGridData::readTile(int tileX, int tileY, int tileZ,
                              vector<float>& values,
-                             vector<float>& derivatives) const {
+                             vector<char>& derivBytes) const {
     if (m_isWriting) {
         throw OpenMMException("TiledGridData: File is open for writing, not reading");
     }
@@ -386,12 +388,12 @@ void TiledGridData::readTile(int tileX, int tileY, int tileZ,
     values.resize(numPoints);
     m_file.read(reinterpret_cast<char*>(values.data()), numPoints * sizeof(float));
 
-    // Read derivatives if present
+    // Read derivative bytes verbatim in the file's element size
     if (m_hasDerivatives) {
-        derivatives.resize(27 * numPoints);
-        m_file.read(reinterpret_cast<char*>(derivatives.data()), 27 * numPoints * sizeof(float));
+        derivBytes.resize((size_t)27 * numPoints * derivativeElementSize());
+        m_file.read(derivBytes.data(), derivBytes.size());
     } else {
-        derivatives.clear();
+        derivBytes.clear();
     }
 }
 
@@ -444,7 +446,7 @@ void TiledGridData::applyArcsinhTransform(double scale) {
                 int tileSizeX, tileSizeY, tileSizeZ;
                 getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX, tileSizeY, tileSizeZ);
 
-                vector<float> tileVals, tileDerivsUnused;
+                vector<float> tileVals; vector<char> tileDerivsUnused;
                 readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
 
                 // Apply arcsinh(value/scale) to each grid value
@@ -495,7 +497,7 @@ void TiledGridData::applyInvPowerTransform(float invPower) {
                 int tileSizeX, tileSizeY, tileSizeZ;
                 getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX, tileSizeY, tileSizeZ);
 
-                vector<float> tileVals, tileDerivsUnused;
+                vector<float> tileVals; vector<char> tileDerivsUnused;
                 readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
 
                 // Apply sign(V) * |V|^(1/n) to each grid value
@@ -576,7 +578,7 @@ void TiledGridData::applyBSplinePrefilter(int order) {
                 int tileSizeY, tileSizeZ, tileSizeX_check;
                 getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX_check, tileSizeY, tileSizeZ);
 
-                vector<float> tileVals, tileDerivsUnused;
+                vector<float> tileVals; vector<char> tileDerivsUnused;
                 readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
 
                 for (int lx = 0; lx < sizeX; lx++) {
@@ -651,7 +653,7 @@ void TiledGridData::applyBSplinePrefilter(int order) {
                 int tileSizeX, tileSizeY_check, tileSizeZ_check;
                 getTileActualSize(txIdx, tyIdx, tzIdx, tileSizeX, tileSizeY_check, tileSizeZ_check);
 
-                vector<float> tileVals, tileDerivsUnused;
+                vector<float> tileVals; vector<char> tileDerivsUnused;
                 readTile(txIdx, tyIdx, tzIdx, tileVals, tileDerivsUnused);
 
                 for (int lx = 0; lx < tileSizeX; lx++) {
