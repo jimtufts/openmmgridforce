@@ -83,7 +83,7 @@ private:
     OpenMM::CudaArray groupScalingFactorsBuffer;  // [numGroups] - per-group scaling
 
     // Host-side cached results
-    mutable std::vector<float> groupEnergiesHost;
+    mutable std::vector<double> groupEnergiesHost;
 
     std::vector<int> h_particleIndices;  // Host copy for updates
 

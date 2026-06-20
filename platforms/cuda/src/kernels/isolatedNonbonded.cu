@@ -30,7 +30,7 @@ extern "C" __global__ void computeIsolatedNonbonded(
     const int2* __restrict__ exclusions,        // Excluded pairs [numExclusions] (template)
     const int2* __restrict__ exceptions,        // Exception pairs [numExceptions] (template)
     const float3* __restrict__ exceptionParams, // Exception parameters (chargeProd, sigma, epsilon) [numExceptions]
-    float* __restrict__ groupEnergies,          // Per-group energy accumulation [numGroups]
+    mixed* __restrict__ groupEnergies,          // Per-group energy accumulation [numGroups]
     const float* __restrict__ groupScalingFactors, // Per-group scaling [numGroups]
     const float globalScalingFactor,            // Global scaling factor
     const int numAtoms,
@@ -151,7 +151,7 @@ extern "C" __global__ void computeIsolatedNonbonded(
         // Accumulate energy (fixed-point for pre-sm_60 GPU compatibility)
         if (includeEnergy) {
             atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)pairEnergy * 0x100000000)));
-            atomicAdd(&groupEnergies[groupIdx], (float)pairEnergy);
+            atomicAdd(&groupEnergies[groupIdx], pairEnergy);
         }
     }
 }

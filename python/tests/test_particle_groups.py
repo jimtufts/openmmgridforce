@@ -149,6 +149,38 @@ def test_alchemical_group_scaling(precision):
     del ctx
 
 
+def _isolated_nb(precision):
+    """K groups x M atoms of an IsolatedNonbondedForce; returns (total, per-group)."""
+    KI, MI = 2, 4
+    f = gfp.IsolatedNonbondedForce(); f.setNumAtoms(MI)
+    for i in range(MI):
+        f.setAtomParameters(i, 0.2 * (i - 1.5), 0.30, 0.5)
+    s = mm.System()
+    for _ in range(KI * MI):
+        s.addParticle(12.0)
+    for g in range(KI):
+        f.addParticleGroup(f'lig{g}', list(range(g * MI, (g + 1) * MI)))
+    s.addForce(f)
+    ctx = Context(s, VerletIntegrator(0.001), mm.Platform.getPlatformByName('CUDA'),
+                  {'Precision': precision})
+    rng = np.random.default_rng(5)
+    pos = 0.4 + 0.3 * rng.random((KI * MI, 3))
+    ctx.setPositions([mm.Vec3(*p) for p in pos] * nanometer)
+    total = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(kilojoules_per_mole)
+    grp = np.array([f.getGroupEnergy(g) for g in range(KI)])
+    del ctx
+    return total, grp
+
+
+@pytest.mark.parametrize("precision", ["single", "mixed", "double"])
+def test_isolated_nb_group_energies(precision):
+    """IsolatedNonbondedForce per-group energy breakdown (mixed buffer) sums to the
+    total and is finite in every precision mode."""
+    total, grp = _isolated_nb(precision)
+    assert np.all(np.isfinite(grp))
+    assert abs(grp.sum() - total) / max(1.0, abs(total)) < 1e-5
+
+
 if __name__ == "__main__":
     grid_file, origin = _grid()
     print(f"{K} groups x {M} atoms, charge grid, triquintic")
