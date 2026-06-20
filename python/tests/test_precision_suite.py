@@ -133,6 +133,44 @@ def test_energy_double_finite_close(method):
     assert abs(ed - es) / max(1.0, abs(es)) < 1e-4
 
 
+@functools.lru_cache(maxsize=1)
+def _tiled_grid():
+    import validate_tiled_double_storage as V
+    prm, crd, pos_list, rec_atoms, origin = _system()
+    tmp = tempfile.mkdtemp()
+    tf = os.path.join(tmp, "charge.tiled")
+    V.generate(prm, crd, pos_list, rec_atoms, origin, double=False, tiled_path=tf)
+    probe = (origin[0] + (NX // 2 + 0.37) * SP, origin[1] + (NY // 2 + 0.61) * SP,
+             origin[2] + (NZ // 2 + 0.52) * SP)
+    return tf, origin, probe
+
+
+def _eval_tiled(tf, origin, method, probe, precision):
+    gf = gfp.GridForce()
+    gf.setGridOrigin(*origin); gf.addGridCounts(NX, NY, NZ); gf.addGridSpacing(SP, SP, SP)
+    gf.setTiledInputFile(tf); gf.setTiledMode(True, 8, 512); gf.setInterpolationMethod(method)
+    s = mm.System(); s.addParticle(1.0); gf.addParticleGroup('charge', [0], [1.0]); s.addForce(gf)
+    ctx = Context(s, VerletIntegrator(0.001), mm.Platform.getPlatformByName('CUDA'),
+                  {'Precision': precision})
+    ctx.setPositions([mm.Vec3(*probe)] * 1 * nanometer)
+    f = np.array(ctx.getState(getForces=True).getForces(asNumpy=True).value_in_unit(
+        kilojoules_per_mole / nanometer))[0]
+    del ctx
+    return f
+
+
+@pytest.mark.parametrize("method", [0, 2, 3])
+def test_tiled_force_precision(method):
+    """Tiled inline interpolation compute: single==mixed, double agrees."""
+    tf, origin, probe = _tiled_grid()
+    fs = _eval_tiled(tf, origin, method, probe, 'single')
+    fm = _eval_tiled(tf, origin, method, probe, 'mixed')
+    fd = _eval_tiled(tf, origin, method, probe, 'double')
+    assert np.array_equal(fs, fm), f"tiled {METHODS[method]}: single/mixed differ"
+    relf = np.linalg.norm(fd - fs) / max(1.0, np.linalg.norm(fs))
+    assert relf < 1e-3, f"tiled {METHODS[method]}: double rel {relf:.2e}"
+
+
 def test_double_generation_carries_f64():
     """Double generation produces genuine f64 derivatives (oracle-free check)."""
     import validate_double_generation as vdg
