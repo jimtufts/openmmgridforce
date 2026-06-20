@@ -17,6 +17,23 @@ using namespace GridForcePlugin;
 using namespace OpenMM;
 using namespace std;
 
+// Energy buffers follow the context precision (mixed = double in mixed/double).
+static int mixedEnergyElementSize(OpenMM::CudaContext& cu) {
+    return (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) ? sizeof(double) : sizeof(float);
+}
+static void initMixedEnergyBuffer(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, int n, const char* name) {
+    buf.initialize(cu, n, mixedEnergyElementSize(cu), name);
+}
+static void downloadMixedEnergy(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, std::vector<double>& out) {
+    if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
+        buf.download(out);
+    } else {
+        std::vector<float> tmp(out.size());
+        buf.download(tmp);
+        out.assign(tmp.begin(), tmp.end());
+    }
+}
+
 // Coulomb constant in kJ*nm/mol/e^2
 static const float ONE_4PI_EPS0 = 138.935456f;
 
@@ -355,8 +372,8 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         particleIndices.upload(allIndices);
         groupStartIndex.initialize<int>(cu, numParticleGroups + 1, "gbsaGroupStart");
         groupStartIndex.upload(groupStarts);
-        groupEnergies.initialize<float>(cu, numParticleGroups, "gbsaGroupEnergies");
-        groupLigandEnergies.initialize<float>(cu, numParticleGroups, "gbsaGroupLigandEnergies");
+        initMixedEnergyBuffer(cu, groupEnergies, numParticleGroups, "gbsaGroupEnergies");
+        initMixedEnergyBuffer(cu, groupLigandEnergies, numParticleGroups, "gbsaGroupLigandEnergies");
 
         groupEnergiesHost.resize(numParticleGroups);
         groupLigandEnergiesHost.resize(numParticleGroups);
@@ -382,8 +399,8 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         vector<int> groupStarts = {0, totalParticles};
         groupStartIndex.initialize<int>(cu, 2, "gbsaGroupStart");
         groupStartIndex.upload(groupStarts);
-        groupEnergies.initialize<float>(cu, 1, "gbsaGroupEnergies");
-        groupLigandEnergies.initialize<float>(cu, 1, "gbsaGroupLigandEnergies");
+        initMixedEnergyBuffer(cu, groupEnergies, 1, "gbsaGroupEnergies");
+        initMixedEnergyBuffer(cu, groupLigandEnergies, 1, "gbsaGroupLigandEnergies");
         groupEnergiesHost.resize(1);
         groupLigandEnergiesHost.resize(1);
         groupBornRadiiHost.resize(1);
@@ -574,8 +591,8 @@ double CudaCalcGBSAGridForceKernel::execute(ContextImpl& context,
 
     // Download group energies only when energy is needed to avoid sync barriers
     if (includeEnergy && !skipGroupEnergyDownload_) {
-        groupEnergies.download(groupEnergiesHost);
-        groupLigandEnergies.download(groupLigandEnergiesHost);
+        downloadMixedEnergy(cu, groupEnergies, groupEnergiesHost);
+        downloadMixedEnergy(cu, groupLigandEnergies, groupLigandEnergiesHost);
 
         // Copy ligand energies for separate reporting
         for (int g = 0; g < numParticleGroups; g++) {

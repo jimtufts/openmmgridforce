@@ -456,7 +456,8 @@ __device__ __forceinline__ float nutsUniformRng(unsigned int seed, unsigned int 
 
 /**
  * Sum per-group energies from all force energy buffers into a single double[K] buffer.
- * Each force stores group energies as float[numGroups] on the GPU.
+ * Each force stores group energies as mixed[numGroups] on the GPU (double in
+ * mixed/double precision, float in single) -- read as mixed to match.
  * forceEnergyPtrs[f] is the device address (as unsigned long long) of force f's buffer.
  * One thread per group.
  */
@@ -471,7 +472,7 @@ extern "C" __global__ void nutsGatherForceEnergies(
          k += gridDim.x * blockDim.x) {
         double sum = 0.0;
         for (int f = 0; f < numForces; f++) {
-            const float* buf = (const float*)forceEnergyPtrs[f];
+            const mixed* buf = (const mixed*)forceEnergyPtrs[f];
             sum += (double)buf[k];
         }
         totalGroupPE[k] = sum;

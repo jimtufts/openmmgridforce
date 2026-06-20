@@ -23,7 +23,7 @@ extern "C" __global__ void computeIsolatedBonds(
     const int* __restrict__ groupParticleIndices,
     const int2* __restrict__ bondAtoms,
     const float2* __restrict__ bondParams,
-    float* __restrict__ groupEnergies,
+    mixed* __restrict__ groupEnergies,
     const float* __restrict__ groupScalingFactors,
     const float globalScalingFactor,
     const int numAtoms,
@@ -68,7 +68,7 @@ extern "C" __global__ void computeIsolatedBonds(
 
         // Accumulate energy
         if (includeEnergy) {
-            atomicAdd(&groupEnergies[groupIdx], (float)energy);
+            atomicAdd(&groupEnergies[groupIdx], energy);
             atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
         }
 
@@ -100,7 +100,7 @@ extern "C" __global__ void computeIsolatedAngles(
     const int* __restrict__ groupParticleIndices,
     const int4* __restrict__ angleAtoms,
     const float2* __restrict__ angleParams,
-    float* __restrict__ groupEnergies,
+    mixed* __restrict__ groupEnergies,
     const float* __restrict__ groupScalingFactors,
     const float globalScalingFactor,
     const int numAtoms,
@@ -164,7 +164,7 @@ extern "C" __global__ void computeIsolatedAngles(
         real dEdTheta = k * deltaTheta * scale;
 
         if (includeEnergy) {
-            atomicAdd(&groupEnergies[groupIdx], (float)energy);
+            atomicAdd(&groupEnergies[groupIdx], energy);
             atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
         }
 
@@ -217,7 +217,7 @@ extern "C" __global__ void computeIsolatedTorsions(
     const int* __restrict__ groupParticleIndices,
     const int4* __restrict__ torsionAtoms,
     const float4* __restrict__ torsionParams,
-    float* __restrict__ groupEnergies,
+    mixed* __restrict__ groupEnergies,
     const float* __restrict__ groupScalingFactors,
     const float globalScalingFactor,
     const int numAtoms,
@@ -300,7 +300,7 @@ extern "C" __global__ void computeIsolatedTorsions(
         real dEdAngle = -kT * n * sin(deltaAngle) * scale;
 
         if (includeEnergy) {
-            atomicAdd(&groupEnergies[groupIdx], (float)energy);
+            atomicAdd(&groupEnergies[groupIdx], energy);
             atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
         }
 

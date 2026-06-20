@@ -1239,7 +1239,7 @@ extern "C" __global__ void computeGBEnergy(
     int templateNumAtoms,
     float prefactor,
     unsigned long long* __restrict__ forceBuffer,
-    float* __restrict__ groupEnergies,
+    mixed* __restrict__ groupEnergies,
     int paddedNumAtoms,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
@@ -1364,7 +1364,7 @@ extern "C" __global__ void computeSAEnergy(
     int templateNumAtoms,
     float surfaceTension,
     float probeRadius,
-    float* __restrict__ groupEnergies
+    mixed* __restrict__ groupEnergies
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 

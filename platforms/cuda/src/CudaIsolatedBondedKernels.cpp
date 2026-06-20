@@ -20,6 +20,40 @@ using namespace GridForcePlugin;
 using namespace OpenMM;
 using namespace std;
 
+// Download atom positions as Vec3, handling both posq element types:
+// float4 in single/mixed precision, double4 in double precision.
+static std::vector<Vec3> downloadPositionsVec3(OpenMM::CudaContext& cu) {
+    int n = cu.getPaddedNumAtoms();
+    std::vector<Vec3> pos(n);
+    if (cu.getUseDoublePrecision()) {
+        std::vector<double4> p(n);
+        cu.getPosq().download(p);
+        for (int i = 0; i < n; i++) pos[i] = Vec3(p[i].x, p[i].y, p[i].z);
+    } else {
+        std::vector<float4> p(n);
+        cu.getPosq().download(p);
+        for (int i = 0; i < n; i++) pos[i] = Vec3(p[i].x, p[i].y, p[i].z);
+    }
+    return pos;
+}
+
+// Energy buffers follow the context precision (mixed = double in mixed/double).
+static int mixedEnergyElementSize(OpenMM::CudaContext& cu) {
+    return (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) ? sizeof(double) : sizeof(float);
+}
+static void initMixedEnergyBuffer(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, int n, const char* name) {
+    buf.initialize(cu, n, mixedEnergyElementSize(cu), name);
+}
+static void downloadMixedEnergy(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, std::vector<double>& out) {
+    if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
+        buf.download(out);
+    } else {
+        std::vector<float> tmp(out.size());
+        buf.download(tmp);
+        out.assign(tmp.begin(), tmp.end());
+    }
+}
+
 CudaCalcIsolatedBondedForceKernel::~CudaCalcIsolatedBondedForceKernel() {
 }
 
@@ -53,7 +87,7 @@ void CudaCalcIsolatedBondedForceKernel::initialize(const System& system, const I
     groupParticleIndices.upload(h_particleIndices);
 
     // Per-group energy buffer
-    groupEnergiesBuffer.initialize<float>(cu, numParticleGroups, "isolatedBonded_groupEnergies");
+    initMixedEnergyBuffer(cu, groupEnergiesBuffer, numParticleGroups, "isolatedBonded_groupEnergies");
     groupEnergiesHost.resize(numParticleGroups, 0.0f);
     fixedPointEnergyBuffer.initialize<unsigned long long>(cu, 1, "isolatedBonded_fixedPointEnergy");
 
@@ -228,7 +262,7 @@ double CudaCalcIsolatedBondedForceKernel::execute(ContextImpl& context, bool inc
         fixedPointEnergyBuffer.download(&fixedPointEnergyRaw);
         double energy = (long long)fixedPointEnergyRaw / (double)0x100000000;
         if (!skipGroupEnergyDownload_)
-            groupEnergiesBuffer.download(groupEnergiesHost);
+            downloadMixedEnergy(cu, groupEnergiesBuffer, groupEnergiesHost);
         return energy;
     }
 
@@ -300,14 +334,13 @@ vector<double> CudaCalcIsolatedBondedForceKernel::computeHessian(ContextImpl& co
 
     // Download positions from GPU
     int totalSystemAtoms = cu.getNumAtoms();
-    vector<float4> posq(cu.getPaddedNumAtoms());
-    cu.getPosq().download(posq);
+    vector<Vec3> posq = downloadPositionsVec3(cu);
 
     // Extract group particle positions as Vec3
     vector<Vec3> groupPos(numAtoms);
     for (int i = 0; i < numAtoms; i++) {
         int sysIdx = h_particleIndices[groupIndex * numAtoms + i];
-        groupPos[i] = Vec3(posq[sysIdx].x, posq[sysIdx].y, posq[sysIdx].z);
+        groupPos[i] = posq[sysIdx];
     }
 
     int N3 = 3 * numAtoms;
@@ -378,14 +411,13 @@ vector<double> CudaCalcIsolatedBondedForceKernel::computeInternalForceConstants(
         throw OpenMMException("IsolatedBondedForce: group index out of range for computeInternalForceConstants");
 
     // Download positions from GPU
-    vector<float4> posq(cu.getPaddedNumAtoms());
-    cu.getPosq().download(posq);
+    vector<Vec3> posq = downloadPositionsVec3(cu);
 
     // Extract group particle positions as Vec3
     vector<Vec3> groupPos(numAtoms);
     for (int i = 0; i < numAtoms; i++) {
         int sysIdx = h_particleIndices[groupIndex * numAtoms + i];
-        groupPos[i] = Vec3(posq[sysIdx].x, posq[sysIdx].y, posq[sysIdx].z);
+        groupPos[i] = posq[sysIdx];
     }
 
     int total = numBonds + numAngles + numTorsions;

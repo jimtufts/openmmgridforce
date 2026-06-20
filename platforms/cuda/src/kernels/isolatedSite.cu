@@ -24,7 +24,7 @@ extern "C" __global__ void computeIsolatedSiteRestraint(
     unsigned long long* __restrict__ fixedPointEnergy,
     const int* __restrict__ groupParticleIndices,
     const float* __restrict__ atomMasses,
-    float* __restrict__ groupEnergies,
+    mixed* __restrict__ groupEnergies,
     const float* __restrict__ groupScalingFactors,
     const float globalScalingFactor,
     const float centerX,

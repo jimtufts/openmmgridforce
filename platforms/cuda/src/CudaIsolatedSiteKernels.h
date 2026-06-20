@@ -54,7 +54,7 @@ private:
     float totalMass;
 
     // Host-side caches
-    mutable std::vector<float> groupEnergiesHost;
+    mutable std::vector<double> groupEnergiesHost;
     std::vector<int> h_particleIndices;
 
     bool skipGroupEnergyDownload_ = false;

@@ -56,7 +56,7 @@ private:
     OpenMM::CudaArray groupScalingFactorsBuffer;
 
     // Host-side cached results
-    mutable std::vector<float> groupEnergiesHost;
+    mutable std::vector<double> groupEnergiesHost;
     std::vector<int> h_particleIndices;
 
     // Host-side double-precision bonded parameters for Hessian computation

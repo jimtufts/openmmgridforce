@@ -12,6 +12,23 @@
 using namespace OpenMM;
 using namespace std;
 
+// Energy buffers follow the context precision (mixed = double in mixed/double).
+static int mixedEnergyElementSize(OpenMM::CudaContext& cu) {
+    return (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) ? sizeof(double) : sizeof(float);
+}
+static void initMixedEnergyBuffer(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, int n, const char* name) {
+    buf.initialize(cu, n, mixedEnergyElementSize(cu), name);
+}
+static void downloadMixedEnergy(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, std::vector<double>& out) {
+    if (cu.getUseDoublePrecision() || cu.getUseMixedPrecision()) {
+        buf.download(out);
+    } else {
+        std::vector<float> tmp(out.size());
+        buf.download(tmp);
+        out.assign(tmp.begin(), tmp.end());
+    }
+}
+
 namespace GridForcePlugin {
 
 CudaCalcIsolatedSiteForceKernel::~CudaCalcIsolatedSiteForceKernel() {
@@ -60,8 +77,7 @@ void CudaCalcIsolatedSiteForceKernel::initialize(
     groupParticleIndices.upload(h_particleIndices);
 
     // Per-group energy buffer
-    groupEnergiesBuffer.initialize<float>(cu, numParticleGroups,
-                                         "isolatedSite_groupEnergies");
+    initMixedEnergyBuffer(cu, groupEnergiesBuffer, numParticleGroups, "isolatedSite_groupEnergies");
     groupEnergiesHost.resize(numParticleGroups, 0.0f);
 
     // Fixed-point energy accumulator (for pre-sm_60 GPU compatibility)
@@ -128,7 +144,7 @@ double CudaCalcIsolatedSiteForceKernel::execute(
         fixedPointEnergyBuffer.download(&fixedPointEnergyRaw);
         double energy = (long long)fixedPointEnergyRaw / (double)0x100000000;
         if (!skipGroupEnergyDownload_)
-            groupEnergiesBuffer.download(groupEnergiesHost);
+            downloadMixedEnergy(cu, groupEnergiesBuffer, groupEnergiesHost);
         return energy;
     }
 

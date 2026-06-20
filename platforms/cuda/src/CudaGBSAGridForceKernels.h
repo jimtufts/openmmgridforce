@@ -162,8 +162,8 @@ private:
     CUmodule generationModule;
 
     // Host-side results cache
-    mutable std::vector<float> groupEnergiesHost;
-    mutable std::vector<float> groupLigandEnergiesHost;
+    mutable std::vector<double> groupEnergiesHost;
+    mutable std::vector<double> groupLigandEnergiesHost;
     mutable std::vector<std::vector<float>> groupBornRadiiHost;
 
     // Hessian support
