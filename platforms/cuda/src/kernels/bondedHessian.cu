@@ -20,60 +20,39 @@
 #define HESSIAN_SCALE 0x40000000  // 2^30 (soft-mode resolution margin)
 
 // ============================================================
-// Helper functions
+// Helper functions (real = float in single/mixed, double in double)
 // ============================================================
 
-/**
- * Compute cross product of two float3 vectors.
- */
-__device__ inline float3 cross(float3 a, float3 b) {
-    return make_float3(
+__device__ inline real3 cross(real3 a, real3 b) {
+    return make_real3(
         a.y * b.z - a.z * b.y,
         a.z * b.x - a.x * b.z,
         a.x * b.y - a.y * b.x
     );
 }
 
-/**
- * Compute dot product of two float3 vectors.
- */
-__device__ inline float dot(float3 a, float3 b) {
+__device__ inline real dot(real3 a, real3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-/**
- * Compute squared magnitude of a float3 vector.
- */
-__device__ inline float length_sq(float3 v) {
+__device__ inline real length_sq(real3 v) {
     return dot(v, v);
 }
 
-/**
- * Compute magnitude of a float3 vector.
- */
-__device__ inline float length(float3 v) {
-    return sqrtf(length_sq(v));
+__device__ inline real length(real3 v) {
+    return sqrt(length_sq(v));
 }
 
-/**
- * Subtract two float3 vectors.
- */
-__device__ inline float3 sub(float3 a, float3 b) {
-    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+__device__ inline real3 sub(real3 a, real3 b) {
+    return make_real3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-/**
- * Add two float3 vectors.
- */
-__device__ inline float3 add(float3 a, float3 b) {
-    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+__device__ inline real3 add(real3 a, real3 b) {
+    return make_real3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-/**
- * Scale a float3 vector.
- */
-__device__ inline float3 scale(float3 v, float s) {
-    return make_float3(v.x * s, v.y * s, v.z * s);
+__device__ inline real3 scale(real3 v, real s) {
+    return make_real3(v.x * s, v.y * s, v.z * s);
 }
 
 // ============================================================
@@ -94,23 +73,23 @@ __device__ inline float3 scale(float3 v, float s) {
  * @param hess     Output: 6x6 Hessian matrix (row-major)
  */
 __device__ void computeBondHessian(
-    float3 p1, float3 p2,
-    float k, float r0,
-    float* hess  // 36 floats
+    real3 p1, real3 p2,
+    real k, real r0,
+    real* hess  // 36 entries
 ) {
     // Initialize to zero
     for (int i = 0; i < 36; i++) hess[i] = 0.0f;
 
-    float3 r_vec = sub(p2, p1);
-    float r = length(r_vec);
+    real3 r_vec = sub(p2, p1);
+    real r = length(r_vec);
 
     if (r < 1e-10f) return;
 
-    float3 r_hat = scale(r_vec, 1.0f / r);
+    real3 r_hat = scale(r_vec, 1.0f / r);
 
     // Outer product r_hat ⊗ r_hat
-    float rr[9];
-    float rv[3] = {r_hat.x, r_hat.y, r_hat.z};
+    real rr[9];
+    real rv[3] = {r_hat.x, r_hat.y, r_hat.z};
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
             rr[i*3+j] = rv[i] * rv[j];
@@ -118,11 +97,11 @@ __device__ void computeBondHessian(
     }
 
     // d²E/dr1² = k * [rr + (1 - r0/r) * (I - rr)]
-    float factor = 1.0f - r0 / r;
-    float block[9];
+    real factor = 1.0f - r0 / r;
+    real block[9];
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
-            float I_ij = (i == j) ? 1.0f : 0.0f;
+            real I_ij = (i == j) ? 1.0f : 0.0f;
             block[i*3+j] = k * (rr[i*3+j] + factor * (I_ij - rr[i*3+j]));
         }
     }
@@ -162,13 +141,13 @@ extern "C" __global__ void computeBondHessians(
     real4 pos1 = posq[i1];
     real4 pos2 = posq[i2];
 
-    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
-    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
+    real3 p1 = make_real3(pos1.x, pos1.y, pos1.z);
+    real3 p2 = make_real3(pos2.x, pos2.y, pos2.z);
 
-    float k = bondParams[bondIdx * 2 + 0];
-    float r0 = bondParams[bondIdx * 2 + 1];
+    real k = bondParams[bondIdx * 2 + 0];
+    real r0 = bondParams[bondIdx * 2 + 1];
 
-    float localHess[36];
+    real localHess[36];
     computeBondHessian(p1, p2, k, r0, localHess);
 
     // Accumulate into global Hessian using fixed-point for determinism
@@ -187,7 +166,7 @@ extern "C" __global__ void computeBondHessians(
                     int localRow = localI * 3 + di;
                     int localCol = localJ * 3 + dj;
 
-                    float val = localHess[localRow * 6 + localCol];
+                    real val = localHess[localRow * 6 + localCol];
                     atomicAdd(&globalHessian[globalRow * stride + globalCol],
                               static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
@@ -215,44 +194,44 @@ extern "C" __global__ void computeBondHessians(
  * @param hess        Output: 9x9 Hessian matrix (row-major)
  */
 __device__ void computeAngleHessian(
-    float3 p1, float3 p2, float3 p3,
-    float k, float theta0,
-    float* hess  // 81 floats
+    real3 p1, real3 p2, real3 p3,
+    real k, real theta0,
+    real* hess  // 81 entries
 ) {
     // Initialize to zero
     for (int i = 0; i < 81; i++) hess[i] = 0.0f;
 
     // Vectors from central atom
-    float3 r21 = sub(p1, p2);
-    float3 r23 = sub(p3, p2);
+    real3 r21 = sub(p1, p2);
+    real3 r23 = sub(p3, p2);
 
-    float L1 = length(r21);
-    float L3 = length(r23);
+    real L1 = length(r21);
+    real L3 = length(r23);
 
     if (L1 < 1e-10f || L3 < 1e-10f) return;
 
-    float invL1 = 1.0f / L1;
-    float invL3 = 1.0f / L3;
-    float invL1_sq = invL1 * invL1;
-    float invL3_sq = invL3 * invL3;
+    real invL1 = 1.0f / L1;
+    real invL3 = 1.0f / L3;
+    real invL1_sq = invL1 * invL1;
+    real invL3_sq = invL3 * invL3;
 
-    float3 e1 = scale(r21, invL1);  // unit vector along r21
-    float3 e3 = scale(r23, invL3);  // unit vector along r23
+    real3 e1 = scale(r21, invL1);  // unit vector along r21
+    real3 e3 = scale(r23, invL3);  // unit vector along r23
 
-    float cos_theta = dot(e1, e3);
-    cos_theta = fminf(0.9999999f, fmaxf(-0.9999999f, cos_theta));
-    float theta = acosf(cos_theta);
-    float sin_theta = sinf(theta);
+    real cos_theta = dot(e1, e3);
+    cos_theta = fmin((real)0.9999999f, fmax((real)-0.9999999f, cos_theta));
+    real theta = acos(cos_theta);
+    real sin_theta = sin(theta);
 
-    if (fabsf(sin_theta) < 1e-10f) return;
+    if (fabs(sin_theta) < 1e-10f) return;
 
-    float inv_sin = 1.0f / sin_theta;
-    float cot_theta = cos_theta * inv_sin;
+    real inv_sin = 1.0f / sin_theta;
+    real cot_theta = cos_theta * inv_sin;
 
     // Energy derivatives
-    float dtheta = theta - theta0;
-    float dE_dtheta = k * dtheta;
-    float d2E_dtheta2 = k;
+    real dtheta = theta - theta0;
+    real dE_dtheta = k * dtheta;
+    real d2E_dtheta2 = k;
 
     // ============================================
     // Gradient of theta: dθ/dr_i
@@ -261,14 +240,14 @@ __device__ void computeAngleHessian(
     // dθ/dr3 = -1/(L3 sin θ) * (e1 - cos θ * e3)
     // dθ/dr2 = -(dθ/dr1 + dθ/dr3)
 
-    float3 v1 = sub(e3, scale(e1, cos_theta));  // e3 - cos θ * e1
-    float3 v3 = sub(e1, scale(e3, cos_theta));  // e1 - cos θ * e3
+    real3 v1 = sub(e3, scale(e1, cos_theta));  // e3 - cos θ * e1
+    real3 v3 = sub(e1, scale(e3, cos_theta));  // e1 - cos θ * e3
 
-    float3 g1 = scale(v1, -inv_sin * invL1);
-    float3 g3 = scale(v3, -inv_sin * invL3);
-    float3 g2 = scale(add(g1, g3), -1.0f);
+    real3 g1 = scale(v1, -inv_sin * invL1);
+    real3 g3 = scale(v3, -inv_sin * invL3);
+    real3 g2 = scale(add(g1, g3), -1.0f);
 
-    float grad[9];
+    real grad[9];
     grad[0] = g1.x; grad[1] = g1.y; grad[2] = g1.z;
     grad[3] = g2.x; grad[4] = g2.y; grad[5] = g2.z;
     grad[6] = g3.x; grad[7] = g3.y; grad[8] = g3.z;
@@ -290,23 +269,23 @@ __device__ void computeAngleHessian(
     // Let P1 = (I - e1⊗e1), P3 = (I - e3⊗e3) (projection matrices)
 
     // Store unit vector components for outer products
-    float e1v[3] = {e1.x, e1.y, e1.z};
-    float e3v[3] = {e3.x, e3.y, e3.z};
-    float v1v[3] = {v1.x, v1.y, v1.z};
-    float v3v[3] = {v3.x, v3.y, v3.z};
+    real e1v[3] = {e1.x, e1.y, e1.z};
+    real e3v[3] = {e3.x, e3.y, e3.z};
+    real v1v[3] = {v1.x, v1.y, v1.z};
+    real v3v[3] = {v3.x, v3.y, v3.z};
 
     // Projection matrices P1 = I - e1⊗e1, P3 = I - e3⊗e3
-    float P1[9], P3[9];
+    real P1[9], P3[9];
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
-            float delta = (i == j) ? 1.0f : 0.0f;
+            real delta = (i == j) ? 1.0f : 0.0f;
             P1[i*3+j] = delta - e1v[i] * e1v[j];
             P3[i*3+j] = delta - e3v[i] * e3v[j];
         }
     }
 
     // Initialize H_theta (9x9 matrix for d²θ/dr)
-    float H_theta[81];
+    real H_theta[81];
     for (int i = 0; i < 81; i++) H_theta[i] = 0.0f;
 
     // ----------------------------------------
@@ -328,7 +307,7 @@ __device__ void computeAngleHessian(
 
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            float val = inv_sin * invL1_sq * (
+            real val = inv_sin * invL1_sq * (
                 2.0f * v1v[a] * e1v[b] +
                 cot_theta * v1v[a] * v1v[b] +
                 cos_theta * P1[a*3+b]
@@ -343,7 +322,7 @@ __device__ void computeAngleHessian(
     // By symmetry with dr1 dr1:
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            float val = inv_sin * invL3_sq * (
+            real val = inv_sin * invL3_sq * (
                 2.0f * v3v[a] * e3v[b] +
                 cot_theta * v3v[a] * v3v[b] +
                 cos_theta * P3[a*3+b]
@@ -365,7 +344,7 @@ __device__ void computeAngleHessian(
 
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            float val = -inv_sin * invL1 * invL3 * (
+            real val = -inv_sin * invL1 * invL3 * (
                 P3[a*3+b] -
                 v3v[a] * e1v[b] -
                 cot_theta * v1v[a] * v3v[b]
@@ -394,10 +373,10 @@ __device__ void computeAngleHessian(
     // Fill in dr1 dr2 and dr2 dr1
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            float d2_r1_r1 = H_theta[(0+a)*9 + (0+b)];
-            float d2_r1_r3 = H_theta[(0+a)*9 + (6+b)];
+            real d2_r1_r1 = H_theta[(0+a)*9 + (0+b)];
+            real d2_r1_r3 = H_theta[(0+a)*9 + (6+b)];
             // d²θ/dr1 dr2 = -d²θ/dr1 dr1 - d²θ/dr1 dr3
-            float val = -d2_r1_r1 - d2_r1_r3;
+            real val = -d2_r1_r1 - d2_r1_r3;
             H_theta[(0+a)*9 + (3+b)] = val;
             H_theta[(3+b)*9 + (0+a)] = val;  // symmetric
         }
@@ -406,10 +385,10 @@ __device__ void computeAngleHessian(
     // Fill in dr3 dr2 and dr2 dr3
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            float d2_r3_r3 = H_theta[(6+a)*9 + (6+b)];
-            float d2_r3_r1 = H_theta[(6+a)*9 + (0+b)];
+            real d2_r3_r3 = H_theta[(6+a)*9 + (6+b)];
+            real d2_r3_r1 = H_theta[(6+a)*9 + (0+b)];
             // d²θ/dr3 dr2 = -d²θ/dr3 dr3 - d²θ/dr3 dr1
-            float val = -d2_r3_r3 - d2_r3_r1;
+            real val = -d2_r3_r3 - d2_r3_r1;
             H_theta[(6+a)*9 + (3+b)] = val;
             H_theta[(3+b)*9 + (6+a)] = val;  // symmetric
         }
@@ -419,8 +398,8 @@ __device__ void computeAngleHessian(
     // d²θ/dr2 dr2 = -d²θ/dr1 dr2 - d²θ/dr3 dr2
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            float d2_r1_r2 = H_theta[(0+a)*9 + (3+b)];
-            float d2_r3_r2 = H_theta[(6+a)*9 + (3+b)];
+            real d2_r1_r2 = H_theta[(0+a)*9 + (3+b)];
+            real d2_r3_r2 = H_theta[(6+a)*9 + (3+b)];
             H_theta[(3+a)*9 + (3+b)] = -d2_r1_r2 - d2_r3_r2;
         }
     }
@@ -457,14 +436,14 @@ extern "C" __global__ void computeAngleHessians(
     real4 pos2 = posq[i2];
     real4 pos3 = posq[i3];
 
-    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
-    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
-    float3 p3 = make_float3(pos3.x, pos3.y, pos3.z);
+    real3 p1 = make_real3(pos1.x, pos1.y, pos1.z);
+    real3 p2 = make_real3(pos2.x, pos2.y, pos2.z);
+    real3 p3 = make_real3(pos3.x, pos3.y, pos3.z);
 
-    float k = angleParams[angleIdx * 2 + 0];
-    float theta0 = angleParams[angleIdx * 2 + 1];
+    real k = angleParams[angleIdx * 2 + 0];
+    real theta0 = angleParams[angleIdx * 2 + 1];
 
-    float localHess[81];
+    real localHess[81];
     computeAngleHessian(p1, p2, p3, k, theta0, localHess);
 
     // Accumulate into global Hessian using fixed-point for determinism
@@ -483,7 +462,7 @@ extern "C" __global__ void computeAngleHessians(
                     int localRow = localI * 3 + di;
                     int localCol = localJ * 3 + dj;
 
-                    float val = localHess[localRow * 9 + localCol];
+                    real val = localHess[localRow * 9 + localCol];
                     atomicAdd(&globalHessian[globalRow * stride + globalCol],
                               static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
@@ -504,23 +483,23 @@ extern "C" __global__ void computeAngleHessians(
  * @param grad            Output: gradient (4 x 3 array, row-major)
  */
 __device__ void computeDihedralAndGradient(
-    float3 p1, float3 p2, float3 p3, float3 p4,
-    float& phi,
-    float* grad  // 12 floats: grad[0-2]=dr1, grad[3-5]=dr2, etc.
+    real3 p1, real3 p2, real3 p3, real3 p4,
+    real& phi,
+    real* grad  // 12 entries: grad[0-2]=dr1, grad[3-5]=dr2, etc.
 ) {
     // Bond vectors
-    float3 b1 = sub(p2, p1);
-    float3 b2 = sub(p3, p2);
-    float3 b3 = sub(p4, p3);
+    real3 b1 = sub(p2, p1);
+    real3 b2 = sub(p3, p2);
+    real3 b3 = sub(p4, p3);
 
     // Normal vectors to planes
-    float3 m = cross(b1, b2);
-    float3 n = cross(b2, b3);
+    real3 m = cross(b1, b2);
+    real3 n = cross(b2, b3);
 
-    float m_sq = length_sq(m);
-    float n_sq = length_sq(n);
-    float b2_sq = length_sq(b2);
-    float b2_norm = sqrtf(b2_sq);
+    real m_sq = length_sq(m);
+    real n_sq = length_sq(n);
+    real b2_sq = length_sq(b2);
+    real b2_norm = sqrt(b2_sq);
 
     // Degenerate case check
     if (m_sq < 1e-20f || n_sq < 1e-20f || b2_sq < 1e-20f) {
@@ -530,40 +509,40 @@ __device__ void computeDihedralAndGradient(
     }
 
     // Normalized vectors
-    float m_norm = sqrtf(m_sq);
-    float n_norm = sqrtf(n_sq);
-    float3 m_hat = scale(m, 1.0f / m_norm);
-    float3 n_hat = scale(n, 1.0f / n_norm);
-    float3 b2_hat = scale(b2, 1.0f / b2_norm);
+    real m_norm = sqrt(m_sq);
+    real n_norm = sqrt(n_sq);
+    real3 m_hat = scale(m, 1.0f / m_norm);
+    real3 n_hat = scale(n, 1.0f / n_norm);
+    real3 b2_hat = scale(b2, 1.0f / b2_norm);
 
     // Dihedral angle
-    float cos_phi = dot(m_hat, n_hat);
-    float3 m_cross_b2 = cross(m_hat, b2_hat);
-    float sin_phi = dot(m_cross_b2, n_hat);
-    phi = atan2f(sin_phi, cos_phi);
+    real cos_phi = dot(m_hat, n_hat);
+    real3 m_cross_b2 = cross(m_hat, b2_hat);
+    real sin_phi = dot(m_cross_b2, n_hat);
+    phi = atan2(sin_phi, cos_phi);
 
     // Gradient of phi with respect to atom positions
     // dphi/dr1 = (|b2| / |m|^2) * m
     // dphi/dr4 = -(|b2| / |n|^2) * n
-    float3 dphi_dr1 = scale(m, b2_norm / m_sq);
-    float3 dphi_dr4 = scale(n, -b2_norm / n_sq);
+    real3 dphi_dr1 = scale(m, b2_norm / m_sq);
+    real3 dphi_dr4 = scale(n, -b2_norm / n_sq);
 
     // Projection factors
-    float b1_dot_b2 = dot(b1, b2);
-    float b3_dot_b2 = dot(b3, b2);
-    float alpha = b1_dot_b2 / b2_sq;
-    float beta = b3_dot_b2 / b2_sq;
+    real b1_dot_b2 = dot(b1, b2);
+    real b3_dot_b2 = dot(b3, b2);
+    real alpha = b1_dot_b2 / b2_sq;
+    real beta = b3_dot_b2 / b2_sq;
 
     // Corrected coefficients for middle atoms
-    float c1 = -(1.0f + alpha);
-    float c4 = beta;
-    float d1 = alpha;
-    float d4 = -(1.0f + beta);
+    real c1 = -(1.0f + alpha);
+    real c4 = beta;
+    real d1 = alpha;
+    real d4 = -(1.0f + beta);
 
     // dphi/dr2 = c1 * dphi/dr1 + c4 * dphi/dr4
     // dphi/dr3 = d1 * dphi/dr1 + d4 * dphi/dr4
-    float3 dphi_dr2 = add(scale(dphi_dr1, c1), scale(dphi_dr4, c4));
-    float3 dphi_dr3 = add(scale(dphi_dr1, d1), scale(dphi_dr4, d4));
+    real3 dphi_dr2 = add(scale(dphi_dr1, c1), scale(dphi_dr4, c4));
+    real3 dphi_dr3 = add(scale(dphi_dr1, d1), scale(dphi_dr4, d4));
 
     // Store gradient
     grad[0] = dphi_dr1.x; grad[1] = dphi_dr1.y; grad[2] = dphi_dr1.z;
@@ -581,46 +560,34 @@ __device__ void computeDihedralAndGradient(
  * @param hess            Output: 12x12 Hessian matrix (row-major, symmetric)
  */
 __device__ void computeDihedralHessian(
-    float3 p1, float3 p2, float3 p3, float3 p4,
-    float* hess,  // 144 floats
-    bool debug = false
+    real3 p1, real3 p2, real3 p3, real3 p4,
+    real* hess  // 144 entries
 ) {
     // Initialize to zero
     for (int i = 0; i < 144; i++) hess[i] = 0.0f;
 
     // Bond vectors
-    float3 b1 = sub(p2, p1);
-    float3 b2 = sub(p3, p2);
-    float3 b3 = sub(p4, p3);
+    real3 b1 = sub(p2, p1);
+    real3 b2 = sub(p3, p2);
+    real3 b3 = sub(p4, p3);
 
     // Normal vectors
-    float3 m = cross(b1, b2);
-    float3 n = cross(b2, b3);
+    real3 m = cross(b1, b2);
+    real3 n = cross(b2, b3);
 
-    float m_sq = length_sq(m);
-    float n_sq = length_sq(n);
-    float b2_sq = length_sq(b2);
-    float b2_norm = sqrtf(b2_sq);
-
-    if (debug) {
-        printf("DEBUG computeDihedralHessian:\n");
-        printf("  b1 = [%f, %f, %f]\n", b1.x, b1.y, b1.z);
-        printf("  b2 = [%f, %f, %f]\n", b2.x, b2.y, b2.z);
-        printf("  b3 = [%f, %f, %f]\n", b3.x, b3.y, b3.z);
-        printf("  m = [%f, %f, %f], m_sq = %e\n", m.x, m.y, m.z, m_sq);
-        printf("  n = [%f, %f, %f], n_sq = %e\n", n.x, n.y, n.z, n_sq);
-        printf("  b2_sq = %e, b2_norm = %f\n", b2_sq, b2_norm);
-    }
+    real m_sq = length_sq(m);
+    real n_sq = length_sq(n);
+    real b2_sq = length_sq(b2);
+    real b2_norm = sqrt(b2_sq);
 
     if (m_sq < 1e-20f || n_sq < 1e-20f || b2_sq < 1e-20f) {
-        if (debug) printf("  EARLY RETURN: degenerate case\n");
         return;
     }
 
     // Precompute outer products (stored as 3x3 arrays, row-major)
-    float mm[9], nn[9];
-    float mv[3] = {m.x, m.y, m.z};
-    float nv[3] = {n.x, n.y, n.z};
+    real mm[9], nn[9];
+    real mv[3] = {m.x, m.y, m.z};
+    real nv[3] = {n.x, n.y, n.z};
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
             mm[i*3+j] = mv[i] * mv[j];
@@ -630,16 +597,16 @@ __device__ void computeDihedralHessian(
 
     // Skew-symmetric matrices for cross products
     // [v]x = [[0, -vz, vy], [vz, 0, -vx], [-vy, vx, 0]]
-    float b1_x[9] = {0, -b1.z, b1.y, b1.z, 0, -b1.x, -b1.y, b1.x, 0};
-    float b2_x[9] = {0, -b2.z, b2.y, b2.z, 0, -b2.x, -b2.y, b2.x, 0};
-    float b3_x[9] = {0, -b3.z, b3.y, b3.z, 0, -b3.x, -b3.y, b3.x, 0};
+    real b1_x[9] = {0, -b1.z, b1.y, b1.z, 0, -b1.x, -b1.y, b1.x, 0};
+    real b2_x[9] = {0, -b2.z, b2.y, b2.z, 0, -b2.x, -b2.y, b2.x, 0};
+    real b3_x[9] = {0, -b3.z, b3.y, b3.z, 0, -b3.x, -b3.y, b3.x, 0};
 
     // Derivatives of m = b1 x b2 with respect to positions (3x3 matrices)
     // dm/dp1 = [b2]x
     // dm/dp2 = -[b2]x - [b1]x
     // dm/dp3 = [b1]x
     // dm/dp4 = 0
-    float dm_dp[4][9];
+    real dm_dp[4][9];
     for (int i = 0; i < 9; i++) {
         dm_dp[0][i] = b2_x[i];
         dm_dp[1][i] = -b2_x[i] - b1_x[i];
@@ -652,7 +619,7 @@ __device__ void computeDihedralHessian(
     // dn/dp2 = [b3]x
     // dn/dp3 = -[b3]x - [b2]x
     // dn/dp4 = [b2]x
-    float dn_dp[4][9];
+    real dn_dp[4][9];
     for (int i = 0; i < 9; i++) {
         dn_dp[0][i] = 0.0f;
         dn_dp[1][i] = b3_x[i];
@@ -661,22 +628,22 @@ __device__ void computeDihedralHessian(
     }
 
     // Gradient components
-    float3 G1 = scale(m, b2_norm / m_sq);
-    float3 G4 = scale(n, -b2_norm / n_sq);
+    real3 G1 = scale(m, b2_norm / m_sq);
+    real3 G4 = scale(n, -b2_norm / n_sq);
 
     // Coefficients
-    float b1_dot_b2 = dot(b1, b2);
-    float b3_dot_b2 = dot(b3, b2);
-    float alpha = b1_dot_b2 / b2_sq;
-    float beta = b3_dot_b2 / b2_sq;
-    float c1 = -(1.0f + alpha);
-    float c4 = beta;
-    float d1 = alpha;
-    float d4 = -(1.0f + beta);
+    real b1_dot_b2 = dot(b1, b2);
+    real b3_dot_b2 = dot(b3, b2);
+    real alpha = b1_dot_b2 / b2_sq;
+    real beta = b3_dot_b2 / b2_sq;
+    real c1 = -(1.0f + alpha);
+    real c4 = beta;
+    real d1 = alpha;
+    real d4 = -(1.0f + beta);
 
     // Derivative of |b2| with respect to positions
-    float db2_norm_dp[4][3];
-    float b2v[3] = {b2.x, b2.y, b2.z};
+    real db2_norm_dp[4][3];
+    real b2v[3] = {b2.x, b2.y, b2.z};
     for (int i = 0; i < 3; i++) {
         db2_norm_dp[0][i] = 0.0f;
         db2_norm_dp[1][i] = -b2v[i] / b2_norm;
@@ -685,10 +652,10 @@ __device__ void computeDihedralHessian(
     }
 
     // Derivatives of b1.b2, b3.b2, b2^2
-    float b1v[3] = {b1.x, b1.y, b1.z};
-    float b3v[3] = {b3.x, b3.y, b3.z};
+    real b1v[3] = {b1.x, b1.y, b1.z};
+    real b3v[3] = {b3.x, b3.y, b3.z};
 
-    float db1_dot_b2_dp[4][3], db3_dot_b2_dp[4][3], db2_sq_dp[4][3];
+    real db1_dot_b2_dp[4][3], db3_dot_b2_dp[4][3], db2_sq_dp[4][3];
     for (int i = 0; i < 3; i++) {
         db1_dot_b2_dp[0][i] = -b2v[i];
         db1_dot_b2_dp[1][i] = b2v[i] - b1v[i];
@@ -707,14 +674,7 @@ __device__ void computeDihedralHessian(
     }
 
     // Compute dG1/dpj and dG4/dpj (3x3 matrices for each j)
-    float dG1_dp[4][9], dG4_dp[4][9];
-
-    if (debug) {
-        printf("  G1 = [%f, %f, %f]\n", G1.x, G1.y, G1.z);
-        printf("  G4 = [%f, %f, %f]\n", G4.x, G4.y, G4.z);
-        printf("  alpha = %f, beta = %f\n", alpha, beta);
-        printf("  dm_dp[0] (row 0): [%f, %f, %f]\n", dm_dp[0][0], dm_dp[0][1], dm_dp[0][2]);
-    }
+    real dG1_dp[4][9], dG4_dp[4][9];
 
     for (int j = 0; j < 4; j++) {
         // dG1/dpj = outer(m, db2_norm/dpj) / m_sq + (b2_norm/m_sq) * (I - 2*mm/m_sq) @ dm/dpj
@@ -725,34 +685,29 @@ __device__ void computeDihedralHessian(
                 int idx = a * 3 + b;
 
                 // term1 for G1: m[a] * db2_norm[j][b] / m_sq
-                float term1_G1 = mv[a] * db2_norm_dp[j][b] / m_sq;
+                real term1_G1 = mv[a] * db2_norm_dp[j][b] / m_sq;
 
                 // term2 for G1: (b2_norm/m_sq) * ((I - 2*mm/m_sq) @ dm_dp[j])_ab
                 // (I - 2*mm/m_sq)_ac * dm_dp[j]_cb
-                float sum_G1 = 0.0f;
+                real sum_G1 = 0.0f;
                 for (int c = 0; c < 3; c++) {
-                    float factor = (a == c ? 1.0f : 0.0f) - 2.0f * mm[a*3+c] / m_sq;
+                    real factor = (a == c ? 1.0f : 0.0f) - 2.0f * mm[a*3+c] / m_sq;
                     sum_G1 += factor * dm_dp[j][c*3+b];
                 }
-                float term2_G1 = (b2_norm / m_sq) * sum_G1;
+                real term2_G1 = (b2_norm / m_sq) * sum_G1;
 
                 dG1_dp[j][idx] = term1_G1 + term2_G1;
 
-                if (debug && j == 0 && a == 0 && b == 0) {
-                    printf("  dG1_dp[0][0,0]: term1=%f, sum=%f, term2=%f, total=%f\n",
-                           term1_G1, sum_G1, term2_G1, dG1_dp[j][idx]);
-                }
-
                 // term1 for G4: -n[a] * db2_norm[j][b] / n_sq
-                float term1_G4 = -nv[a] * db2_norm_dp[j][b] / n_sq;
+                real term1_G4 = -nv[a] * db2_norm_dp[j][b] / n_sq;
 
                 // term2 for G4: -(b2_norm/n_sq) * ((I - 2*nn/n_sq) @ dn_dp[j])_ab
-                float sum_G4 = 0.0f;
+                real sum_G4 = 0.0f;
                 for (int c = 0; c < 3; c++) {
-                    float factor = (a == c ? 1.0f : 0.0f) - 2.0f * nn[a*3+c] / n_sq;
+                    real factor = (a == c ? 1.0f : 0.0f) - 2.0f * nn[a*3+c] / n_sq;
                     sum_G4 += factor * dn_dp[j][c*3+b];
                 }
-                float term2_G4 = -(b2_norm / n_sq) * sum_G4;
+                real term2_G4 = -(b2_norm / n_sq) * sum_G4;
 
                 dG4_dp[j][idx] = term1_G4 + term2_G4;
             }
@@ -760,7 +715,7 @@ __device__ void computeDihedralHessian(
     }
 
     // Coefficient derivatives
-    float dc1_dp[4][3], dc4_dp[4][3], dd1_dp[4][3], dd4_dp[4][3];
+    real dc1_dp[4][3], dc4_dp[4][3], dd1_dp[4][3], dd4_dp[4][3];
 
     for (int j = 0; j < 4; j++) {
         for (int i = 0; i < 3; i++) {
@@ -781,10 +736,10 @@ __device__ void computeDihedralHessian(
     // Compute dG2/dpj and dG3/dpj
     // G2 = c1*G1 + c4*G4
     // dG2/dpj = outer(G1, dc1/dpj) + c1*dG1/dpj + outer(G4, dc4/dpj) + c4*dG4/dpj
-    float G1v[3] = {G1.x, G1.y, G1.z};
-    float G4v[3] = {G4.x, G4.y, G4.z};
+    real G1v[3] = {G1.x, G1.y, G1.z};
+    real G4v[3] = {G4.x, G4.y, G4.z};
 
-    float dG2_dp[4][9], dG3_dp[4][9];
+    real dG2_dp[4][9], dG3_dp[4][9];
 
     for (int j = 0; j < 4; j++) {
         for (int a = 0; a < 3; a++) {
@@ -804,12 +759,9 @@ __device__ void computeDihedralHessian(
 
     // Assemble full 12x12 Hessian
     // H[3*i:3*i+3, 3*j:3*j+3] = dGi/dpj
-    float* dG_dp[4] = {dG1_dp[0], dG2_dp[0], dG3_dp[0], dG4_dp[0]};
-
-    // We need to use the arrays properly
     for (int i = 0; i < 4; i++) {  // gradient block (atom i)
         for (int j = 0; j < 4; j++) {  // derivative with respect to atom j
-            float* dGi_dpj;
+            real* dGi_dpj;
             if (i == 0) dGi_dpj = dG1_dp[j];
             else if (i == 1) dGi_dpj = dG2_dp[j];
             else if (i == 2) dGi_dpj = dG3_dp[j];
@@ -826,18 +778,10 @@ __device__ void computeDihedralHessian(
     // Symmetrize
     for (int i = 0; i < 12; i++) {
         for (int j = i + 1; j < 12; j++) {
-            float avg = 0.5f * (hess[i * 12 + j] + hess[j * 12 + i]);
+            real avg = 0.5f * (hess[i * 12 + j] + hess[j * 12 + i]);
             hess[i * 12 + j] = avg;
             hess[j * 12 + i] = avg;
         }
-    }
-
-    // DEBUG: Set known values to verify write is working
-    if (debug) {
-        // Print some computed values
-        printf("DEBUG H_phi final: hess[0]=%f, max_dG1=%f\n", hess[0], dG1_dp[0][0]);
-        // Overwrite to verify writes work
-        hess[143] = 12345.0f;  // Sentinel value
     }
 }
 
@@ -854,41 +798,23 @@ __device__ void computeDihedralHessian(
  * @param hess            Output: 12x12 Hessian matrix (kJ/mol/nm^2)
  */
 __device__ void computeTorsionHessian(
-    float3 p1, float3 p2, float3 p3, float3 p4,
-    float k, int n, float phi0,
-    float* hess,  // 144 floats
-    bool debug = false
+    real3 p1, real3 p2, real3 p3, real3 p4,
+    real k, int n, real phi0,
+    real* hess  // 144 entries
 ) {
     // Get dihedral angle and gradient
-    float phi;
-    float grad[12];
+    real phi;
+    real grad[12];
     computeDihedralAndGradient(p1, p2, p3, p4, phi, grad);
 
-    if (debug) {
-        printf("DEBUG computeTorsionHessian:\n");
-        printf("  phi = %f rad, k = %f, n = %d, phi0 = %f\n", phi, k, n, phi0);
-        printf("  grad[0-2] = [%f, %f, %f]\n", grad[0], grad[1], grad[2]);
-    }
-
     // Get dihedral Hessian
-    float H_phi[144];
-    computeDihedralHessian(p1, p2, p3, p4, H_phi, debug);
-
-    if (debug) {
-        printf("  H_phi[0,0] = %f, H_phi[0,2] = %f, H_phi[2,2] = %f\n",
-               H_phi[0], H_phi[2], H_phi[2*12+2]);
-        printf("  H_phi max = %f\n", H_phi[0]);
-        float max_hphi = 0.0f;
-        for (int i = 0; i < 144; i++) {
-            if (fabsf(H_phi[i]) > max_hphi) max_hphi = fabsf(H_phi[i]);
-        }
-        printf("  H_phi actual max = %f\n", max_hphi);
-    }
+    real H_phi[144];
+    computeDihedralHessian(p1, p2, p3, p4, H_phi);
 
     // Energy derivatives
-    float arg = n * phi - phi0;
-    float dE_dphi = -k * n * sinf(arg);
-    float d2E_dphi2 = -k * n * n * cosf(arg);
+    real arg = n * phi - phi0;
+    real dE_dphi = -k * n * sin(arg);
+    real d2E_dphi2 = -k * n * n * cos(arg);
 
     // Full Hessian via chain rule
     // H = d2E_dphi2 * outer(grad, grad) + dE_dphi * H_phi
@@ -896,11 +822,6 @@ __device__ void computeTorsionHessian(
         for (int j = 0; j < 12; j++) {
             hess[i * 12 + j] = d2E_dphi2 * grad[i] * grad[j] + dE_dphi * H_phi[i * 12 + j];
         }
-    }
-
-    if (debug) {
-        printf("DEBUG torsion: H_phi[0]=%f, H_phi[143]=%f, dE_dphi=%f\n", H_phi[0], H_phi[143], dE_dphi);
-        printf("DEBUG torsion: hess[0]=%f (should include H_phi contrib)\n", hess[0]);
     }
 }
 
@@ -939,23 +860,19 @@ extern "C" __global__ void computeTorsionHessians(
     real4 pos3 = posq[i3];
     real4 pos4 = posq[i4];
 
-    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
-    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
-    float3 p3 = make_float3(pos3.x, pos3.y, pos3.z);
-    float3 p4 = make_float3(pos4.x, pos4.y, pos4.z);
+    real3 p1 = make_real3(pos1.x, pos1.y, pos1.z);
+    real3 p2 = make_real3(pos2.x, pos2.y, pos2.z);
+    real3 p3 = make_real3(pos3.x, pos3.y, pos3.z);
+    real3 p4 = make_real3(pos4.x, pos4.y, pos4.z);
 
     // Load parameters
     int n = (int)torsionParams[torsionIdx * 3 + 0];
-    float k = torsionParams[torsionIdx * 3 + 1];
-    float phi0 = torsionParams[torsionIdx * 3 + 2];
+    real k = torsionParams[torsionIdx * 3 + 1];
+    real phi0 = torsionParams[torsionIdx * 3 + 2];
 
     // Compute torsion Hessian
-    float localHess[144];
-    bool debug = true;  // ALWAYS debug for now
-    computeTorsionHessian(p1, p2, p3, p4, k, n, phi0, localHess, debug);
-
-    // Force sentinel unconditionally
-    localHess[143] = 99999.0f;
+    real localHess[144];
+    computeTorsionHessian(p1, p2, p3, p4, k, n, phi0, localHess);
 
     // Map local indices (0-3) to global atom indices
     int atomIndices[4] = {i1, i2, i3, i4};
@@ -974,7 +891,7 @@ extern "C" __global__ void computeTorsionHessians(
                     int localRow = localI * 3 + di;
                     int localCol = localJ * 3 + dj;
 
-                    float val = localHess[localRow * 12 + localCol];
+                    real val = localHess[localRow * 12 + localCol];
                     atomicAdd(&globalHessian[globalRow * stride + globalCol],
                               static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
@@ -1018,15 +935,16 @@ extern "C" __global__ void computeDihedralHessianBlocks(
     real4 pos3 = posq[i3];
     real4 pos4 = posq[i4];
 
-    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
-    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
-    float3 p3 = make_float3(pos3.x, pos3.y, pos3.z);
-    float3 p4 = make_float3(pos4.x, pos4.y, pos4.z);
+    real3 p1 = make_real3(pos1.x, pos1.y, pos1.z);
+    real3 p2 = make_real3(pos2.x, pos2.y, pos2.z);
+    real3 p3 = make_real3(pos3.x, pos3.y, pos3.z);
+    real3 p4 = make_real3(pos4.x, pos4.y, pos4.z);
 
     // Output H_phi directly
-    float* output = &dihedralHessians[torsionIdx * 144];
-    bool debug = (torsionIdx == 0);
-    computeDihedralHessian(p1, p2, p3, p4, output, debug);
+    real localHess[144];
+    computeDihedralHessian(p1, p2, p3, p4, localHess);
+    for (int i = 0; i < 144; i++)
+        dihedralHessians[torsionIdx * 144 + i] = (float)localHess[i];
 }
 
 extern "C" __global__ void computeTorsionHessianBlocks(
@@ -1051,19 +969,21 @@ extern "C" __global__ void computeTorsionHessianBlocks(
     real4 pos3 = posq[i3];
     real4 pos4 = posq[i4];
 
-    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
-    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
-    float3 p3 = make_float3(pos3.x, pos3.y, pos3.z);
-    float3 p4 = make_float3(pos4.x, pos4.y, pos4.z);
+    real3 p1 = make_real3(pos1.x, pos1.y, pos1.z);
+    real3 p2 = make_real3(pos2.x, pos2.y, pos2.z);
+    real3 p3 = make_real3(pos3.x, pos3.y, pos3.z);
+    real3 p4 = make_real3(pos4.x, pos4.y, pos4.z);
 
     // Load parameters
     int n = (int)torsionParams[torsionIdx * 3 + 0];
-    float k = torsionParams[torsionIdx * 3 + 1];
-    float phi0 = torsionParams[torsionIdx * 3 + 2];
+    real k = torsionParams[torsionIdx * 3 + 1];
+    real phi0 = torsionParams[torsionIdx * 3 + 2];
 
     // Compute torsion Hessian
-    float* output = &torsionHessians[torsionIdx * 144];
-    computeTorsionHessian(p1, p2, p3, p4, k, n, phi0, output);
+    real localHess[144];
+    computeTorsionHessian(p1, p2, p3, p4, k, n, phi0, localHess);
+    for (int i = 0; i < 144; i++)
+        torsionHessians[torsionIdx * 144 + i] = (float)localHess[i];
 }
 
 // ============================================================
@@ -1085,33 +1005,33 @@ extern "C" __global__ void computeTorsionHessianBlocks(
  * @param hess        Output: 6x6 Hessian matrix (row-major)
  */
 __device__ void computeNonbondedPairHessian(
-    float3 p1, float3 p2,
-    float q1, float q2,
-    float sigma, float epsilon,
-    float* hess  // 36 floats
+    real3 p1, real3 p2,
+    real q1, real q2,
+    real sigma, real epsilon,
+    real* hess  // 36 entries
 ) {
     // Initialize to zero
     for (int i = 0; i < 36; i++) hess[i] = 0.0f;
 
-    float3 r_vec = sub(p2, p1);
-    float r2 = length_sq(r_vec);
-    float r = sqrtf(r2);
+    real3 r_vec = sub(p2, p1);
+    real r2 = length_sq(r_vec);
+    real r = sqrt(r2);
 
     if (r < 1e-10f) return;
 
-    float3 r_hat = scale(r_vec, 1.0f / r);
+    real3 r_hat = scale(r_vec, 1.0f / r);
 
     // LJ potential: V_LJ = 4*eps*((sigma/r)^12 - (sigma/r)^6)
     // Let x = sigma/r, then V_LJ = 4*eps*(x^12 - x^6)
-    float x = sigma / r;
-    float x2 = x * x;
-    float x6 = x2 * x2 * x2;
-    float x12 = x6 * x6;
+    real x = sigma / r;
+    real x2 = x * x;
+    real x6 = x2 * x2 * x2;
+    real x12 = x6 * x6;
 
     // dV_LJ/dr = 4*eps*(-12*sigma^12/r^13 + 6*sigma^6/r^7)
     //          = 4*eps*(6*x^6/r - 12*x^12/r)
     //          = (24*eps/r)*(x^6 - 2*x^12)
-    float dV_LJ_dr = (24.0f * epsilon / r) * (x6 - 2.0f * x12);
+    real dV_LJ_dr = (24.0f * epsilon / r) * (x6 - 2.0f * x12);
 
     // d²V_LJ/dr² = 4*eps*(12*13*sigma^12/r^14 - 6*7*sigma^6/r^8)
     //            = 4*eps*(156*x^12/r^2 - 42*x^6/r^2)
@@ -1123,22 +1043,22 @@ __device__ void computeNonbondedPairHessian(
     //   = 24*eps/r^2 * [-x^6 + 2*x^12 + 12*x^12 - 6*x^6]
     //   = 24*eps/r^2 * [14*x^12 - 7*x^6]
     //   = (24*eps/r^2) * 7 * (2*x^12 - x^6)
-    float d2V_LJ_dr2 = (24.0f * epsilon / r2) * 7.0f * (2.0f * x12 - x6);
+    real d2V_LJ_dr2 = (24.0f * epsilon / r2) * 7.0f * (2.0f * x12 - x6);
 
     // Coulomb potential: V_C = q1*q2*ONE_4PI_EPS0/r
     // dV_C/dr = -q1*q2*ONE_4PI_EPS0/r^2
     // d²V_C/dr² = 2*q1*q2*ONE_4PI_EPS0/r^3
-    float qq = q1 * q2 * ONE_4PI_EPS0;
-    float dV_C_dr = -qq / r2;
-    float d2V_C_dr2 = 2.0f * qq / (r2 * r);
+    real qq = q1 * q2 * ONE_4PI_EPS0;
+    real dV_C_dr = -qq / r2;
+    real d2V_C_dr2 = 2.0f * qq / (r2 * r);
 
     // Total derivatives
-    float dV_dr = dV_LJ_dr + dV_C_dr;
-    float d2V_dr2 = d2V_LJ_dr2 + d2V_C_dr2;
+    real dV_dr = dV_LJ_dr + dV_C_dr;
+    real d2V_dr2 = d2V_LJ_dr2 + d2V_C_dr2;
 
     // Outer product r_hat ⊗ r_hat
-    float rr[9];
-    float rv[3] = {r_hat.x, r_hat.y, r_hat.z};
+    real rr[9];
+    real rv[3] = {r_hat.x, r_hat.y, r_hat.z};
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
             rr[i*3+j] = rv[i] * rv[j];
@@ -1146,11 +1066,11 @@ __device__ void computeNonbondedPairHessian(
     }
 
     // d²V/dr1² = d²V/dr² * rr + (dV/dr)/r * (I - rr)
-    float dV_dr_over_r = dV_dr / r;
-    float block[9];
+    real dV_dr_over_r = dV_dr / r;
+    real block[9];
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
-            float I_ij = (i == j) ? 1.0f : 0.0f;
+            real I_ij = (i == j) ? 1.0f : 0.0f;
             block[i*3+j] = d2V_dr2 * rr[i*3+j] + dV_dr_over_r * (I_ij - rr[i*3+j]);
         }
     }
@@ -1188,15 +1108,15 @@ extern "C" __global__ void computeNonbondedPairHessians(
     real4 pos1 = posq[i1];
     real4 pos2 = posq[i2];
 
-    float3 p1 = make_float3(pos1.x, pos1.y, pos1.z);
-    float3 p2 = make_float3(pos2.x, pos2.y, pos2.z);
-    float q1 = pos1.w;  // charge stored in w component
-    float q2 = pos2.w;
+    real3 p1 = make_real3(pos1.x, pos1.y, pos1.z);
+    real3 p2 = make_real3(pos2.x, pos2.y, pos2.z);
+    real q1 = pos1.w;  // charge stored in w component
+    real q2 = pos2.w;
 
-    float sigma = pairParams[pairIdx * 2 + 0];
-    float epsilon = pairParams[pairIdx * 2 + 1];
+    real sigma = pairParams[pairIdx * 2 + 0];
+    real epsilon = pairParams[pairIdx * 2 + 1];
 
-    float localHess[36];
+    real localHess[36];
     computeNonbondedPairHessian(p1, p2, q1, q2, sigma, epsilon, localHess);
 
     // Accumulate into global Hessian using fixed-point for determinism
@@ -1215,7 +1135,7 @@ extern "C" __global__ void computeNonbondedPairHessians(
                     int localRow = localI * 3 + di;
                     int localCol = localJ * 3 + dj;
 
-                    float val = localHess[localRow * 6 + localCol];
+                    real val = localHess[localRow * 6 + localCol];
                     atomicAdd(&globalHessian[globalRow * stride + globalCol],
                               static_cast<unsigned long long>(static_cast<long long>(val * HESSIAN_SCALE)));
                 }
