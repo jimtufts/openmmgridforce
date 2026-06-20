@@ -385,10 +385,7 @@ __device__ void triquinticInterpolateTiled(
     };
 
     // Gather derivatives in DERIVATIVE-MAJOR layout: X[deriv_idx * 8 + corner_idx]
-    // PROTOTYPE(precision): assemble coefficients + evaluate in double. The fp32
-    // 216-term solve makes adjacent cells disagree at shared faces by ~kJ/mol/nm
-    // in force (breaks L-BFGS); double assembly restores C2 even with fp32-stored
-    // derivatives. See DESIGN_PRECISION_SELECTION.md / Tier 3.
+    // Assemble and evaluate in double (fp32 solve is C2-discontinuous across cells).
     double X[216];
     if (invPowerMode == 1 && invPower != 0.0f) {
         // RUNTIME mode: transform all 27 derivatives per corner

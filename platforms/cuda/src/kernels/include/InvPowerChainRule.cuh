@@ -9,61 +9,62 @@
 #ifndef OPENMM_GRIDFORCE_INVPOWER_CHAIN_RULE_H_
 #define OPENMM_GRIDFORCE_INVPOWER_CHAIN_RULE_H_
 
+template<typename T>
 __device__ inline void applyInvPowerChainRule(
-    const float U_derivs[27],  // Input: derivatives of U
-    float p,                   // Power parameter (1/invPower)
-    float V_derivs[27]         // Output: derivatives of V = U^p
+    const T U_derivs[27],  // Input: derivatives of U
+    T p,                   // Power parameter (1/invPower)
+    T V_derivs[27]         // Output: derivatives of V = U^p
 ) {
     // Extract energy - handle sign and magnitude separately
-    float U = U_derivs[0];
-    float sign_U = (U >= 0.0f) ? 1.0f : -1.0f;
-    float absU = fabsf(U);
-    if (absU < 1e-10f) absU = 1e-10f;  // Clamp magnitude only, preserves sign
+    T U = U_derivs[0];
+    T sign_U = (U >= 0.0f) ? 1.0f : -1.0f;
+    T absU = fabs(U);
+    if (absU < (T)1e-10) absU = (T)1e-10;  // Clamp magnitude only, preserves sign
 
     // Extract first derivatives (can be positive or negative - that's fine)
-    float dUdx = U_derivs[1];
-    float dUdy = U_derivs[2];
-    float dUdz = U_derivs[3];
+    T dUdx = U_derivs[1];
+    T dUdy = U_derivs[2];
+    T dUdz = U_derivs[3];
 
     // Extract second derivatives
-    float d2Udxx = U_derivs[4];
-    float d2Udxy = U_derivs[5];
-    float d2Udxz = U_derivs[6];
-    float d2Udyy = U_derivs[7];
-    float d2Udyz = U_derivs[8];
-    float d2Udzz = U_derivs[9];
+    T d2Udxx = U_derivs[4];
+    T d2Udxy = U_derivs[5];
+    T d2Udxz = U_derivs[6];
+    T d2Udyy = U_derivs[7];
+    T d2Udyz = U_derivs[8];
+    T d2Udzz = U_derivs[9];
 
     // Extract third derivatives
-    float d3Uxxy = U_derivs[10];
-    float d3Uxxz = U_derivs[11];
-    float d3Uxyy = U_derivs[12];
-    float d3Uxyz = U_derivs[13];
-    float d3Uyyz = U_derivs[14];
-    float d3Uxzz = U_derivs[15];
-    float d3Uyzz = U_derivs[16];
+    T d3Uxxy = U_derivs[10];
+    T d3Uxxz = U_derivs[11];
+    T d3Uxyy = U_derivs[12];
+    T d3Uxyz = U_derivs[13];
+    T d3Uyyz = U_derivs[14];
+    T d3Uxzz = U_derivs[15];
+    T d3Uyzz = U_derivs[16];
 
     // Precompute powers of |U| (always positive, safe for fractional powers)
-    float absU_p = powf(absU, p);
-    float absU_pm1 = powf(absU, p - 1.0f);
-    float absU_pm2 = powf(absU, p - 2.0f);
-    float absU_pm3 = powf(absU, p - 3.0f);
-    float absU_pm4 = powf(absU, p - 4.0f);
-    float absU_pm5 = powf(absU, p - 5.0f);
-    float absU_pm6 = powf(absU, p - 6.0f);
+    T absU_p = pow(absU, p);
+    T absU_pm1 = pow(absU, p - 1.0f);
+    T absU_pm2 = pow(absU, p - 2.0f);
+    T absU_pm3 = pow(absU, p - 3.0f);
+    T absU_pm4 = pow(absU, p - 4.0f);
+    T absU_pm5 = pow(absU, p - 5.0f);
+    T absU_pm6 = pow(absU, p - 6.0f);
 
     // 0: Energy - V = sign(U) · |U|^p
     V_derivs[0] = sign_U * absU_p;
 
     // 1-3: First derivatives - ∂V/∂x = p · |U|^(p-1) · ∂U/∂x
-    float f1 = p * absU_pm1;
+    T f1 = p * absU_pm1;
     V_derivs[1] = f1 * dUdx;
     V_derivs[2] = f1 * dUdy;
     V_derivs[3] = f1 * dUdz;
 
     // 4-9: Second derivatives
     // ∂²V/∂x² = p(p-1)|U|^(p-2)(∂U/∂x)² + p|U|^(p-1)∂²U/∂x²
-    float f2_1 = p * (p - 1.0f) * absU_pm2;
-    float f2_2 = p * absU_pm1;
+    T f2_1 = p * (p - 1.0f) * absU_pm2;
+    T f2_2 = p * absU_pm1;
     V_derivs[4] = f2_1 * dUdx * dUdx + f2_2 * d2Udxx;
     V_derivs[5] = f2_1 * dUdx * dUdy + f2_2 * d2Udxy;
     V_derivs[6] = f2_1 * dUdx * dUdz + f2_2 * d2Udxz;
@@ -73,9 +74,9 @@ __device__ inline void applyInvPowerChainRule(
 
     // 10-16: Third derivatives
     // Using exact formula: ∂³V = p*(p-1)*(p-2)*|U|^(p-3)*(∂U)³ + mixed terms + p*|U|^(p-1)*∂³U
-    float f3_1 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
-    float f3_2 = p * (p - 1.0f) * absU_pm2;
-    float f3_3 = p * absU_pm1;
+    T f3_1 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    T f3_2 = p * (p - 1.0f) * absU_pm2;
+    T f3_3 = p * absU_pm1;
 
     V_derivs[10] = f3_1*dUdx*dUdx*dUdy + f3_2*(2.0f*dUdx*d2Udxy + dUdy*d2Udxx) + f3_3*d3Uxxy;
     V_derivs[11] = f3_1*dUdx*dUdx*dUdz + f3_2*(2.0f*dUdx*d2Udxz + dUdz*d2Udxx) + f3_3*d3Uxxz;
@@ -87,10 +88,10 @@ __device__ inline void applyInvPowerChainRule(
 
     // 17-26: Fourth, fifth, and sixth derivatives
     // Using exact Faà di Bruno formula
-    float f4_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
-    float f4_2 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
-    float f4_3 = p * (p - 1.0f) * absU_pm2;
-    float f4_4 = p * absU_pm1;
+    T f4_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
+    T f4_2 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    T f4_3 = p * (p - 1.0f) * absU_pm2;
+    T f4_4 = p * absU_pm1;
 
     // ∂⁴V/∂x²∂y² (index 17)
     V_derivs[17] = f4_1*dUdx*dUdx*dUdy*dUdy
@@ -129,11 +130,11 @@ __device__ inline void applyInvPowerChainRule(
                  + f4_4*U_derivs[22];  // ∂⁴U/∂x∂y∂z²
 
     // 23-25: Fifth derivatives - CORRECTED: includes ALL five factor levels
-    float f5_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * absU_pm5;
-    float f5_2 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
-    float f5_3 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
-    float f5_4 = p * (p - 1.0f) * absU_pm2;
-    float f5_5 = p * absU_pm1;
+    T f5_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * absU_pm5;
+    T f5_2 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
+    T f5_3 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    T f5_4 = p * (p - 1.0f) * absU_pm2;
+    T f5_5 = p * absU_pm1;
 
     // ∂⁵V/∂x²∂y²∂z (index 23) - CORRECTED full formula
     V_derivs[23] = f5_1*dUdx*dUdx*dUdy*dUdy*dUdz
@@ -157,12 +158,12 @@ __device__ inline void applyInvPowerChainRule(
                  + f5_5*U_derivs[25];  // ∂⁵U/∂x∂y²∂z²
 
     // 26: Sixth derivative ∂⁶V/∂x²∂y²∂z² - CORRECTED: includes ALL six factor levels
-    float f6_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * (p - 5.0f) * absU_pm6;
-    float f6_2 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * absU_pm5;
-    float f6_3 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
-    float f6_4 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
-    float f6_5 = p * (p - 1.0f) * absU_pm2;
-    float f6_6 = p * absU_pm1;
+    T f6_1 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * (p - 5.0f) * absU_pm6;
+    T f6_2 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * (p - 4.0f) * absU_pm5;
+    T f6_3 = p * (p - 1.0f) * (p - 2.0f) * (p - 3.0f) * absU_pm4;
+    T f6_4 = p * (p - 1.0f) * (p - 2.0f) * absU_pm3;
+    T f6_5 = p * (p - 1.0f) * absU_pm2;
+    T f6_6 = p * absU_pm1;
 
     // CORRECTED full 6th derivative formula
     V_derivs[26] = f6_1*dUdx*dUdx*dUdy*dUdy*dUdz*dUdz

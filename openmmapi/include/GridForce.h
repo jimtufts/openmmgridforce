@@ -662,12 +662,11 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
     bool getComputeDerivatives() const;
 
     /**
-     * Enable double-precision storage of the grid derivatives on the GPU (Tier 3
-     * decoupled grid-storage precision). Default false (float storage). When true,
-     * the 27 derivatives per point are uploaded and read as double, removing the
-     * float-storage accuracy limit of the triquintic interpolation; the kernel's
-     * compute precision still follows the OpenMM context precision (real/mixed).
-     * Costs 2x derivative-grid VRAM. Currently applies to the non-tiled grid path.
+     * Enable double-precision storage of the grid derivatives on the GPU.
+     * Default false (float storage). When true, the 27 derivatives per point are
+     * generated, uploaded, and read as double, removing the float-storage accuracy
+     * limit of the triquintic interpolation. The kernel's compute precision still
+     * follows the OpenMM context precision. Costs 2x derivative-grid VRAM.
      */
     void setUseDoubleStorage(bool useDouble);
 
@@ -1288,7 +1287,7 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
 
     // Derivative storage for triquintic interpolation
     bool m_computeDerivatives;           // Whether to compute derivatives during grid generation
-    bool m_useDoubleStorage;             // Tier 3: store grid derivatives as double on the GPU
+    bool m_useDoubleStorage;             // Store grid derivatives as double on the GPU
     std::shared_ptr<std::vector<double>> m_derivatives;  // Shared derivatives [27, nx, ny, nz]
 
     // Particle filtering for multi-ligand evaluation

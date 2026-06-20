@@ -136,10 +136,6 @@ def main():
         gridf = gfp.GridForce()
         gridf.loadFromFile(grid_file)
         gridf.setInterpolationMethod(3)  # triquintic Hermite
-        _store = sys.argv[2] if len(sys.argv) > 2 else 'float'
-        if _store == 'double':
-            gridf.setUseDoubleStorage(True)
-        print(f"  (grid storage = {_store}, double={gridf.getUseDoubleStorage()})")
 
         derivs = np.array(gridf.getDerivatives(), dtype=np.float64)
         vals = np.array(gridf.getGridValues(), dtype=np.float64)
@@ -203,71 +199,6 @@ def main():
         E_plugin = st.getPotentialEnergy().value_in_unit(kilojoules_per_mole)
         F_plugin = np.array(st.getForces(asNumpy=True).value_in_unit(
             kilojoules_per_mole / nanometer))[0]
-
-        # ---- (A') in-process float-vs-double STORAGE delta (isolates storage axis) ----
-        def plugin_energy_force(store_double):
-            gf2 = gfp.GridForce()
-            gf2.loadFromFile(grid_file)
-            gf2.setInterpolationMethod(3)
-            gf2.setUseDoubleStorage(bool(store_double))
-            s2 = mm.System(); s2.addParticle(1.0)
-            gf2.addParticleGroup('charge', [0], [1.0])
-            s2.addForce(gf2)
-            c2 = Context(s2, VerletIntegrator(0.001), platform, {'Precision': _prec})
-            c2.setPositions([mm.Vec3(*probe)] * 1 * nanometer)
-            st2 = c2.getState(getEnergy=True, getForces=True)
-            e = st2.getPotentialEnergy().value_in_unit(kilojoules_per_mole)
-            f = np.array(st2.getForces(asNumpy=True).value_in_unit(
-                kilojoules_per_mole / nanometer))[0]
-            return e, f
-        E_f, F_f = plugin_energy_force(False)
-        E_d, F_d = plugin_energy_force(True)
-        print("\n=== (A') STORAGE AXIS: float-storage vs double-storage (same context) ===")
-        print(f"  E float-storage  = {E_f:.12e}")
-        print(f"  E double-storage = {E_d:.12e}")
-        print(f"  E |delta| = {abs(E_f - E_d):.3e}  (rel {abs(E_f-E_d)/max(1.0,abs(E_f)):.3e})")
-        print(f"  E double vs jax  = {abs(E_d - val_jax):.3e}  (float vs jax = {abs(E_f - val_jax):.3e})")
-        print(f"  F |delta| = {np.linalg.norm(F_f - F_d):.3e}")
-
-        # ---- (A'') DECISIVE: f64-only information survives double storage ----
-        # The auto-generated grid's derivatives are computed in fp32, so float and
-        # double storage carry identical bits (A' delta == 0). To prove the double
-        # path preserves sub-fp32 information, inject derivatives that are BIT-IDENTICAL
-        # in fp32 but differ in fp64: add 0.49*ulp_fp32 (rounds back to the same fp32
-        # value, but is a real ~3e-8 change in fp64). Float storage must reproduce the
-        # baseline force exactly; double storage must shift.
-        d0 = np.array(gridf.getDerivatives(), dtype=np.float64)
-        ulp32 = np.spacing(d0.astype(np.float32)).astype(np.float64)
-        sign = np.where((np.arange(d0.size) % 2) == 0, 1.0, -1.0)
-        d_pert = d0 + 0.49 * ulp32 * sign
-        f32_identical = np.array_equal(d0.astype(np.float32), d_pert.astype(np.float32))
-        print("\n=== (A'') f64-only info survives double storage (fixed-point force) ===")
-        print(f"  perturbation is fp32-invisible: {f32_identical}  "
-              f"(max |d_pert-d0|={np.abs(d_pert-d0).max():.2e})")
-
-        def force_with_pert_storage(store_double):
-            gf3 = gfp.GridForce()
-            gf3.loadFromFile(grid_file)
-            gf3.setInterpolationMethod(3)
-            gf3.setDerivatives(d_pert.tolist())
-            gf3.setUseDoubleStorage(bool(store_double))
-            s3 = mm.System(); s3.addParticle(1.0)
-            gf3.addParticleGroup('charge', [0], [1.0])
-            s3.addForce(gf3)
-            c3 = Context(s3, VerletIntegrator(0.001), platform, {'Precision': _prec})
-            c3.setPositions([mm.Vec3(*probe)] * 1 * nanometer)
-            return np.array(c3.getState(getForces=True).getForces(asNumpy=True).value_in_unit(
-                kilojoules_per_mole / nanometer))[0]
-
-        F_base = F_f  # unperturbed float-storage force (from A')
-        F_pert_float = force_with_pert_storage(False)
-        F_pert_double = force_with_pert_storage(True)
-        dfloat = np.linalg.norm(F_pert_float - F_base)
-        ddouble = np.linalg.norm(F_pert_double - F_base)
-        print(f"  |F_pert_float  - F_base| = {dfloat:.3e}  (expect ~0: fp32 drops perturbation)")
-        print(f"  |F_pert_double - F_base| = {ddouble:.3e}  (expect >0: fp64 keeps perturbation)")
-        decisive = (dfloat < 1e-9) and (ddouble > 1e-7)
-        print(f"  => DOUBLE STORAGE {'CARRIES f64 (PASS)' if decisive else 'no measurable f64 effect (CHECK)'}")
 
         print("\n=== (A) FIDELITY: plugin vs JAX (f64) reconstruction, same stored corners ===")
         de = abs(E_plugin - val_jax)

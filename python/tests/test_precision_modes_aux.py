@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Tier 1 validation for the remaining kernels: confirm GBSA, bonded, and isolated-
-nonbonded Hessians compile (NVRTC) and produce correct results in single vs double
-precision contexts (they read posq, which is float4 in single and double4 in double).
+Confirm GBSA, bonded, and isolated-nonbonded Hessians compile (NVRTC) and produce
+correct results in single vs double precision contexts (posq is float4 in single
+and double4 in double).
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

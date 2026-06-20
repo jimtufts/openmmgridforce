@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """
-Tier 1 validation: does the grid force compute correctly when the OpenMM context
-uses 'double' precision? The kernels read posq as float4, but cu.getPosq() is a
-double4 buffer in double precision -- so a double context reads garbage positions.
-This compares grid energy/force across single / mixed / double precision contexts;
-they should agree to ~fp32 (single/mixed) and be CLOSE (double). Large disagreement
-in double => the latent posq element-size bug.
+Does the grid force compute correctly when the OpenMM context uses 'double'
+precision? cu.getPosq() is a double4 buffer in double precision, so the kernels
+must read posq as real4, not float4. This compares grid energy/force across
+single / mixed / double precision contexts; they should agree to ~fp32
+(single/mixed) and be close (double).
 """
 import os, sys, tempfile
 import numpy as np

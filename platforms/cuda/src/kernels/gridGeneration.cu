@@ -22,7 +22,7 @@
  *   [26]     = 1 sixth derivative
  */
 extern "C" __global__ void generateGridWithAnalyticalDerivatives(
-    float* __restrict__ gridData,           // Output: 27 values per grid point
+    GRID_STORAGE_TYPE* __restrict__ gridData,           // Output: 27 values per grid point
     const float3* __restrict__ receptorPositions,
     const float* __restrict__ receptorCharges,
     const float* __restrict__ receptorSigmas,
@@ -57,17 +57,20 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
     const int j = remainder / gridCounts[2];
     const int k = remainder % gridCounts[2];
 
+    // Accumulate in the grid-storage precision (double when GRID_STORAGE_TYPE=double).
+    typedef GRID_STORAGE_TYPE GenT;
+
     // Calculate grid point position (in nm)
-    const float gridPos[3] = {
-        originX + i * gridSpacing[0],
-        originY + j * gridSpacing[1],
-        originZ + k * gridSpacing[2]
+    const GenT gridPos[3] = {
+        (GenT)originX + i * (GenT)gridSpacing[0],
+        (GenT)originY + j * (GenT)gridSpacing[1],
+        (GenT)originZ + k * (GenT)gridSpacing[2]
     };
 
     // Initialize accumulator for 27 Cartesian derivatives
-    float cartesian_derivs[27];
+    GenT cartesian_derivs[27];
     for (int idx = 0; idx < 27; idx++) {
-        cartesian_derivs[idx] = 0.0f;
+        cartesian_derivs[idx] = (GenT)0;
     }
 
     // Loop over all receptor atoms and accumulate contributions
@@ -76,38 +79,38 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
         float3 atomPos = receptorPositions[atomIdx];
 
         // Calculate displacement vector: dr = grid_point - atom_position
-        float dr[3] = {
-            gridPos[0] - atomPos.x,
-            gridPos[1] - atomPos.y,
-            gridPos[2] - atomPos.z
+        GenT dr[3] = {
+            gridPos[0] - (GenT)atomPos.x,
+            gridPos[1] - (GenT)atomPos.y,
+            gridPos[2] - (GenT)atomPos.z
         };
 
         // Calculate r²
-        float r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2];
+        GenT r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2];
 
         // Avoid singularities at very small distances
         // Use r_min = 0.02 nm (0.2 Å) to prevent overflow in r^-12 terms
-        const float r2_min = 0.0004f;  // (0.02 nm)^2
+        const GenT r2_min = (GenT)0.0004;  // (0.02 nm)^2
         if (r2 < r2_min) {
             r2 = r2_min;
         }
 
         // Compute 7 radial derivatives based on grid type
-        float radial_derivs[7];
+        GenT radial_derivs[7];
 
         if (gridType == 0) {
             // Charge grid: U = k * q / r
-            float charge = receptorCharges[atomIdx];
+            GenT charge = (GenT)receptorCharges[atomIdx];
             computeCoulombRadialDerivatives(r2, charge, radial_derivs);
         } else if (gridType == 1) {
             // LJ repulsion: U = sqrt(epsilon) * Rmin^6 / r^12
-            float epsilon = receptorEpsilons[atomIdx];
-            float sigma = receptorSigmas[atomIdx];
+            GenT epsilon = (GenT)receptorEpsilons[atomIdx];
+            GenT sigma = (GenT)receptorSigmas[atomIdx];
             computeGeometricLJRepulsionRadialDerivatives(r2, epsilon, sigma, radial_derivs);
         } else if (gridType == 2) {
             // LJ attraction: U = -2 * sqrt(epsilon) * Rmin^3 / r^6
-            float epsilon = receptorEpsilons[atomIdx];
-            float sigma = receptorSigmas[atomIdx];
+            GenT epsilon = (GenT)receptorEpsilons[atomIdx];
+            GenT sigma = (GenT)receptorSigmas[atomIdx];
             computeGeometricLJAttractionRadialDerivatives(r2, epsilon, sigma, radial_derivs);
         }
 
@@ -117,8 +120,8 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
 
     // Apply exact tanh capping using Faà di Bruno formula
     // This properly computes all 27 derivatives of V = U_max * tanh(U/U_max)
-    float capped_derivs[27];
-    applyTanhChainRule(cartesian_derivs, gridCap, capped_derivs);
+    GenT capped_derivs[27];
+    applyTanhChainRule(cartesian_derivs, (GenT)gridCap, capped_derivs);
 
     // Copy capped values back
     for (int i = 0; i < 27; i++) {
@@ -130,8 +133,8 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
     // Transform U -> V = U^p where p = 1/invPower
     // Uses exact chain rule formulas for all 27 derivatives (see InvPowerChainRule.cuh)
     if (invPower != 0.0f && invPowerMode == 2) {  // 2 = STORED mode
-        float p = 1.0f / invPower;
-        float transformed_derivs[27];
+        GenT p = (GenT)1.0 / (GenT)invPower;
+        GenT transformed_derivs[27];
         applyInvPowerChainRule(cartesian_derivs, p, transformed_derivs);
 
         // Copy transformed values back
@@ -144,7 +147,7 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
     // Triquintic Hermite needs derivatives where s ∈ [0,1] within each cell
     // dU/dx_physical = dU/ds * (ds/dx_physical) = dU/ds * (1/gridSpacing)
     // So: dU/ds = dU/dx_physical * gridSpacing
-    const float dx = gridSpacing[0], dy = gridSpacing[1], dz = gridSpacing[2];
+    const GenT dx = (GenT)gridSpacing[0], dy = (GenT)gridSpacing[1], dz = (GenT)gridSpacing[2];
 
     // Scale first derivatives: ∂U/∂s = ∂U/∂x * Δx
     cartesian_derivs[1] *= dx;  // ∂U/∂x

@@ -134,6 +134,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // Store ligand atoms and derivative computation flag
     ligandAtoms = force.getLigandAtoms();
     computeDerivatives = force.getComputeDerivatives();
+    useDoubleStorage = force.getUseDoubleStorage();
 
     // Get filtered particle list (empty = all particles)
     particles = force.getParticles();
@@ -715,8 +716,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         const size_t storageElemSize = useDoubleStorage ? sizeof(double) : sizeof(float);
         size_t derivativesBytes = derivatives_vec.size() * storageElemSize;
 
-        // Upload derivatives in the configured grid-storage precision. Float storage
-        // down-converts the host double buffer; double storage uploads it verbatim.
+        // Upload derivatives as double, or down-convert the host buffer to float.
         auto uploadDerivatives = [&](std::shared_ptr<CudaArray>& arr) {
             if (useDoubleStorage) {
                 arr->initialize<double>(cu, derivatives_vec.size(), "gridDerivatives");
@@ -909,8 +909,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 #if DEBUG_GRIDFORCE
     defines["DEBUG_GRIDFORCE"] = "1";
 #endif
-    // Decoupled grid-storage precision (Tier 3). Only the non-tiled kernels read
-    // gridDerivatives as GRID_STORAGE_TYPE; the tiled path uses its own float buffers.
+    // Read grid derivatives as double. The tiled kernels use their own float buffers.
     if (force.getUseDoubleStorage() && !willUseTiledMode)
         defines["GRID_STORAGE_TYPE"] = "double";
     CUmodule module = cu.createModule(
@@ -2067,10 +2066,13 @@ void CudaCalcGridForceKernel::generateGrid(
     d_gridCounts.upload(gridCountsVec);
     d_gridSpacing.upload(gridSpacingVec);
 
-    // Get kernel module
+    // Generate the derivatives in double when double storage is enabled.
+    map<string, string> genDefines;
+    if (useDoubleStorage)
+        genDefines["GRID_STORAGE_TYPE"] = "double";
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
-        CudaGridForceKernelSources::gridGenerationKernel);
+        CudaGridForceKernelSources::gridGenerationKernel, genDefines);
 
     // Convert origin to float
     float originXf = (float)originX;
@@ -2091,8 +2093,8 @@ void CudaCalcGridForceKernel::generateGrid(
         // (receptor arrays, grid spacing, counts, and other OpenMM context data)
         size_t maxChunkBytes = (size_t)(freeMem * 0.5);
 
-        // Each grid point requires 27 floats for derivatives
-        size_t bytesPerPoint = 27 * sizeof(float);
+        // Each grid point requires 27 derivative values (double when double storage is on)
+        size_t bytesPerPoint = 27 * (useDoubleStorage ? sizeof(double) : sizeof(float));
         int maxPointsPerChunk = maxChunkBytes / bytesPerPoint;
 
         // Cap chunk size at 50 million points (~5.4 GB) for reasonable kernel times
@@ -2131,9 +2133,12 @@ void CudaCalcGridForceKernel::generateGrid(
                           << " (points " << chunkOffset << " to " << (chunkOffset + chunkSize - 1) << ")" << std::endl;
             }
 
-            // Allocate GPU buffer for this chunk
+            // Allocate this chunk's buffer in the storage precision.
             CudaArray gridDataGPU;
-            gridDataGPU.initialize<float>(cu, 27 * chunkSize, "gridDataChunk");
+            if (useDoubleStorage)
+                gridDataGPU.initialize<double>(cu, 27 * chunkSize, "gridDataChunk");
+            else
+                gridDataGPU.initialize<float>(cu, 27 * chunkSize, "gridDataChunk");
 
             int gridSizeKernel = (chunkSize + blockSize - 1) / blockSize;
 
@@ -2174,9 +2179,17 @@ void CudaCalcGridForceKernel::generateGrid(
             // Synchronize
             cuStreamSynchronize(cu.getCurrentStream());
 
-            // Download chunk data
-            vector<float> chunkDataFloat(27 * chunkSize);
-            gridDataGPU.download(chunkDataFloat);
+            // Download chunk data (in the storage precision) and scatter into the
+            // final double derivative array.
+            vector<double> chunkDataDouble;
+            vector<float> chunkDataFloat;
+            if (useDoubleStorage) {
+                chunkDataDouble.resize(27 * chunkSize);
+                gridDataGPU.download(chunkDataDouble);
+            } else {
+                chunkDataFloat.resize(27 * chunkSize);
+                gridDataGPU.download(chunkDataFloat);
+            }
 
             // Copy chunk data to final arrays
             // Layout in chunk: [deriv_idx * chunkSize + localIdx]
@@ -2187,7 +2200,8 @@ void CudaCalcGridForceKernel::generateGrid(
                     size_t globalIdx = (size_t)chunkOffset + localIdx;
                     size_t finalIdx = (size_t)derivIdx * totalPoints + globalIdx;
                     size_t chunkIdx = (size_t)derivIdx * chunkSize + localIdx;
-                    derivatives[finalIdx] = chunkDataFloat[chunkIdx];
+                    derivatives[finalIdx] = useDoubleStorage ? chunkDataDouble[chunkIdx]
+                                                             : (double)chunkDataFloat[chunkIdx];
                 }
             }
         }

@@ -182,11 +182,8 @@ extern "C" __global__ void computeGridHessian(
     pos.y = posOrig.y - originY;
     pos.z = posOrig.z - originZ;
 
-    // Initialize interpolated value, first derivatives, and Hessian components to zero
-    // PROTOTYPE(precision): the triquintic 216-coeff assembly + eval temporaries are
-    // done in double (that fp32 solve corrupts 2nd derivs ~1e5 and breaks cross-cell
-    // C2 -> "fake" non-PD). These accumulators stay float for the downstream chain-rule
-    // helpers; consistency is preserved (both cells run identical double->float ops).
+    // Accumulators stay float for the downstream chain-rule helpers (the triquintic
+    // assembly and eval temporaries are double).
     float interpolated = 0.0f;
     float dx = 0.0f, dy = 0.0f, dz = 0.0f;
     float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;

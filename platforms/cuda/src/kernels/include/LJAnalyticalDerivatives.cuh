@@ -16,23 +16,24 @@
  * Computes derivatives up to 6th order with respect to radial distance r.
  * Returns: derivs[0]=U, derivs[1]=dU/dr, derivs[2]=d2U/dr2, ..., derivs[6]=d6U/dr6
  */
+template<typename T>
 __device__ inline void computeLJRadialDerivatives(
-    float r2,
-    float epsilon,
-    float sigma,
-    float shift,
-    float* derivs
+    T r2,
+    T epsilon,
+    T sigma,
+    T shift,
+    T* derivs
 ) {
-    float arg1 = 4.0f * epsilon;
-    float arg2 = sigma * sigma;
-    float temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);  // (σ/r)^6
+    T arg1 = 4.0f * epsilon;
+    T arg2 = sigma * sigma;
+    T temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);  // (σ/r)^6
 
     // Need r for correct odd-power denominators
-    float r = sqrtf(r2);
-    float r3 = r2 * r;
-    float r4 = r2 * r2;
-    float r5 = r4 * r;
-    float r6 = r4 * r2;
+    T r = sqrt(r2);
+    T r3 = r2 * r;
+    T r4 = r2 * r2;
+    T r5 = r4 * r;
+    T r6 = r4 * r2;
 
     // Coefficients derived from d^n/dr^n of r^(-12) and r^(-6) terms:
     // d^n/dr^n(r^(-m)) = (-1)^n * m*(m+1)*...*(m+n-1) * r^(-m-n)
@@ -45,24 +46,25 @@ __device__ inline void computeLJRadialDerivatives(
     derivs[6] = arg1 * (8910720.0f * temp3 * temp3 - 332640.0f * temp3) / r6;
 }
 
+template<typename T>
 __device__ inline void computeLJRepulsionRadialDerivatives(
-    float r2,
-    float epsilon,
-    float sigma,
-    float cutoff2,
-    float* derivs
+    T r2,
+    T epsilon,
+    T sigma,
+    T cutoff2,
+    T* derivs
 ) {
-    float arg1 = 4.0f * epsilon;
-    float arg2 = sigma * sigma;
-    float temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);
-    float temp3_rc = (arg2 / cutoff2) * (arg2 / cutoff2) * (arg2 / cutoff2);
+    T arg1 = 4.0f * epsilon;
+    T arg2 = sigma * sigma;
+    T temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);
+    T temp3_rc = (arg2 / cutoff2) * (arg2 / cutoff2) * (arg2 / cutoff2);
 
     // Need r for correct odd-power denominators
-    float r = sqrtf(r2);
-    float r3 = r2 * r;
-    float r4 = r2 * r2;
-    float r5 = r4 * r;
-    float r6 = r4 * r2;
+    T r = sqrt(r2);
+    T r3 = r2 * r;
+    T r4 = r2 * r2;
+    T r5 = r4 * r;
+    T r6 = r4 * r2;
 
     // U = 4ε(σ/r)¹² with shift at cutoff
     // Coefficients: d^n/dr^n(r^(-12)) = (-1)^n × 12×13×...×(12+n-1) × r^(-12-n)
@@ -75,24 +77,25 @@ __device__ inline void computeLJRepulsionRadialDerivatives(
     derivs[6] = 8910720.0f * arg1 * temp3 * temp3 / r6;
 }
 
+template<typename T>
 __device__ inline void computeLJAttractionRadialDerivatives(
-    float r2,
-    float epsilon,
-    float sigma,
-    float cutoff2,
-    float* derivs
+    T r2,
+    T epsilon,
+    T sigma,
+    T cutoff2,
+    T* derivs
 ) {
-    float arg1 = 4.0f * epsilon;
-    float arg2 = sigma * sigma;
-    float temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);
-    float temp3_rc = (arg2 / cutoff2) * (arg2 / cutoff2) * (arg2 / cutoff2);
+    T arg1 = 4.0f * epsilon;
+    T arg2 = sigma * sigma;
+    T temp3 = (arg2 / r2) * (arg2 / r2) * (arg2 / r2);
+    T temp3_rc = (arg2 / cutoff2) * (arg2 / cutoff2) * (arg2 / cutoff2);
 
     // Need r for correct odd-power denominators
-    float r = sqrtf(r2);
-    float r3 = r2 * r;
-    float r4 = r2 * r2;
-    float r5 = r4 * r;
-    float r6 = r4 * r2;
+    T r = sqrt(r2);
+    T r3 = r2 * r;
+    T r4 = r2 * r2;
+    T r5 = r4 * r;
+    T r6 = r4 * r2;
 
     // U = 4ε(σ/r)⁶ with shift at cutoff (note: positive, not standard -4ε form)
     // Coefficients: d^n/dr^n(r^(-6)) = (-1)^n × 6×7×...×(6+n-1) × r^(-6-n)
@@ -111,23 +114,24 @@ __device__ inline void computeLJAttractionRadialDerivatives(
  *
  * Computes derivatives up to 6th order with respect to radial distance r.
  */
+template<typename T>
 __device__ inline void computeCoulombRadialDerivatives(
-    float r2,
-    float charge,
-    float* derivs
+    T r2,
+    T charge,
+    T* derivs
 ) {
-    const float COULOMB_CONST = 138.935456f;  // kJ·nm/(mol·e²)
+    const T COULOMB_CONST = 138.935456;  // kJ·nm/(mol·e²)
 
     // Compute r and powers needed
-    float r = sqrtf(r2);
-    float r2_val = r * r;     // r²
-    float r3 = r2_val * r;    // r³
-    float r4 = r2_val * r2_val; // r⁴
-    float r5 = r4 * r;        // r⁵
-    float r6 = r3 * r3;       // r⁶
-    float r7 = r6 * r;        // r⁷
+    T r = sqrt(r2);
+    T r2_val = r * r;     // r²
+    T r3 = r2_val * r;    // r³
+    T r4 = r2_val * r2_val; // r⁴
+    T r5 = r4 * r;        // r⁵
+    T r6 = r3 * r3;       // r⁶
+    T r7 = r6 * r;        // r⁷
 
-    float K = COULOMB_CONST * charge;
+    T K = COULOMB_CONST * charge;
 
     // Derivatives of U = K / r
     derivs[0] = K / r;              // U
@@ -146,34 +150,35 @@ __device__ inline void computeCoulombRadialDerivatives(
  *
  * Computes derivatives up to 6th order with respect to radial distance r.
  */
+template<typename T>
 __device__ inline void computeGeometricLJRepulsionRadialDerivatives(
-    float r2,
-    float epsilon,
-    float sigma,
-    float* derivs
+    T r2,
+    T epsilon,
+    T sigma,
+    T* derivs
 ) {
     // Compute r and powers needed
-    float r = sqrtf(r2);
-    float r3 = r2 * r;
-    float r6 = r3 * r3;
-    float r7 = r6 * r;
-    float r8 = r6 * r2;
-    float r9 = r8 * r;
-    float r10 = r8 * r2;
-    float r11 = r10 * r;
-    float r12 = r6 * r6;
-    float r13 = r12 * r;
-    float r14 = r12 * r2;
-    float r15 = r14 * r;
-    float r16 = r14 * r2;
-    float r17 = r16 * r;
-    float r18 = r16 * r2;
+    T r = sqrt(r2);
+    T r3 = r2 * r;
+    T r6 = r3 * r3;
+    T r7 = r6 * r;
+    T r8 = r6 * r2;
+    T r9 = r8 * r;
+    T r10 = r8 * r2;
+    T r11 = r10 * r;
+    T r12 = r6 * r6;
+    T r13 = r12 * r;
+    T r14 = r12 * r2;
+    T r15 = r14 * r;
+    T r16 = r14 * r2;
+    T r17 = r16 * r;
+    T r18 = r16 * r2;
 
     // Compute Rmin and K = sqrt(epsilon) * Rmin^6
-    float rmin = powf(2.0f, 1.0f/6.0f) * sigma;
-    float rmin3 = rmin * rmin * rmin;
-    float rmin6 = rmin3 * rmin3;
-    float K = sqrtf(epsilon) * rmin6;
+    T rmin = pow((T)2.0, (T)(1.0/6.0)) * sigma;
+    T rmin3 = rmin * rmin * rmin;
+    T rmin6 = rmin3 * rmin3;
+    T K = sqrt(epsilon) * rmin6;
 
     // Derivatives of U = K / r^12
     derivs[0] = K / r12;                    // U
@@ -192,27 +197,28 @@ __device__ inline void computeGeometricLJRepulsionRadialDerivatives(
  *
  * Computes derivatives up to 6th order with respect to radial distance r.
  */
+template<typename T>
 __device__ inline void computeGeometricLJAttractionRadialDerivatives(
-    float r2,
-    float epsilon,
-    float sigma,
-    float* derivs
+    T r2,
+    T epsilon,
+    T sigma,
+    T* derivs
 ) {
     // Compute r and powers needed
-    float r = sqrtf(r2);
-    float r3 = r2 * r;
-    float r6 = r3 * r3;
-    float r7 = r6 * r;
-    float r8 = r6 * r2;
-    float r9 = r8 * r;
-    float r10 = r8 * r2;
-    float r11 = r10 * r;
-    float r12 = r6 * r6;
+    T r = sqrt(r2);
+    T r3 = r2 * r;
+    T r6 = r3 * r3;
+    T r7 = r6 * r;
+    T r8 = r6 * r2;
+    T r9 = r8 * r;
+    T r10 = r8 * r2;
+    T r11 = r10 * r;
+    T r12 = r6 * r6;
 
     // Compute Rmin and K = -2 * sqrt(epsilon) * Rmin^3
-    float rmin = powf(2.0f, 1.0f/6.0f) * sigma;
-    float rmin3 = rmin * rmin * rmin;
-    float K = -2.0f * sqrtf(epsilon) * rmin3;
+    T rmin = pow((T)2.0, (T)(1.0/6.0)) * sigma;
+    T rmin3 = rmin * rmin * rmin;
+    T K = -2.0f * sqrt(epsilon) * rmin3;
 
     // Derivatives of U = K / r^6
     derivs[0] = K / r6;                     // U
@@ -234,8 +240,9 @@ __device__ inline void computeGeometricLJAttractionRadialDerivatives(
  *
  * Input/Output: derivs[7] = [U, dU/dr, d²U/dr², ..., d⁶U/dr⁶]
  */
-__device__ inline void applyCappingToDerivatives(float* derivs, float U_max) {
-    float u = derivs[0] / U_max;  // Scaled energy
+template<typename T>
+__device__ inline void applyCappingToDerivatives(T* derivs, T U_max) {
+    T u = derivs[0] / U_max;  // Scaled energy
 
     // Saturation regime: sech² underflows, return flat potential
     if (u > 20.0f) {
@@ -246,24 +253,24 @@ __device__ inline void applyCappingToDerivatives(float* derivs, float U_max) {
         return;
     }
 
-    float t = tanhf(u);
-    float s2 = 1.0f - t * t;  // sech²(u)
+    T t = tanh(u);
+    T s2 = 1.0f - t * t;  // sech²(u)
 
     // Scaled raw derivatives: u_n = (1/U_max)^n * d^n(U_raw)/dr^n
-    float u1 = derivs[1] / U_max;
-    float u2 = derivs[2] / U_max;
-    float u3 = derivs[3] / U_max;
-    float u4 = derivs[4] / U_max;
-    float u5 = derivs[5] / U_max;
-    float u6 = derivs[6] / U_max;
+    T u1 = derivs[1] / U_max;
+    T u2 = derivs[2] / U_max;
+    T u3 = derivs[3] / U_max;
+    T u4 = derivs[4] / U_max;
+    T u5 = derivs[5] / U_max;
+    T u6 = derivs[6] / U_max;
 
     // Derivatives of tanh(u) w.r.t. u (pre-multiplied by sech²)
-    float dt1 = s2;
-    float dt2 = -2.0f * s2 * t;
-    float dt3 = 2.0f * s2 * (3.0f * t*t - 1.0f);
-    float dt4 = -8.0f * s2 * t * (3.0f * t*t - 2.0f);
-    float dt5 = 8.0f * s2 * (15.0f * t*t*t*t - 15.0f * t*t + 2.0f);
-    float dt6 = -16.0f * s2 * t * (45.0f * t*t*t*t - 60.0f * t*t + 17.0f);
+    T dt1 = s2;
+    T dt2 = -2.0f * s2 * t;
+    T dt3 = 2.0f * s2 * (3.0f * t*t - 1.0f);
+    T dt4 = -8.0f * s2 * t * (3.0f * t*t - 2.0f);
+    T dt5 = 8.0f * s2 * (15.0f * t*t*t*t - 15.0f * t*t + 2.0f);
+    T dt6 = -16.0f * s2 * t * (45.0f * t*t*t*t - 60.0f * t*t + 17.0f);
 
     // Apply Faà di Bruno's formula: V = U_max * tanh(u(r))
     derivs[0] = U_max * t;
@@ -312,62 +319,63 @@ __device__ inline void applyCappingToDerivatives(float* derivs, float U_max) {
  *     [23-25]  = 3 fifth derivatives
  *     [26]     = 1 sixth derivative (∂⁶U/∂x²∂y²∂z²)
  */
+template<typename T>
 __device__ inline void accumulateCartesianDerivatives(
-    const float dr[3],
-    const float radial_derivs[7],
-    float cartesian_derivs[27]
+    const T dr[3],
+    const T radial_derivs[7],
+    T cartesian_derivs[27]
 ) {
     // Aliases for readability
-    const float dx = dr[0], dy = dr[1], dz = dr[2];
-    const float U     = radial_derivs[0];
-    const float dU    = radial_derivs[1];
-    const float d2U   = radial_derivs[2];
-    const float d3U   = radial_derivs[3];
-    const float d4U   = radial_derivs[4];
-    const float d5U   = radial_derivs[5];
-    const float d6U   = radial_derivs[6];
+    const T dx = dr[0], dy = dr[1], dz = dr[2];
+    const T U     = radial_derivs[0];
+    const T dU    = radial_derivs[1];
+    const T d2U   = radial_derivs[2];
+    const T d3U   = radial_derivs[3];
+    const T d4U   = radial_derivs[4];
+    const T d5U   = radial_derivs[5];
+    const T d6U   = radial_derivs[6];
 
     // Compute r and inverse powers for Cartesian conversion
-    float r2 = dx*dx + dy*dy + dz*dz;
-    float r = sqrtf(r2);
-    float invr = 1.0f / r;
-    float invr2 = invr * invr;
-    float invr3 = invr2 * invr;
-    float invr4 = invr2 * invr2;
-    float invr5 = invr4 * invr;
+    T r2 = dx*dx + dy*dy + dz*dz;
+    T r = sqrt(r2);
+    T invr = 1.0f / r;
+    T invr2 = invr * invr;
+    T invr3 = invr2 * invr;
+    T invr4 = invr2 * invr2;
+    T invr5 = invr4 * invr;
 
     // Direction cosines
-    float nx = dx * invr;
-    float ny = dy * invr;
-    float nz = dz * invr;
-    float nx2 = nx * nx;
-    float ny2 = ny * ny;
-    float nz2 = nz * nz;
+    T nx = dx * invr;
+    T ny = dy * invr;
+    T nz = dz * invr;
+    T nx2 = nx * nx;
+    T ny2 = ny * ny;
+    T nz2 = nz * nz;
 
     // Auxiliary coefficients for different orders
     // These combine radial derivatives with 1/r factors for proper tensor conversion
     // Order 2: ∂²U/∂xi∂xj = A2*ni*nj + (dU/r)*δij
-    float A2 = d2U - dU * invr;
+    T A2 = d2U - dU * invr;
 
     // Order 3: ∂³U/∂xi∂xj∂xk = A3*ni*nj*nk + B3*(sum of delta-n terms)
-    float A3 = d3U - 3.0f * d2U * invr + 3.0f * dU * invr2;
-    float B3 = d2U * invr - dU * invr2;
+    T A3 = d3U - 3.0f * d2U * invr + 3.0f * dU * invr2;
+    T B3 = d2U * invr - dU * invr2;
 
     // Order 4: ∂⁴U/∂xi∂xj∂xk∂xl = A4*ni*nj*nk*nl + B4*(delta-nn terms) + C4*(double-delta terms)
-    float A4 = d4U - 6.0f * d3U * invr + 15.0f * d2U * invr2 - 15.0f * dU * invr3;
-    float B4 = d3U * invr - 3.0f * d2U * invr2 + 3.0f * dU * invr3;
-    float C4 = d2U * invr2 - dU * invr3;
+    T A4 = d4U - 6.0f * d3U * invr + 15.0f * d2U * invr2 - 15.0f * dU * invr3;
+    T B4 = d3U * invr - 3.0f * d2U * invr2 + 3.0f * dU * invr3;
+    T C4 = d2U * invr2 - dU * invr3;
 
     // Order 5
-    float A5 = d5U - 10.0f * d4U * invr + 45.0f * d3U * invr2 - 105.0f * d2U * invr3 + 105.0f * dU * invr4;
-    float B5 = d4U * invr - 6.0f * d3U * invr2 + 15.0f * d2U * invr3 - 15.0f * dU * invr4;
-    float C5 = d3U * invr2 - 3.0f * d2U * invr3 + 3.0f * dU * invr4;
+    T A5 = d5U - 10.0f * d4U * invr + 45.0f * d3U * invr2 - 105.0f * d2U * invr3 + 105.0f * dU * invr4;
+    T B5 = d4U * invr - 6.0f * d3U * invr2 + 15.0f * d2U * invr3 - 15.0f * dU * invr4;
+    T C5 = d3U * invr2 - 3.0f * d2U * invr3 + 3.0f * dU * invr4;
 
     // Order 6
-    float A6 = d6U - 15.0f * d5U * invr + 105.0f * d4U * invr2 - 420.0f * d3U * invr3 + 945.0f * d2U * invr4 - 945.0f * dU * invr5;
-    float B6 = d5U * invr - 10.0f * d4U * invr2 + 45.0f * d3U * invr3 - 105.0f * d2U * invr4 + 105.0f * dU * invr5;
-    float C6 = d4U * invr2 - 6.0f * d3U * invr3 + 15.0f * d2U * invr4 - 15.0f * dU * invr5;
-    float D6 = d3U * invr3 - 3.0f * d2U * invr4 + 3.0f * dU * invr5;
+    T A6 = d6U - 15.0f * d5U * invr + 105.0f * d4U * invr2 - 420.0f * d3U * invr3 + 945.0f * d2U * invr4 - 945.0f * dU * invr5;
+    T B6 = d5U * invr - 10.0f * d4U * invr2 + 45.0f * d3U * invr3 - 105.0f * d2U * invr4 + 105.0f * dU * invr5;
+    T C6 = d4U * invr2 - 6.0f * d3U * invr3 + 15.0f * d2U * invr4 - 15.0f * dU * invr5;
+    T D6 = d3U * invr3 - 3.0f * d2U * invr4 + 3.0f * dU * invr5;
 
     // Index 0: Energy
     cartesian_derivs[0] += U;

@@ -10,121 +10,123 @@
 #define TANH_CHAIN_RULE_H
 
 /*
- * Compute tanh derivatives T[0..6] where T[n] = d^n(tanh(u))/du^n
+ * Compute tanh derivatives Td[0..6] where Td[n] = d^n(tanh(u))/du^n
  */
-__device__ static inline void computeTanhDerivatives(float u, float T[7]) {
+template<typename T>
+__device__ static inline void computeTanhDerivatives(T u, T Td[7]) {
     if (u > 20.0f) {
-        T[0] = 1.0f;
-        T[1] = T[2] = T[3] = T[4] = T[5] = T[6] = 0.0f;
+        Td[0] = 1.0f;
+        Td[1] = Td[2] = Td[3] = Td[4] = Td[5] = Td[6] = 0.0f;
         return;
     }
     if (u < -20.0f) {
-        T[0] = -1.0f;
-        T[1] = T[2] = T[3] = T[4] = T[5] = T[6] = 0.0f;
+        Td[0] = -1.0f;
+        Td[1] = Td[2] = Td[3] = Td[4] = Td[5] = Td[6] = 0.0f;
         return;
     }
 
-    float t = tanhf(u);
-    float t2 = t * t;
-    float t4 = t2 * t2;
-    float s2 = 1.0f - t2;  // sech^2(u)
+    T t = tanh(u);
+    T t2 = t * t;
+    T t4 = t2 * t2;
+    T s2 = 1.0f - t2;  // sech^2(u)
 
-    T[0] = t;
-    T[1] = s2;
-    T[2] = -2.0f * s2 * t;
-    T[3] = 2.0f * s2 * (3.0f * t2 - 1.0f);
-    T[4] = -8.0f * s2 * t * (3.0f * t2 - 2.0f);
-    T[5] = 8.0f * s2 * (15.0f * t4 - 15.0f * t2 + 2.0f);
-    T[6] = -16.0f * s2 * t * (45.0f * t4 - 60.0f * t2 + 17.0f);
+    Td[0] = t;
+    Td[1] = s2;
+    Td[2] = -2.0f * s2 * t;
+    Td[3] = 2.0f * s2 * (3.0f * t2 - 1.0f);
+    Td[4] = -8.0f * s2 * t * (3.0f * t2 - 2.0f);
+    Td[5] = 8.0f * s2 * (15.0f * t4 - 15.0f * t2 + 2.0f);
+    Td[6] = -16.0f * s2 * t * (45.0f * t4 - 60.0f * t2 + 17.0f);
 }
 
 /*
  * Apply tanh capping to all 27 derivatives using Faa di Bruno formula.
  */
-__device__ static inline void applyTanhChainRule(const float* raw, float U_max, float* capped) {
+template<typename T>
+__device__ static inline void applyTanhChainRule(const T* raw, T U_max, T* capped) {
     // Extract raw derivatives
-    const float U = raw[0];
-    const float Ux = raw[1];
-    const float Uy = raw[2];
-    const float Uz = raw[3];
-    const float Uxx = raw[4];
-    const float Uxy = raw[5];
-    const float Uxz = raw[6];
-    const float Uyy = raw[7];
-    const float Uyz = raw[8];
-    const float Uzz = raw[9];
-    const float Uxxy = raw[10];
-    const float Uxxz = raw[11];
-    const float Uxyy = raw[12];
-    const float Uxyz = raw[13];
-    const float Uyyz = raw[14];
-    const float Uxzz = raw[15];
-    const float Uyzz = raw[16];
-    const float Uxxyy = raw[17];
-    const float Uxxzz = raw[18];
-    const float Uyyzz = raw[19];
-    const float Uxxyz = raw[20];
-    const float Uxyyz = raw[21];
-    const float Uxyzz = raw[22];
-    const float Uxxyyz = raw[23];
-    const float Uxxyzz = raw[24];
-    const float Uxyyzz = raw[25];
-    const float Uxxyyzz = raw[26];
+    const T U = raw[0];
+    const T Ux = raw[1];
+    const T Uy = raw[2];
+    const T Uz = raw[3];
+    const T Uxx = raw[4];
+    const T Uxy = raw[5];
+    const T Uxz = raw[6];
+    const T Uyy = raw[7];
+    const T Uyz = raw[8];
+    const T Uzz = raw[9];
+    const T Uxxy = raw[10];
+    const T Uxxz = raw[11];
+    const T Uxyy = raw[12];
+    const T Uxyz = raw[13];
+    const T Uyyz = raw[14];
+    const T Uxzz = raw[15];
+    const T Uyzz = raw[16];
+    const T Uxxyy = raw[17];
+    const T Uxxzz = raw[18];
+    const T Uyyzz = raw[19];
+    const T Uxxyz = raw[20];
+    const T Uxyyz = raw[21];
+    const T Uxyzz = raw[22];
+    const T Uxxyyz = raw[23];
+    const T Uxxyzz = raw[24];
+    const T Uxyyzz = raw[25];
+    const T Uxxyyzz = raw[26];
 
-    float u = U / U_max;
+    T u = U / U_max;
 
     // Early exit for low energies
-    if (u < 0.1f) {
+    if (u < (T)0.1) {
         for (int i = 0; i < 27; i++) capped[i] = raw[i];
         return;
     }
 
     // Compute tanh derivatives
-    float T[7];
-    computeTanhDerivatives(u, T);
+    T Td[7];
+    computeTanhDerivatives(u, Td);
 
-    // g^(n)(U) = T[n] / U_max^(n-1)
-    float invU = 1.0f / U_max;
-    float invU2 = invU * invU;
-    float invU3 = invU2 * invU;
-    float invU4 = invU3 * invU;
-    float invU5 = invU4 * invU;
+    // g^(n)(U) = Td[n] / U_max^(n-1)
+    T invU = 1.0f / U_max;
+    T invU2 = invU * invU;
+    T invU3 = invU2 * invU;
+    T invU4 = invU3 * invU;
+    T invU5 = invU4 * invU;
 
-    float g1 = T[1];
-    float g2 = T[2] * invU;
-    float g3 = T[3] * invU2;
-    float g4 = T[4] * invU3;
-    float g5 = T[5] * invU4;
-    float g6 = T[6] * invU5;
+    T g1 = Td[1];
+    T g2 = Td[2] * invU;
+    T g3 = Td[3] * invU2;
+    T g4 = Td[4] * invU3;
+    T g5 = Td[5] * invU4;
+    T g6 = Td[6] * invU5;
 
     // Precomputed products of first derivatives
-    float Ux2 = Ux * Ux;
-    float Uy2 = Uy * Uy;
-    float Uz2 = Uz * Uz;
-    float UxUy = Ux * Uy;
-    float UxUz = Ux * Uz;
-    float UyUz = Uy * Uz;
-    float Ux2Uy = Ux2 * Uy;
-    float Ux2Uz = Ux2 * Uz;
-    float UxUy2 = Ux * Uy2;
-    float UxUz2 = Ux * Uz2;
-    float Uy2Uz = Uy2 * Uz;
-    float UyUz2 = Uy * Uz2;
-    float UxUyUz = Ux * UyUz;
-    float Ux2Uy2 = Ux2 * Uy2;
-    float Ux2Uz2 = Ux2 * Uz2;
-    float Uy2Uz2 = Uy2 * Uz2;
-    float Ux2UyUz = Ux2 * UyUz;
-    float UxUy2Uz = UxUy * UyUz;
-    float UxUyUz2 = UxUy * Uz2;
-    float Ux2Uy2Uz = Ux2Uy2 * Uz;
-    float Ux2UyUz2 = Ux2 * UyUz2;
-    float UxUy2Uz2 = Ux * Uy2Uz2;
-    float Ux2Uy2Uz2 = Ux2Uy2 * Uz2;
+    T Ux2 = Ux * Ux;
+    T Uy2 = Uy * Uy;
+    T Uz2 = Uz * Uz;
+    T UxUy = Ux * Uy;
+    T UxUz = Ux * Uz;
+    T UyUz = Uy * Uz;
+    T Ux2Uy = Ux2 * Uy;
+    T Ux2Uz = Ux2 * Uz;
+    T UxUy2 = Ux * Uy2;
+    T UxUz2 = Ux * Uz2;
+    T Uy2Uz = Uy2 * Uz;
+    T UyUz2 = Uy * Uz2;
+    T UxUyUz = Ux * UyUz;
+    T Ux2Uy2 = Ux2 * Uy2;
+    T Ux2Uz2 = Ux2 * Uz2;
+    T Uy2Uz2 = Uy2 * Uz2;
+    T Ux2UyUz = Ux2 * UyUz;
+    T UxUy2Uz = UxUy * UyUz;
+    T UxUyUz2 = UxUy * Uz2;
+    T Ux2Uy2Uz = Ux2Uy2 * Uz;
+    T Ux2UyUz2 = Ux2 * UyUz2;
+    T UxUy2Uz2 = Ux * Uy2Uz2;
+    T Ux2Uy2Uz2 = Ux2Uy2 * Uz2;
 
     // Apply Faa di Bruno chain rule
     // Index 0: V
-    capped[0] = U_max * T[0];
+    capped[0] = U_max * Td[0];
 
     // Index 1: Vx
     capped[1] = g1 * Ux;

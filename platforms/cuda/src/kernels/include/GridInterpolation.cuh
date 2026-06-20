@@ -431,12 +431,10 @@ __device__ inline InterpolationResult triquinticInterpolate(
 }
 
 /**
- * Tier 2 (compute precision): full real-precision triquintic value + physical gradient.
- * Position and fractional coords are real (double in double mode), assembly/eval use the
- * double helpers, and the result stays real end-to-end -- no float truncation through the
- * (float) InterpolationResult struct. Grid derivative STORAGE is still float (Tier 3 is the
- * decoupled f64-storage knob). Returns false if the position is outside the grid.
- * Only valid for NONE inv_power mode with no arcsinh/cap (caller guards this).
+ * Full real-precision triquintic value + physical gradient: position, fractional
+ * coords, assembly, eval, and result all stay real, with no float truncation.
+ * Returns false if the position is outside the grid. Only valid for NONE inv_power
+ * mode with no arcsinh/cap (caller guards this).
  */
 __device__ inline bool triquinticInterpolateReal(
     const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,

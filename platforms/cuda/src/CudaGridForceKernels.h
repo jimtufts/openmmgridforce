@@ -207,6 +207,7 @@ private:
     std::vector<int> ligandAtoms;  // Particle indices for ligand atoms
     std::vector<int> particles;    // Filtered particles for evaluation (empty = all particles)
     bool computeDerivatives;       // Whether derivatives were computed
+    bool useDoubleStorage;         // Generate and store grid derivatives in double
 
     // Particle group data for multi-ligand workflows (flattened for single kernel launch)
     OpenMM::CudaArray allGroupParticleIndices;  // Flattened particle indices from all groups

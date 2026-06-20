@@ -7,8 +7,8 @@
  * https://github.com/iRASPA/RASPA3
  */
 
-// Grid derivative storage precision (Tier 3): float by default; createModule
-// injects =double when f64 grid storage is enabled. Reads assign into double arrays.
+// Element type of the stored grid derivatives. The host defines this to double
+// when double grid storage is enabled; otherwise it defaults to float.
 #ifndef GRID_STORAGE_TYPE
 #define GRID_STORAGE_TYPE float
 #endif
@@ -1770,18 +1770,13 @@ __device__ const float TRIQUINTIC_COEFFICIENTS[216][216] = {
      6,     -6,   -6,   -6,    6,    6,     6,     6,    -6,   -6,   -1,   1,   1,    -1,   1,    -1,   -1,   1}};
 
 // ---------------------------------------------------------------------------
-// Shared triquintic assembly + evaluation (precision-controlled).
+// Shared triquintic assembly + evaluation.
 //
-// The 216x216 coefficient solve  a = 0.125 * M * X  is ill-conditioned: in fp32
-// it loses C2 continuity across cell faces, which stalls L-BFGS minimization and
-// produces spurious non-positive-definite ("fake") Hessians. It is therefore done
-// in TriquinticAccum = double UNCONDITIONALLY (independent of the platform
-// precision mode) -- this is a numerical-stability requirement, not an accuracy
-// knob. The cost is hidden behind the coefficient-matrix memory traffic (the
-// kernel is bandwidth-bound), so it is effectively free. Callers gather the 216
-// derivatives into X (site-specific: tiled vs non-tiled, inv_power transform),
-// then use these helpers; outputs are truncated to the caller's working type.
-// See DESIGN_PRECISION_SELECTION.md.
+// The 216x216 coefficient solve  a = 0.125 * M * X  is done in double
+// unconditionally: in fp32 it loses C2 continuity across cell faces, stalling
+// L-BFGS minimization and producing spurious non-positive-definite Hessians.
+// Callers gather the 216 derivatives into X, then use these helpers; outputs are
+// truncated to the caller's working type.
 // ---------------------------------------------------------------------------
 typedef double TriquinticAccum;
 

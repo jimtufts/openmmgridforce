@@ -156,9 +156,7 @@ extern "C" __global__ void computeGridHessianTiled(
     pos.y = posOrig.y - originY;
     pos.z = posOrig.z - originZ;
 
-    // Initialize Hessian components to zero
-    // PROTOTYPE(precision): triquintic 216-coeff assembly + eval temporaries in double
-    // (see gridHessian.cu); these accumulators stay float for downstream chain rule.
+    // Hessian accumulators stay float for the downstream chain rule (assembly and eval are double).
     float d2xx = 0.0f, d2yy = 0.0f, d2zz = 0.0f;
     float d2xy = 0.0f, d2xz = 0.0f, d2yz = 0.0f;
 

@@ -105,9 +105,7 @@ extern "C" __global__ void computeGridForce(
         // =====================================================================
         if (invPowerMode == 0 && interpolationMethod == 3 && gridDerivatives != 0 &&
             arcsinhScale == 0.0f && effectiveCap <= 0.0f) {
-            // Tier 2: full real-precision triquintic (no arcsinh/cap). Position,
-            // fraction, eval, and force stay real/mixed -- double mode computes the
-            // force at the exact double position, not a float-truncated one.
+            // Full real-precision triquintic (no arcsinh/cap): position, eval, and force stay real.
             real3 rpos = make_real3(posOrig.x, posOrig.y, posOrig.z);
             real rval, rgx, rgy, rgz;
             if (triquinticInterpolateReal(gridDerivatives, gridCounts, gridSpacing,
@@ -383,10 +381,7 @@ extern "C" __global__ void computeGridForce(
 
             // Gather derivatives in DERIVATIVE-MAJOR layout: X[deriv_idx * 8 + corner_idx]
             // This matches RASPA3's layout expected by TRIQUINTIC_COEFFICIENTS matrix
-            // PROTOTYPE(precision): assemble coefficients + evaluate in double. The
-            // fp32 216-term solve makes adjacent cells disagree at shared faces by
-            // ~kJ/mol/nm in force (breaks L-BFGS); double assembly restores C2 even
-            // with fp32-stored derivatives. See DESIGN_PRECISION_SELECTION.md / Tier 3.
+            // Assemble and evaluate in double (fp32 solve is C2-discontinuous across cells).
             double X[216];
             if (invPowerMode == 1) {
                 // RUNTIME mode: transform all 27 derivatives per corner
