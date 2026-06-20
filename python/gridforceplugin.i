@@ -742,7 +742,7 @@ public:
     double getParticleGroupRuntimeCap(int groupIndex) const;
     void setAllParticleGroupRuntimeCaps(const std::vector<double>& caps);
     std::vector<double> getAllParticleGroupRuntimeCaps() const;
-    std::vector<float> getParticleGroupAtomRawEnergies(OpenMM::Context& context) const;
+    std::vector<double> getParticleGroupAtomRawEnergies(OpenMM::Context& context) const;
 
     // Hessian (second derivative) computation for normal modes analysis
     void computeHessian(OpenMM::Context& context) const;
@@ -2037,6 +2037,35 @@ def castToGridForce(force):
     Returns GridForce if successful, None otherwise.
     """
     return _openmm_GridForce_director_call(force)
+
+def precision_model():
+    """
+    How precision is controlled in the GridForce CUDA plugin.
+
+    Two independent axes:
+
+    1. Compute precision -- follows the OpenMM context Precision property, set when
+       the Context is created:
+           Context(system, integrator, platform, {'Precision': 'double'})
+       'single'  : float compute and float energy/Hessian output.
+       'mixed'   : float compute, but energies and per-group/per-atom energy and
+                   Hessian buffers accumulate/stored in double.
+       'double'  : double compute throughout (positions, interpolation, forces,
+                   energies, Hessian) plus the double accumulation of 'mixed'.
+       Forces are fixed-point (deterministic) in every mode; single and mixed give
+       bit-identical forces. Energies differ between single and mixed once multiple
+       atoms sum into a buffer (mixed sums in double).
+
+    2. Grid-derivative storage precision -- a decoupled knob on the GridForce:
+           grid.setUseDoubleStorage(True)   # default False (float)
+       When enabled, the 27 triquintic Hermite derivatives per point are generated,
+       uploaded, and read as double (tiled or non-tiled), so a double context carries
+       genuine f64 grid data instead of fp32-limited values. Costs 2x derivative VRAM.
+
+    The triquintic 216-coefficient assembly is always done in double for stability,
+    independent of either axis.
+    """
+    pass
 
 # when we import * from the python module, we only want to import the
 # actual classes, and not the swigregistration methods, which have already
