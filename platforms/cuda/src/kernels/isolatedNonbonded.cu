@@ -4,9 +4,9 @@
  * a specified set of particles, with no interaction outside that set.
  */
 
-// Fixed-point scale factor for Hessian accumulation (same as force buffers)
-// Using 2^24 to leave headroom for large Hessian values (~10^6 kJ/mol/nm^2)
-#define HESSIAN_SCALE 0x1000000
+// Fixed-point scale for Hessian accumulation. 2^30 resolves soft eigenvalues while
+// leaving ample headroom for ~10^6 kJ/mol/nm^2 entries (must match HESSIAN_SCALE_INV host-side).
+#define HESSIAN_SCALE 0x40000000
 
 // Helper function to decode linear pair index to (i,j) indices
 __device__ void decodePairIndex(int pairIdx, int* i, int* j, int numAtoms) {

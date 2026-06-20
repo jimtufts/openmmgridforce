@@ -355,8 +355,8 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     cu.executeKernel(hessianKernel, args, numBlocksKernel * blockSize, blockSize);
 
     // Download fixed-point Hessian and convert to double
-    // Scale factor must match HESSIAN_SCALE in isolatedNonbonded.cu (0x1000000 = 16777216)
-    const double HESSIAN_SCALE_INV = 1.0 / 16777216.0;
+    // Scale factor must match HESSIAN_SCALE in isolatedNonbonded.cu (0x40000000 = 1073741824)
+    const double HESSIAN_SCALE_INV = 1.0 / 1073741824.0;
 
     vector<unsigned long long> h_hessian(numBlocks3x3 * 9);
     hessianBuffer.download(h_hessian);

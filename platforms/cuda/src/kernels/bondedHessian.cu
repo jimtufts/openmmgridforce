@@ -17,7 +17,7 @@
 #define ONE_4PI_EPS0 138.935456f  // kJ*nm/(mol*e^2)
 
 // Fixed-point scale for deterministic atomicAdd (same as IsolatedNonbondedForce)
-#define HESSIAN_SCALE 0x1000000
+#define HESSIAN_SCALE 0x40000000  // 2^30 (soft-mode resolution margin)
 
 // ============================================================
 // Helper functions
