@@ -7,6 +7,12 @@
  * https://github.com/iRASPA/RASPA3
  */
 
+// Grid derivative storage precision (Tier 3): float by default; createModule
+// injects =double when f64 grid storage is enabled. Reads assign into double arrays.
+#ifndef GRID_STORAGE_TYPE
+#define GRID_STORAGE_TYPE float
+#endif
+
 __device__ const float TRIQUINTIC_COEFFICIENTS[216][216] = {
     {8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

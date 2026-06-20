@@ -57,7 +57,7 @@ GridForce::GridForce() : m_inv_power(0.0), m_invPowerMode(InvPowerMode::NONE), m
                          m_globalScalingFactor(1.0),
                          m_autoCalculateScalingFactors(false), m_scalingProperty(""),
                          m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
-                         m_computeDerivatives(false),
+                         m_computeDerivatives(false), m_useDoubleStorage(false),
                          m_systemPtr(nullptr),
                          m_vals(std::make_shared<std::vector<double>>()),
                          m_derivatives(std::make_shared<std::vector<double>>()),
@@ -77,7 +77,7 @@ GridForce::GridForce(std::shared_ptr<GridData> gridData)
       m_globalScalingFactor(1.0),
       m_autoCalculateScalingFactors(false), m_scalingProperty(""),
       m_autoGenerateGrid(false), m_gridType(""), m_gridOrigin({0.0, 0.0, 0.0}),
-      m_computeDerivatives(false),
+      m_computeDerivatives(false), m_useDoubleStorage(false),
       m_systemPtr(nullptr),
       m_gridData(gridData),
       m_vals(std::make_shared<std::vector<double>>()),
@@ -632,6 +632,14 @@ void GridForce::setComputeDerivatives(bool compute) {
 
 bool GridForce::getComputeDerivatives() const {
     return m_computeDerivatives;
+}
+
+void GridForce::setUseDoubleStorage(bool useDouble) {
+    m_useDoubleStorage = useDouble;
+}
+
+bool GridForce::getUseDoubleStorage() const {
+    return m_useDoubleStorage;
 }
 
 bool GridForce::hasDerivatives() const {

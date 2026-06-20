@@ -281,7 +281,7 @@ __device__ inline InterpolationResult bsplineInterpolate(
  */
 __device__ inline InterpolationResult tricubicInterpolate(
     const float* __restrict__ gridValues,
-    const float* __restrict__ gridDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     float originX, float originY, float originZ,
@@ -363,7 +363,7 @@ __device__ inline InterpolationResult tricubicInterpolate(
  */
 __device__ inline InterpolationResult triquinticInterpolate(
     const float* __restrict__ gridValues,
-    const float* __restrict__ gridDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     float originX, float originY, float originZ,
@@ -439,7 +439,7 @@ __device__ inline InterpolationResult triquinticInterpolate(
  * Only valid for NONE inv_power mode with no arcsinh/cap (caller guards this).
  */
 __device__ inline bool triquinticInterpolateReal(
-    const float* __restrict__ gridDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     real originX, real originY, real originZ,
@@ -594,7 +594,7 @@ __device__ inline InterpolationResult quinticBsplineInterpolate(
  */
 __device__ inline InterpolationResult interpolateGrid(
     const float* __restrict__ gridValues,
-    const float* __restrict__ gridDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     float originX, float originY, float originZ,

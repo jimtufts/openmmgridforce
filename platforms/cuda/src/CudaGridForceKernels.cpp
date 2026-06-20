@@ -711,7 +711,31 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         cuMemGetInfo(&freeMem, &totalMem);
 
         vector<double> derivatives_vec = force.getDerivatives();
-        size_t derivativesBytes = derivatives_vec.size() * sizeof(float);
+        const bool useDoubleStorage = force.getUseDoubleStorage();
+        const size_t storageElemSize = useDoubleStorage ? sizeof(double) : sizeof(float);
+        size_t derivativesBytes = derivatives_vec.size() * storageElemSize;
+
+        // Upload derivatives in the configured grid-storage precision. Float storage
+        // down-converts the host double buffer; double storage uploads it verbatim.
+        auto uploadDerivatives = [&](std::shared_ptr<CudaArray>& arr) {
+            if (useDoubleStorage) {
+                arr->initialize<double>(cu, derivatives_vec.size(), "gridDerivatives");
+                // Bypass OpenMM's uploadSubArray which has int overflow on huge arrays.
+                CUdeviceptr devPtr = arr->getDevicePointer();
+                CUresult uploadResult = cuMemcpyHtoD(devPtr, derivatives_vec.data(),
+                    (size_t)derivatives_vec.size() * sizeof(double));
+                if (uploadResult != CUDA_SUCCESS)
+                    throw OpenMMException("Error uploading large derivative array");
+            } else {
+                vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
+                arr->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
+                CUdeviceptr devPtr = arr->getDevicePointer();
+                CUresult uploadResult = cuMemcpyHtoD(devPtr, derivativesFloat.data(),
+                    (size_t)derivativesFloat.size() * sizeof(float));
+                if (uploadResult != CUDA_SUCCESS)
+                    throw OpenMMException("Error uploading large derivative array");
+            }
+        };
 
         // Skip caching if derivatives would use more than 80% of available GPU memory
         if (derivativesBytes > (size_t)(freeMem * 0.8)) {
@@ -726,7 +750,8 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
         // Skip if derivatives vector is empty to avoid CUDA allocation errors
         if (!derivatives_vec.empty()) {
             // Check cache for derivatives (same hash as grid values since they're from same source)
-            auto derivCacheKey = std::make_pair((void*)&cu, gridHash);
+            auto derivCacheKey = std::make_pair((void*)&cu,
+                gridHash ^ (useDoubleStorage ? (size_t)0x9E3779B97F4A7C15ULL : (size_t)0));
             auto derivIt = derivativeCache.find(derivCacheKey);
 
             if (derivIt != derivativeCache.end()) {
@@ -739,18 +764,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 } else {
                     // Cached entry expired - remove and create new
                     derivativeCache.erase(derivIt);
-                    vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
                     g_derivatives_shared = std::make_shared<CudaArray>();
                     cu.setAsCurrent();
                     try {
-                        g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
-                        // Bypass OpenMM's uploadSubArray which has int overflow
-                        // (offset*elementSize and elements*elementSize overflow for >512M floats)
-                        CUdeviceptr devPtr = g_derivatives_shared->getDevicePointer();
-                        CUresult uploadResult = cuMemcpyHtoD(devPtr, derivativesFloat.data(),
-                            (size_t)derivativesFloat.size() * sizeof(float));
-                        if (uploadResult != CUDA_SUCCESS)
-                            throw OpenMMException("Error uploading large derivative array");
+                        uploadDerivatives(g_derivatives_shared);
                         derivativeCache[derivCacheKey] = g_derivatives_shared;
                         derivatives_vec.clear();
                         derivatives_vec.shrink_to_fit();
@@ -770,17 +787,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                     }
                 }
 
-                vector<float> derivativesFloat(derivatives_vec.begin(), derivatives_vec.end());
                 g_derivatives_shared = std::make_shared<CudaArray>();
                 cu.setAsCurrent();
                 try {
-                    g_derivatives_shared->initialize<float>(cu, derivatives_vec.size(), "gridDerivatives");
-                    // Bypass OpenMM's uploadSubArray which has int overflow
-                    CUdeviceptr devPtr = g_derivatives_shared->getDevicePointer();
-                    CUresult uploadResult = cuMemcpyHtoD(devPtr, derivativesFloat.data(),
-                        (size_t)derivativesFloat.size() * sizeof(float));
-                    if (uploadResult != CUDA_SUCCESS)
-                        throw OpenMMException("Error uploading large derivative array");
+                    uploadDerivatives(g_derivatives_shared);
                     derivativeCache[derivCacheKey] = g_derivatives_shared;
                     derivatives_vec.clear();
                     derivatives_vec.shrink_to_fit();
@@ -899,6 +909,10 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
 #if DEBUG_GRIDFORCE
     defines["DEBUG_GRIDFORCE"] = "1";
 #endif
+    // Decoupled grid-storage precision (Tier 3). Only the non-tiled kernels read
+    // gridDerivatives as GRID_STORAGE_TYPE; the tiled path uses its own float buffers.
+    if (force.getUseDoubleStorage() && !willUseTiledMode)
+        defines["GRID_STORAGE_TYPE"] = "double";
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
         CudaGridForceKernelSources::gridForceKernel +

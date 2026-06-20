@@ -136,7 +136,7 @@ extern "C" __global__ void computeGridHessian(
     const float originX,
     const float originY,
     const float originZ,
-    const float* __restrict__ gridDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int numAtoms,
     const int* __restrict__ particleIndices,
     const float arcsinhScale,
@@ -709,7 +709,7 @@ extern "C" __global__ void computeGridThirdDerivatives(
     const float originX,
     const float originY,
     const float originZ,
-    const float* __restrict__ gridDerivatives,
+    const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int numAtoms,
     const int* __restrict__ particleIndices,
     const float arcsinhScale)

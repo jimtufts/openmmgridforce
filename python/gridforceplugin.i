@@ -680,8 +680,11 @@ public:
 
     void setComputeDerivatives(bool compute);
     bool getComputeDerivatives() const;
+    void setUseDoubleStorage(bool useDouble);
+    bool getUseDoubleStorage() const;
     bool hasDerivatives() const;
     const std::vector<double>& getDerivatives() const;
+    void setDerivatives(const std::vector<double>& derivs);
 
     void setReceptorAtoms(const std::vector<int>& atomIndices);
     const std::vector<int>& getReceptorAtoms() const;

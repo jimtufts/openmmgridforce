@@ -27,7 +27,7 @@ extern "C" __global__ void computeGridForce(
     const float originX,
     const float originY,
     const float originZ,
-    const float* __restrict__ gridDerivatives,  // For triquintic: 27 derivatives per point
+    const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,  // For triquintic: 27 derivatives per point
     mixed* __restrict__ energyBuffer,
     const int numAtoms,
     const int paddedNumAtoms,
