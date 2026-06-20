@@ -113,6 +113,38 @@ def test_double_agrees(method):
     assert relf < 1e-3, f"{METHODS[method]}: double force rel {relf:.2e} too large"
 
 
+@pytest.mark.parametrize("method", list(METHODS))
+def test_energy_single_mixed_identical(method):
+    """Group energy: single and mixed are bit-identical."""
+    gf, probe = _grid(False)
+    es, _ = _eval(gf, method, probe, 'single')
+    em, _ = _eval(gf, method, probe, 'mixed')
+    assert es == em, f"{METHODS[method]}: single E {es} != mixed E {em}"
+
+
+@pytest.mark.parametrize("method", list(METHODS))
+def test_energy_double_finite_close(method):
+    """Group energy: double is finite and close to single (its buffer is now mixed,
+    so double carries higher precision rather than the old fp32-masked value)."""
+    gf, probe = _grid(False)
+    es, _ = _eval(gf, method, probe, 'single')
+    ed, _ = _eval(gf, method, probe, 'double')
+    assert np.isfinite(ed)
+    assert abs(ed - es) / max(1.0, abs(es)) < 1e-4
+
+
+def test_double_generation_carries_f64():
+    """Double generation produces genuine f64 derivatives (oracle-free check)."""
+    import validate_double_generation as vdg
+    assert vdg.main() == 0
+
+
+def test_tiled_double_storage_carries_f64():
+    """Double storage survives the full tiled generate->disk->stream->kernel pipeline."""
+    import validate_tiled_double_storage as vtds
+    assert vtds.main() == 0
+
+
 def _gen_invpower(prm, crd, pos_list, rec_atoms, origin, grid_file, mode, n):
     g = gfp.GridForce()
     g.setGridOrigin(*origin); g.addGridCounts(NX, NY, NZ); g.addGridSpacing(SP, SP, SP)
@@ -161,6 +193,51 @@ def test_invpower_runtime_precision(method):
     assert relf < 1e-3, f"invpower {METHODS[method]}: double rel {relf:.2e}"
 
 
+import time
+
+
+def _bench(grid_file, method, precision, origin, natoms=2000, niter=100):
+    """Median wall-time per force evaluation for `natoms` probe atoms."""
+    rng = np.linspace(0.2, 0.8, int(round(natoms ** (1 / 3.0))) + 1)[1:]
+    pts = [(origin[0] + a * NX * SP, origin[1] + b * NY * SP, origin[2] + c * NZ * SP)
+           for a in rng for b in rng for c in rng][:natoms]
+    n = len(pts)
+    gf = gfp.GridForce(); gf.loadFromFile(grid_file); gf.setInterpolationMethod(method)
+    s = mm.System()
+    for _ in range(n):
+        s.addParticle(1.0)
+    gf.addParticleGroup('charge', list(range(n)), [1.0] * n)
+    s.addForce(gf)
+    ctx = Context(s, VerletIntegrator(0.001), mm.Platform.getPlatformByName('CUDA'),
+                  {'Precision': precision})
+    ctx.setPositions([mm.Vec3(*p) for p in pts] * nanometer)
+    ctx.getState(getForces=True)  # warm up (JIT compile)
+    ts = []
+    for _ in range(niter):
+        t0 = time.perf_counter()
+        ctx.setPositions([mm.Vec3(*p) for p in pts] * nanometer)
+        ctx.getState(getForces=True)
+        ts.append(time.perf_counter() - t0)
+    del ctx
+    return float(np.median(ts)) * 1e3, n  # ms/call
+
+
+def run_benchmark():
+    prm, crd, pos_list, rec_atoms, origin = _system()
+    tmp = tempfile.mkdtemp()
+    gfile = os.path.join(tmp, "charge_bench.grid")
+    _gen_grid(prm, crd, pos_list, rec_atoms, origin, gfile)
+    print("\nforce eval wall-time (ms/call), median over 100 iters:")
+    hdr = f"  {'method':<12}" + "".join(f"{p:>12}" for p in ('single', 'mixed', 'double'))
+    print(hdr)
+    for m in (0, 2, 3):
+        row = f"  {METHODS[m]:<12}"
+        for prec in ('single', 'mixed', 'double'):
+            ms, n = _bench(gfile, m, prec, origin)
+            row += f"{ms:>12.3f}"
+        print(row + f"   ({n} atoms)")
+
+
 if __name__ == "__main__":
     gf, probe = _grid(False)
     print(f"{'method':<12}{'single==mixed':<16}{'double rel(force)':<18}")
@@ -180,3 +257,4 @@ if __name__ == "__main__":
         ident = np.array_equal(fs, fm)
         relf = np.linalg.norm(fd - fs) / max(1.0, np.linalg.norm(fs))
         print(f"{METHODS[m]:<12}{str(ident):<16}{relf:<18.3e}")
+    run_benchmark()
