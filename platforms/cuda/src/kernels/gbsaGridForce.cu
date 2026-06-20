@@ -24,8 +24,8 @@
  * Result of GBSA grid interpolation.
  */
 struct GBSAInterpolationResult {
-    float hct;           // Corrected HCT value
-    float3 gradient;     // Gradient of corrected HCT w.r.t. position (real space)
+    real hct;           // Corrected HCT value
+    real3 gradient;     // Gradient of corrected HCT w.r.t. position (real space)
     bool isInside;       // Whether position is inside grid
 };
 
@@ -33,9 +33,9 @@ struct GBSAInterpolationResult {
  * Result of GBSA grid interpolation with analytical Hessian (second derivatives).
  */
 struct GBSAHessianResult {
-    float hct;           // Corrected HCT value
-    float3 gradient;     // Gradient of corrected HCT w.r.t. position (real space)
-    float hessian[6];    // Second derivatives: [xx, yy, zz, xy, xz, yz]
+    real hct;           // Corrected HCT value
+    real3 gradient;     // Gradient of corrected HCT w.r.t. position (real space)
+    real hessian[6];    // Second derivatives: [xx, yy, zz, xy, xz, yz]
     bool isInside;       // Whether position is inside grid
 };
 
@@ -67,12 +67,12 @@ struct GBSAHessianResult {
  * @param useKDECorrections If true, correction grids are KDE format with 27 derivatives each
  */
 __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
-    float3 position,
-    float R_i_off,
-    float R_probe_off,
+    real3 position,
+    real R_i_off,
+    real R_probe_off,
     const int* __restrict__ gridCounts,
     float gridSpacing,
-    float originX, float originY, float originZ,
+    real originX, real originY, real originZ,
     const float* __restrict__ gridHctProbe,
     const float* __restrict__ gridHctDerivatives,
     const float* __restrict__ gridCorrectionN,
@@ -86,12 +86,12 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
 {
     GBSAInterpolationResult result;
     result.hct = 0.0f;
-    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    result.gradient = make_real3(0.0f, 0.0f, 0.0f);
 
     // Use shared library for grid cell computation
     float gridSpacingArr[3] = {gridSpacing, gridSpacing, gridSpacing};
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacingArr,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -114,10 +114,10 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
     int c110 = c100 + nz;
     int c111 = c110 + 1;
 
-    float invSpacing = 1.0f / gridSpacing;
-    float ox = 1.0f - fx;
-    float oy = 1.0f - fy;
-    float oz = 1.0f - fz;
+    real invSpacing = 1.0f / gridSpacing;
+    real ox = 1.0f - fx;
+    real oy = 1.0f - fy;
+    real oz = 1.0f - fz;
 
     if (method == 1 || method == 4) {
         // B-spline interpolation using shared library
@@ -146,28 +146,28 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                 grids, 4, gridCounts, gridSpacingArr,
                 originX, originY, originZ, position);
 
-        float hct = mgResult.values[0];
-        float N = mgResult.values[1];
-        float A = mgResult.values[2];
-        float B = mgResult.values[3];
+        real hct = mgResult.values[0];
+        real N = mgResult.values[1];
+        real A = mgResult.values[2];
+        real B = mgResult.values[3];
 
         // Always apply correction - N, A, B all go to zero together
         // in regions far from receptor, so correction naturally vanishes
         {
-            float invRi = 1.0f / R_i_off;
-            float invRp = 1.0f / R_probe_off;
-            float delta = invRi - invRp;
-            float sigma = invRi + invRp;
-            float logTerm = logf(R_i_off / R_probe_off);
+            real invRi = 1.0f / R_i_off;
+            real invRp = 1.0f / R_probe_off;
+            real delta = invRi - invRp;
+            real sigma = invRi + invRp;
+            real logTerm = log(R_i_off / R_probe_off);
 
             result.hct = hct + delta * (N - 0.25f * A * sigma) + B * logTerm;
 
             if (computeGradient) {
-                float dCorr_dN = delta;
-                float dCorr_dA = -0.25f * delta * sigma;
-                float dCorr_dB = logTerm;
+                real dCorr_dN = delta;
+                real dCorr_dA = -0.25f * delta * sigma;
+                real dCorr_dB = logTerm;
 
-                float3 dCorr;
+                real3 dCorr;
                 dCorr.x = dCorr_dN * mgResult.gradients[1].x +
                     dCorr_dA * mgResult.gradients[2].x + dCorr_dB * mgResult.gradients[3].x;
                 dCorr.y = dCorr_dN * mgResult.gradients[1].y +
@@ -201,11 +201,11 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                     originX, originY, originZ, position, computeGradient, true);
             }
 
-            float hct = hctResult.value;
-            float N, A, B;
-            float3 nGrad = make_float3(0.0f, 0.0f, 0.0f);
-            float3 aGrad = make_float3(0.0f, 0.0f, 0.0f);
-            float3 bGrad = make_float3(0.0f, 0.0f, 0.0f);
+            real hct = hctResult.value;
+            real N, A, B;
+            real3 nGrad = make_real3(0.0f, 0.0f, 0.0f);
+            real3 aGrad = make_real3(0.0f, 0.0f, 0.0f);
+            real3 bGrad = make_real3(0.0f, 0.0f, 0.0f);
 
             if (useKDECorrections) {
                 // KDE mode: use same interpolation method for correction grids
@@ -251,21 +251,21 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                 bGrad = bResult.gradient;
             } else {
                 // Binned mode: use trilinear for correction grids N, A, B
-                float N000 = gridCorrectionN[binOffset + c000];
-                float N001 = gridCorrectionN[binOffset + c001];
-                float N010 = gridCorrectionN[binOffset + c010];
-                float N011 = gridCorrectionN[binOffset + c011];
-                float N100 = gridCorrectionN[binOffset + c100];
-                float N101 = gridCorrectionN[binOffset + c101];
-                float N110 = gridCorrectionN[binOffset + c110];
-                float N111 = gridCorrectionN[binOffset + c111];
+                real N000 = gridCorrectionN[binOffset + c000];
+                real N001 = gridCorrectionN[binOffset + c001];
+                real N010 = gridCorrectionN[binOffset + c010];
+                real N011 = gridCorrectionN[binOffset + c011];
+                real N100 = gridCorrectionN[binOffset + c100];
+                real N101 = gridCorrectionN[binOffset + c101];
+                real N110 = gridCorrectionN[binOffset + c110];
+                real N111 = gridCorrectionN[binOffset + c111];
 
-                float Nmm = oz * N000 + fz * N001;
-                float Nmp = oz * N010 + fz * N011;
-                float Npm = oz * N100 + fz * N101;
-                float Npp = oz * N110 + fz * N111;
-                float Nm = oy * Nmm + fy * Nmp;
-                float Np = oy * Npm + fy * Npp;
+                real Nmm = oz * N000 + fz * N001;
+                real Nmp = oz * N010 + fz * N011;
+                real Npm = oz * N100 + fz * N101;
+                real Npp = oz * N110 + fz * N111;
+                real Nm = oy * Nmm + fy * Nmp;
+                real Np = oy * Npm + fy * Npp;
                 N = ox * Nm + fx * Np;
 
                 // Compute trilinear gradients for N
@@ -277,38 +277,38 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
                 }
 
                 // Load A, B values
-                float A000 = gridCorrectionA[binOffset + c000];
-                float A001 = gridCorrectionA[binOffset + c001];
-                float A010 = gridCorrectionA[binOffset + c010];
-                float A011 = gridCorrectionA[binOffset + c011];
-                float A100 = gridCorrectionA[binOffset + c100];
-                float A101 = gridCorrectionA[binOffset + c101];
-                float A110 = gridCorrectionA[binOffset + c110];
-                float A111 = gridCorrectionA[binOffset + c111];
+                real A000 = gridCorrectionA[binOffset + c000];
+                real A001 = gridCorrectionA[binOffset + c001];
+                real A010 = gridCorrectionA[binOffset + c010];
+                real A011 = gridCorrectionA[binOffset + c011];
+                real A100 = gridCorrectionA[binOffset + c100];
+                real A101 = gridCorrectionA[binOffset + c101];
+                real A110 = gridCorrectionA[binOffset + c110];
+                real A111 = gridCorrectionA[binOffset + c111];
 
-                float Amm = oz * A000 + fz * A001;
-                float Amp = oz * A010 + fz * A011;
-                float Apm = oz * A100 + fz * A101;
-                float App = oz * A110 + fz * A111;
-                float Am = oy * Amm + fy * Amp;
-                float Ap = oy * Apm + fy * App;
+                real Amm = oz * A000 + fz * A001;
+                real Amp = oz * A010 + fz * A011;
+                real Apm = oz * A100 + fz * A101;
+                real App = oz * A110 + fz * A111;
+                real Am = oy * Amm + fy * Amp;
+                real Ap = oy * Apm + fy * App;
                 A = ox * Am + fx * Ap;
 
-                float B000 = gridCorrectionB[binOffset + c000];
-                float B001 = gridCorrectionB[binOffset + c001];
-                float B010 = gridCorrectionB[binOffset + c010];
-                float B011 = gridCorrectionB[binOffset + c011];
-                float B100 = gridCorrectionB[binOffset + c100];
-                float B101 = gridCorrectionB[binOffset + c101];
-                float B110 = gridCorrectionB[binOffset + c110];
-                float B111 = gridCorrectionB[binOffset + c111];
+                real B000 = gridCorrectionB[binOffset + c000];
+                real B001 = gridCorrectionB[binOffset + c001];
+                real B010 = gridCorrectionB[binOffset + c010];
+                real B011 = gridCorrectionB[binOffset + c011];
+                real B100 = gridCorrectionB[binOffset + c100];
+                real B101 = gridCorrectionB[binOffset + c101];
+                real B110 = gridCorrectionB[binOffset + c110];
+                real B111 = gridCorrectionB[binOffset + c111];
 
-                float Bmm = oz * B000 + fz * B001;
-                float Bmp = oz * B010 + fz * B011;
-                float Bpm = oz * B100 + fz * B101;
-                float Bpp = oz * B110 + fz * B111;
-                float Bm = oy * Bmm + fy * Bmp;
-                float Bp = oy * Bpm + fy * Bpp;
+                real Bmm = oz * B000 + fz * B001;
+                real Bmp = oz * B010 + fz * B011;
+                real Bpm = oz * B100 + fz * B101;
+                real Bpp = oz * B110 + fz * B111;
+                real Bm = oy * Bmm + fy * Bmp;
+                real Bp = oy * Bpm + fy * Bpp;
                 B = ox * Bm + fx * Bp;
 
                 if (computeGradient) {
@@ -326,20 +326,20 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
 
             // Always apply correction - N, A, B all go to zero together
             {
-                float invRi = 1.0f / R_i_off;
-                float invRp = 1.0f / R_probe_off;
-                float delta = invRi - invRp;
-                float sigma = invRi + invRp;
-                float logTerm = logf(R_i_off / R_probe_off);
+                real invRi = 1.0f / R_i_off;
+                real invRp = 1.0f / R_probe_off;
+                real delta = invRi - invRp;
+                real sigma = invRi + invRp;
+                real logTerm = log(R_i_off / R_probe_off);
 
                 result.hct = hct + delta * (N - 0.25f * A * sigma) + B * logTerm;
 
                 if (computeGradient) {
-                    float dCorr_dN = delta;
-                    float dCorr_dA = -0.25f * delta * sigma;
-                    float dCorr_dB = logTerm;
+                    real dCorr_dN = delta;
+                    real dCorr_dA = -0.25f * delta * sigma;
+                    real dCorr_dB = logTerm;
 
-                    float3 dCorr;
+                    real3 dCorr;
                     dCorr.x = dCorr_dN * nGrad.x + dCorr_dA * aGrad.x + dCorr_dB * bGrad.x;
                     dCorr.y = dCorr_dN * nGrad.y + dCorr_dA * aGrad.y + dCorr_dB * bGrad.y;
                     dCorr.z = dCorr_dN * nGrad.z + dCorr_dA * aGrad.z + dCorr_dB * bGrad.z;
@@ -375,112 +375,112 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
         }
 
         // Load HCT probe values
-        float h000 = gridHctProbe[c000];
-        float h001 = gridHctProbe[c001];
-        float h010 = gridHctProbe[c010];
-        float h011 = gridHctProbe[c011];
-        float h100 = gridHctProbe[c100];
-        float h101 = gridHctProbe[c101];
-        float h110 = gridHctProbe[c110];
-        float h111 = gridHctProbe[c111];
+        real h000 = gridHctProbe[c000];
+        real h001 = gridHctProbe[c001];
+        real h010 = gridHctProbe[c010];
+        real h011 = gridHctProbe[c011];
+        real h100 = gridHctProbe[c100];
+        real h101 = gridHctProbe[c101];
+        real h110 = gridHctProbe[c110];
+        real h111 = gridHctProbe[c111];
 
         // Trilinear interpolation for HCT
-        float vmm = oz * h000 + fz * h001;
-        float vmp = oz * h010 + fz * h011;
-        float vpm = oz * h100 + fz * h101;
-        float vpp = oz * h110 + fz * h111;
-        float vm = oy * vmm + fy * vmp;
-        float vp = oy * vpm + fy * vpp;
-        float hct = ox * vm + fx * vp;
+        real vmm = oz * h000 + fz * h001;
+        real vmp = oz * h010 + fz * h011;
+        real vpm = oz * h100 + fz * h101;
+        real vpp = oz * h110 + fz * h111;
+        real vm = oy * vmm + fy * vmp;
+        real vp = oy * vpm + fy * vpp;
+        real hct = ox * vm + fx * vp;
 
         // Load and interpolate N
-        float N000 = gridCorrectionN[corrOffset + c000];
-        float N001 = gridCorrectionN[corrOffset + c001];
-        float N010 = gridCorrectionN[corrOffset + c010];
-        float N011 = gridCorrectionN[corrOffset + c011];
-        float N100 = gridCorrectionN[corrOffset + c100];
-        float N101 = gridCorrectionN[corrOffset + c101];
-        float N110 = gridCorrectionN[corrOffset + c110];
-        float N111 = gridCorrectionN[corrOffset + c111];
+        real N000 = gridCorrectionN[corrOffset + c000];
+        real N001 = gridCorrectionN[corrOffset + c001];
+        real N010 = gridCorrectionN[corrOffset + c010];
+        real N011 = gridCorrectionN[corrOffset + c011];
+        real N100 = gridCorrectionN[corrOffset + c100];
+        real N101 = gridCorrectionN[corrOffset + c101];
+        real N110 = gridCorrectionN[corrOffset + c110];
+        real N111 = gridCorrectionN[corrOffset + c111];
 
-        float Nmm = oz * N000 + fz * N001;
-        float Nmp = oz * N010 + fz * N011;
-        float Npm = oz * N100 + fz * N101;
-        float Npp = oz * N110 + fz * N111;
-        float Nm = oy * Nmm + fy * Nmp;
-        float Np = oy * Npm + fy * Npp;
-        float N = ox * Nm + fx * Np;
+        real Nmm = oz * N000 + fz * N001;
+        real Nmp = oz * N010 + fz * N011;
+        real Npm = oz * N100 + fz * N101;
+        real Npp = oz * N110 + fz * N111;
+        real Nm = oy * Nmm + fy * Nmp;
+        real Np = oy * Npm + fy * Npp;
+        real N = ox * Nm + fx * Np;
 
         // Always apply correction - N, A, B all go to zero together
         {
             // Load and interpolate A, B
-            float A000 = gridCorrectionA[corrOffset + c000];
-            float A001 = gridCorrectionA[corrOffset + c001];
-            float A010 = gridCorrectionA[corrOffset + c010];
-            float A011 = gridCorrectionA[corrOffset + c011];
-            float A100 = gridCorrectionA[corrOffset + c100];
-            float A101 = gridCorrectionA[corrOffset + c101];
-            float A110 = gridCorrectionA[corrOffset + c110];
-            float A111 = gridCorrectionA[corrOffset + c111];
+            real A000 = gridCorrectionA[corrOffset + c000];
+            real A001 = gridCorrectionA[corrOffset + c001];
+            real A010 = gridCorrectionA[corrOffset + c010];
+            real A011 = gridCorrectionA[corrOffset + c011];
+            real A100 = gridCorrectionA[corrOffset + c100];
+            real A101 = gridCorrectionA[corrOffset + c101];
+            real A110 = gridCorrectionA[corrOffset + c110];
+            real A111 = gridCorrectionA[corrOffset + c111];
 
-            float Amm = oz * A000 + fz * A001;
-            float Amp = oz * A010 + fz * A011;
-            float Apm = oz * A100 + fz * A101;
-            float App = oz * A110 + fz * A111;
-            float Am = oy * Amm + fy * Amp;
-            float Ap = oy * Apm + fy * App;
-            float A = ox * Am + fx * Ap;
+            real Amm = oz * A000 + fz * A001;
+            real Amp = oz * A010 + fz * A011;
+            real Apm = oz * A100 + fz * A101;
+            real App = oz * A110 + fz * A111;
+            real Am = oy * Amm + fy * Amp;
+            real Ap = oy * Apm + fy * App;
+            real A = ox * Am + fx * Ap;
 
-            float B000 = gridCorrectionB[corrOffset + c000];
-            float B001 = gridCorrectionB[corrOffset + c001];
-            float B010 = gridCorrectionB[corrOffset + c010];
-            float B011 = gridCorrectionB[corrOffset + c011];
-            float B100 = gridCorrectionB[corrOffset + c100];
-            float B101 = gridCorrectionB[corrOffset + c101];
-            float B110 = gridCorrectionB[corrOffset + c110];
-            float B111 = gridCorrectionB[corrOffset + c111];
+            real B000 = gridCorrectionB[corrOffset + c000];
+            real B001 = gridCorrectionB[corrOffset + c001];
+            real B010 = gridCorrectionB[corrOffset + c010];
+            real B011 = gridCorrectionB[corrOffset + c011];
+            real B100 = gridCorrectionB[corrOffset + c100];
+            real B101 = gridCorrectionB[corrOffset + c101];
+            real B110 = gridCorrectionB[corrOffset + c110];
+            real B111 = gridCorrectionB[corrOffset + c111];
 
-            float Bmm = oz * B000 + fz * B001;
-            float Bmp = oz * B010 + fz * B011;
-            float Bpm = oz * B100 + fz * B101;
-            float Bpp = oz * B110 + fz * B111;
-            float Bm = oy * Bmm + fy * Bmp;
-            float Bp = oy * Bpm + fy * Bpp;
-            float B = ox * Bm + fx * Bp;
+            real Bmm = oz * B000 + fz * B001;
+            real Bmp = oz * B010 + fz * B011;
+            real Bpm = oz * B100 + fz * B101;
+            real Bpp = oz * B110 + fz * B111;
+            real Bm = oy * Bmm + fy * Bmp;
+            real Bp = oy * Bpm + fy * Bpp;
+            real B = ox * Bm + fx * Bp;
 
             // Apply correction
-            float invRi = 1.0f / R_i_off;
-            float invRp = 1.0f / R_probe_off;
-            float delta = invRi - invRp;
-            float sigma = invRi + invRp;
-            float logTerm = logf(R_i_off / R_probe_off);
+            real invRi = 1.0f / R_i_off;
+            real invRp = 1.0f / R_probe_off;
+            real delta = invRi - invRp;
+            real sigma = invRi + invRp;
+            real logTerm = log(R_i_off / R_probe_off);
 
             result.hct = hct + delta * (N - 0.25f * A * sigma) + B * logTerm;
 
             if (computeGradient) {
-                float dCorr_dN = delta;
-                float dCorr_dA = -0.25f * delta * sigma;
-                float dCorr_dB = logTerm;
+                real dCorr_dN = delta;
+                real dCorr_dA = -0.25f * delta * sigma;
+                real dCorr_dB = logTerm;
 
                 // Analytical trilinear gradients
-                float dh_dfx = vp - vm;
-                float dh_dfy = ox * (vmp - vmm) + fx * (vpp - vpm);
-                float dh_dfz = ox * (oy * (h001 - h000) + fy * (h011 - h010)) +
+                real dh_dfx = vp - vm;
+                real dh_dfy = ox * (vmp - vmm) + fx * (vpp - vpm);
+                real dh_dfz = ox * (oy * (h001 - h000) + fy * (h011 - h010)) +
                                fx * (oy * (h101 - h100) + fy * (h111 - h110));
 
-                float dN_dfx = Np - Nm;
-                float dN_dfy = ox * (Nmp - Nmm) + fx * (Npp - Npm);
-                float dN_dfz = ox * (oy * (N001 - N000) + fy * (N011 - N010)) +
+                real dN_dfx = Np - Nm;
+                real dN_dfy = ox * (Nmp - Nmm) + fx * (Npp - Npm);
+                real dN_dfz = ox * (oy * (N001 - N000) + fy * (N011 - N010)) +
                                fx * (oy * (N101 - N100) + fy * (N111 - N110));
 
-                float dA_dfx = Ap - Am;
-                float dA_dfy = ox * (Amp - Amm) + fx * (App - Apm);
-                float dA_dfz = ox * (oy * (A001 - A000) + fy * (A011 - A010)) +
+                real dA_dfx = Ap - Am;
+                real dA_dfy = ox * (Amp - Amm) + fx * (App - Apm);
+                real dA_dfz = ox * (oy * (A001 - A000) + fy * (A011 - A010)) +
                                fx * (oy * (A101 - A100) + fy * (A111 - A110));
 
-                float dB_dfx = Bp - Bm;
-                float dB_dfy = ox * (Bmp - Bmm) + fx * (Bpp - Bpm);
-                float dB_dfz = ox * (oy * (B001 - B000) + fy * (B011 - B010)) +
+                real dB_dfx = Bp - Bm;
+                real dB_dfy = ox * (Bmp - Bmm) + fx * (Bpp - Bpm);
+                real dB_dfz = ox * (oy * (B001 - B000) + fy * (B011 - B010)) +
                                fx * (oy * (B101 - B100) + fy * (B111 - B110));
 
                 result.gradient.x = (dh_dfx + dCorr_dN * dN_dfx + dCorr_dA * dA_dfx + dCorr_dB * dB_dfx) * invSpacing;
@@ -508,12 +508,12 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
  * correction grids use trilinear (pure d2 = 0, mixed d2 = analytical).
  */
 __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
-    float3 position,
-    float R_i_off,
-    float R_probe_off,
+    real3 position,
+    real R_i_off,
+    real R_probe_off,
     const int* __restrict__ gridCounts,
     float gridSpacing,
-    float originX, float originY, float originZ,
+    real originX, real originY, real originZ,
     const float* __restrict__ gridHctProbe,
     const float* __restrict__ gridHctDerivatives,
     const float* __restrict__ gridCorrectionN,
@@ -526,12 +526,12 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
 {
     GBSAHessianResult result;
     result.hct = 0.0f;
-    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    result.gradient = make_real3(0.0f, 0.0f, 0.0f);
     for (int i = 0; i < 6; i++) result.hessian[i] = 0.0f;
 
     float gridSpacingArr[3] = {gridSpacing, gridSpacing, gridSpacing};
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacingArr,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -541,11 +541,11 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
     int nz = gridCounts[2];
     int nyz = ny * nz;
 
-    float invSpacing = 1.0f / gridSpacing;
-    float invSpacing2 = invSpacing * invSpacing;
-    float ox = 1.0f - fx;
-    float oy = 1.0f - fy;
-    float oz = 1.0f - fz;
+    real invSpacing = 1.0f / gridSpacing;
+    real invSpacing2 = invSpacing * invSpacing;
+    real ox = 1.0f - fx;
+    real oy = 1.0f - fy;
+    real oz = 1.0f - fz;
 
     // Corner indices (for trilinear correction grids and trilinear fallback)
     int c000 = ix * nyz + iy * nz + iz;
@@ -558,14 +558,14 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
     int c111 = c110 + 1;
 
     // Correction coefficients (Psi = hct + delta*(N - 0.25*A*sigma) + B*logTerm)
-    float invRi = 1.0f / R_i_off;
-    float invRp = 1.0f / R_probe_off;
-    float delta = invRi - invRp;
-    float sigma = invRi + invRp;
-    float logTerm = logf(R_i_off / R_probe_off);
-    float dCorr_dN = delta;
-    float dCorr_dA = -0.25f * delta * sigma;
-    float dCorr_dB = logTerm;
+    real invRi = 1.0f / R_i_off;
+    real invRp = 1.0f / R_probe_off;
+    real delta = invRi - invRp;
+    real sigma = invRi + invRp;
+    real logTerm = log(R_i_off / R_probe_off);
+    real dCorr_dN = delta;
+    real dCorr_dA = -0.25f * delta * sigma;
+    real dCorr_dB = logTerm;
 
     if (method == 1 || method == 4) {
         // =============================================================
@@ -583,20 +583,20 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
             corrOffset = binOffset;
         }
 
-        float val = 0, gx = 0, gy = 0, gz = 0;
-        float hxx = 0, hyy = 0, hzz = 0, hxy = 0, hxz = 0, hyz = 0;
+        real val = 0, gx = 0, gy = 0, gz = 0;
+        real hxx = 0, hyy = 0, hzz = 0, hxy = 0, hxz = 0, hyz = 0;
 
         if (method == 1) {
             // Cubic B-spline (4x4x4 stencil)
-            float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
-            float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
-            float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
-            float dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
-            float dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
-            float dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
-            float d2bx[4] = {bspline_deriv2_0(fx), bspline_deriv2_1(fx), bspline_deriv2_2(fx), bspline_deriv2_3(fx)};
-            float d2by[4] = {bspline_deriv2_0(fy), bspline_deriv2_1(fy), bspline_deriv2_2(fy), bspline_deriv2_3(fy)};
-            float d2bz[4] = {bspline_deriv2_0(fz), bspline_deriv2_1(fz), bspline_deriv2_2(fz), bspline_deriv2_3(fz)};
+            real bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+            real by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+            real bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+            real dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+            real dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+            real dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+            real d2bx[4] = {bspline_deriv2_0(fx), bspline_deriv2_1(fx), bspline_deriv2_2(fx), bspline_deriv2_3(fx)};
+            real d2by[4] = {bspline_deriv2_0(fy), bspline_deriv2_1(fy), bspline_deriv2_2(fy), bspline_deriv2_3(fy)};
+            real d2bz[4] = {bspline_deriv2_0(fz), bspline_deriv2_1(fz), bspline_deriv2_2(fz), bspline_deriv2_3(fz)};
 
             for (int i = 0; i < 4; i++) {
                 int gxi = min(max(ix - 1 + i, 0), gridCounts[0] - 1);
@@ -605,7 +605,7 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                     for (int k = 0; k < 4; k++) {
                         int gzi = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
                         int gridIdx = gxi * nyz + gyi * nz + gzi;
-                        float combined = gridHctProbe[gridIdx]
+                        real combined = gridHctProbe[gridIdx]
                             + dCorr_dN * gridCorrectionN[corrOffset + gridIdx]
                             + dCorr_dA * gridCorrectionA[corrOffset + gridIdx]
                             + dCorr_dB * gridCorrectionB[corrOffset + gridIdx];
@@ -624,23 +624,23 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
             }
         } else {
             // Quintic B-spline (6x6x6 stencil)
-            float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+            real bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
                            qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
-            float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+            real by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
                            qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
-            float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+            real bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
                            qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
-            float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+            real dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
                             qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
-            float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+            real dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
                             qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
-            float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+            real dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
                             qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
-            float d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
+            real d2bx[6] = {qbspline_deriv2_0(fx), qbspline_deriv2_1(fx), qbspline_deriv2_2(fx),
                              qbspline_deriv2_3(fx), qbspline_deriv2_4(fx), qbspline_deriv2_5(fx)};
-            float d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
+            real d2by[6] = {qbspline_deriv2_0(fy), qbspline_deriv2_1(fy), qbspline_deriv2_2(fy),
                              qbspline_deriv2_3(fy), qbspline_deriv2_4(fy), qbspline_deriv2_5(fy)};
-            float d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
+            real d2bz[6] = {qbspline_deriv2_0(fz), qbspline_deriv2_1(fz), qbspline_deriv2_2(fz),
                              qbspline_deriv2_3(fz), qbspline_deriv2_4(fz), qbspline_deriv2_5(fz)};
 
             for (int i = 0; i < 6; i++) {
@@ -650,7 +650,7 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                     for (int k = 0; k < 6; k++) {
                         int gzi = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
                         int gridIdx = gxi * nyz + gyi * nz + gzi;
-                        float combined = gridHctProbe[gridIdx]
+                        real combined = gridHctProbe[gridIdx]
                             + dCorr_dN * gridCorrectionN[corrOffset + gridIdx]
                             + dCorr_dA * gridCorrectionA[corrOffset + gridIdx]
                             + dCorr_dB * gridCorrectionB[corrOffset + gridIdx];
@@ -670,7 +670,7 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
         }
 
         result.hct = val;
-        result.gradient = make_float3(gx * invSpacing, gy * invSpacing, gz * invSpacing);
+        result.gradient = make_real3(gx * invSpacing, gy * invSpacing, gz * invSpacing);
         result.hessian[0] = hxx * invSpacing2;
         result.hessian[1] = hyy * invSpacing2;
         result.hessian[2] = hzz * invSpacing2;
@@ -705,16 +705,16 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                     // Triquintic Hermite: evaluate each grid separately to avoid
                     // float32 accumulation error in 216-element matrix multiply
                     // when combining grids with different magnitudes.
-                    float hct_val = 0, hct_dx = 0, hct_dy = 0, hct_dz = 0;
-                    float hct_d2xx = 0, hct_d2yy = 0, hct_d2zz = 0;
-                    float hct_d2xy = 0, hct_d2xz = 0, hct_d2yz = 0;
-                    float corr_val = 0, corr_dx = 0, corr_dy = 0, corr_dz = 0;
-                    float corr_d2xx = 0, corr_d2yy = 0, corr_d2zz = 0;
-                    float corr_d2xy = 0, corr_d2xz = 0, corr_d2yz = 0;
+                    real hct_val = 0, hct_dx = 0, hct_dy = 0, hct_dz = 0;
+                    real hct_d2xx = 0, hct_d2yy = 0, hct_d2zz = 0;
+                    real hct_d2xy = 0, hct_d2xz = 0, hct_d2yz = 0;
+                    real corr_val = 0, corr_dx = 0, corr_dy = 0, corr_dz = 0;
+                    real corr_d2xx = 0, corr_d2yy = 0, corr_d2zz = 0;
+                    real corr_d2xy = 0, corr_d2xz = 0, corr_d2yz = 0;
 
                     // Evaluate each grid (HCT, N, A, B) separately
                     const float* gridPtrs[4] = {gridHctDerivatives, nGrid, aGrid, bGrid};
-                    float coeffs[4] = {1.0f, dCorr_dN, dCorr_dA, dCorr_dB};
+                    real coeffs[4] = {1.0f, dCorr_dN, dCorr_dA, dCorr_dB};
 
                     for (int g = 0; g < 4; g++) {
                         TriquinticAccum X[216];
@@ -730,7 +730,7 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                         triquinticEvalVGH(a, fx, fy, fz, &gv, &gdx, &gdy, &gdz,
                                           &gd2xx, &gd2yy, &gd2zz, &gd2xy, &gd2xz, &gd2yz);
 
-                        float w = coeffs[g];
+                        real w = coeffs[g];
                         if (g == 0) {
                             hct_val = gv; hct_dx = gdx; hct_dy = gdy; hct_dz = gdz;
                             hct_d2xx = gd2xx; hct_d2yy = gd2yy; hct_d2zz = gd2zz;
@@ -742,19 +742,19 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                         }
                     }
 
-                    float pval = hct_val + corr_val;
-                    float pdx = hct_dx + corr_dx;
-                    float pdy = hct_dy + corr_dy;
-                    float pdz = hct_dz + corr_dz;
-                    float pd2xx = hct_d2xx + corr_d2xx;
-                    float pd2yy = hct_d2yy + corr_d2yy;
-                    float pd2zz = hct_d2zz + corr_d2zz;
-                    float pd2xy = hct_d2xy + corr_d2xy;
-                    float pd2xz = hct_d2xz + corr_d2xz;
-                    float pd2yz = hct_d2yz + corr_d2yz;
+                    real pval = hct_val + corr_val;
+                    real pdx = hct_dx + corr_dx;
+                    real pdy = hct_dy + corr_dy;
+                    real pdz = hct_dz + corr_dz;
+                    real pd2xx = hct_d2xx + corr_d2xx;
+                    real pd2yy = hct_d2yy + corr_d2yy;
+                    real pd2zz = hct_d2zz + corr_d2zz;
+                    real pd2xy = hct_d2xy + corr_d2xy;
+                    real pd2xz = hct_d2xz + corr_d2xz;
+                    real pd2yz = hct_d2yz + corr_d2yz;
 
                     result.hct = pval;
-                    result.gradient = make_float3(pdx * invSpacing, pdy * invSpacing, pdz * invSpacing);
+                    result.gradient = make_real3(pdx * invSpacing, pdy * invSpacing, pdz * invSpacing);
                     result.hessian[0] = pd2xx * invSpacing2;
                     result.hessian[1] = pd2yy * invSpacing2;
                     result.hessian[2] = pd2zz * invSpacing2;
@@ -764,15 +764,15 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                 } else {
                     // Tricubic Hermite: evaluate each grid separately
                     const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
-                    float hct_val = 0, hct_dx = 0, hct_dy = 0, hct_dz = 0;
-                    float hct_d2xx = 0, hct_d2yy = 0, hct_d2zz = 0;
-                    float hct_d2xy = 0, hct_d2xz = 0, hct_d2yz = 0;
-                    float corr_val = 0, corr_dx = 0, corr_dy = 0, corr_dz = 0;
-                    float corr_d2xx = 0, corr_d2yy = 0, corr_d2zz = 0;
-                    float corr_d2xy = 0, corr_d2xz = 0, corr_d2yz = 0;
+                    real hct_val = 0, hct_dx = 0, hct_dy = 0, hct_dz = 0;
+                    real hct_d2xx = 0, hct_d2yy = 0, hct_d2zz = 0;
+                    real hct_d2xy = 0, hct_d2xz = 0, hct_d2yz = 0;
+                    real corr_val = 0, corr_dx = 0, corr_dy = 0, corr_dz = 0;
+                    real corr_d2xx = 0, corr_d2yy = 0, corr_d2zz = 0;
+                    real corr_d2xy = 0, corr_d2xz = 0, corr_d2yz = 0;
 
                     const float* gridPtrs[4] = {gridHctDerivatives, nGrid, aGrid, bGrid};
-                    float wt[4] = {1.0f, dCorr_dN, dCorr_dA, dCorr_dB};
+                    real wt[4] = {1.0f, dCorr_dN, dCorr_dA, dCorr_dB};
 
                     for (int g = 0; g < 4; g++) {
                         TricubicAccum X[64];
@@ -788,7 +788,7 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                         tricubicEvalVGH(a, fx, fy, fz, &gv, &gdx, &gdy, &gdz,
                                         &gd2xx, &gd2yy, &gd2zz, &gd2xy, &gd2xz, &gd2yz);
 
-                        float w = wt[g];
+                        real w = wt[g];
                         if (g == 0) {
                             hct_val = gv; hct_dx = gdx; hct_dy = gdy; hct_dz = gdz;
                             hct_d2xx = gd2xx; hct_d2yy = gd2yy; hct_d2zz = gd2zz;
@@ -800,19 +800,19 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                         }
                     }
 
-                    float pval = hct_val + corr_val;
-                    float pdx = hct_dx + corr_dx;
-                    float pdy = hct_dy + corr_dy;
-                    float pdz = hct_dz + corr_dz;
-                    float pd2xx = hct_d2xx + corr_d2xx;
-                    float pd2yy = hct_d2yy + corr_d2yy;
-                    float pd2zz = hct_d2zz + corr_d2zz;
-                    float pd2xy = hct_d2xy + corr_d2xy;
-                    float pd2xz = hct_d2xz + corr_d2xz;
-                    float pd2yz = hct_d2yz + corr_d2yz;
+                    real pval = hct_val + corr_val;
+                    real pdx = hct_dx + corr_dx;
+                    real pdy = hct_dy + corr_dy;
+                    real pdz = hct_dz + corr_dz;
+                    real pd2xx = hct_d2xx + corr_d2xx;
+                    real pd2yy = hct_d2yy + corr_d2yy;
+                    real pd2zz = hct_d2zz + corr_d2zz;
+                    real pd2xy = hct_d2xy + corr_d2xy;
+                    real pd2xz = hct_d2xz + corr_d2xz;
+                    real pd2yz = hct_d2yz + corr_d2yz;
 
                     result.hct = pval;
-                    result.gradient = make_float3(pdx * invSpacing, pdy * invSpacing, pdz * invSpacing);
+                    result.gradient = make_real3(pdx * invSpacing, pdy * invSpacing, pdz * invSpacing);
                     result.hessian[0] = pd2xx * invSpacing2;
                     result.hessian[1] = pd2yy * invSpacing2;
                     result.hessian[2] = pd2zz * invSpacing2;
@@ -822,9 +822,9 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                 }
             } else {
                 // Binned mode: HCT uses Hermite polynomial, correction grids use trilinear.
-                float hct_val = 0, hct_dx = 0, hct_dy = 0, hct_dz = 0;
-                float hct_d2xx = 0, hct_d2yy = 0, hct_d2zz = 0;
-                float hct_d2xy = 0, hct_d2xz = 0, hct_d2yz = 0;
+                real hct_val = 0, hct_dx = 0, hct_dy = 0, hct_dz = 0;
+                real hct_d2xx = 0, hct_d2yy = 0, hct_d2zz = 0;
+                real hct_d2xy = 0, hct_d2xz = 0, hct_d2yz = 0;
 
                 if (method == 3) {
                     // Triquintic HCT Hessian
@@ -864,52 +864,52 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
                 }
 
                 // Trilinear correction: combine N, A, B into one field at 8 corners
-                float corr000 = dCorr_dN * gridCorrectionN[binOffset + c000]
+                real corr000 = dCorr_dN * gridCorrectionN[binOffset + c000]
                               + dCorr_dA * gridCorrectionA[binOffset + c000]
                               + dCorr_dB * gridCorrectionB[binOffset + c000];
-                float corr001 = dCorr_dN * gridCorrectionN[binOffset + c001]
+                real corr001 = dCorr_dN * gridCorrectionN[binOffset + c001]
                               + dCorr_dA * gridCorrectionA[binOffset + c001]
                               + dCorr_dB * gridCorrectionB[binOffset + c001];
-                float corr010 = dCorr_dN * gridCorrectionN[binOffset + c010]
+                real corr010 = dCorr_dN * gridCorrectionN[binOffset + c010]
                               + dCorr_dA * gridCorrectionA[binOffset + c010]
                               + dCorr_dB * gridCorrectionB[binOffset + c010];
-                float corr011 = dCorr_dN * gridCorrectionN[binOffset + c011]
+                real corr011 = dCorr_dN * gridCorrectionN[binOffset + c011]
                               + dCorr_dA * gridCorrectionA[binOffset + c011]
                               + dCorr_dB * gridCorrectionB[binOffset + c011];
-                float corr100 = dCorr_dN * gridCorrectionN[binOffset + c100]
+                real corr100 = dCorr_dN * gridCorrectionN[binOffset + c100]
                               + dCorr_dA * gridCorrectionA[binOffset + c100]
                               + dCorr_dB * gridCorrectionB[binOffset + c100];
-                float corr101 = dCorr_dN * gridCorrectionN[binOffset + c101]
+                real corr101 = dCorr_dN * gridCorrectionN[binOffset + c101]
                               + dCorr_dA * gridCorrectionA[binOffset + c101]
                               + dCorr_dB * gridCorrectionB[binOffset + c101];
-                float corr110 = dCorr_dN * gridCorrectionN[binOffset + c110]
+                real corr110 = dCorr_dN * gridCorrectionN[binOffset + c110]
                               + dCorr_dA * gridCorrectionA[binOffset + c110]
                               + dCorr_dB * gridCorrectionB[binOffset + c110];
-                float corr111 = dCorr_dN * gridCorrectionN[binOffset + c111]
+                real corr111 = dCorr_dN * gridCorrectionN[binOffset + c111]
                               + dCorr_dA * gridCorrectionA[binOffset + c111]
                               + dCorr_dB * gridCorrectionB[binOffset + c111];
 
                 // Trilinear interpolation of combined correction
-                float cmm = oz * corr000 + fz * corr001;
-                float cmp = oz * corr010 + fz * corr011;
-                float cpm = oz * corr100 + fz * corr101;
-                float cpp = oz * corr110 + fz * corr111;
-                float cm = oy * cmm + fy * cmp;
-                float cp = oy * cpm + fy * cpp;
-                float corrVal = ox * cm + fx * cp;
+                real cmm = oz * corr000 + fz * corr001;
+                real cmp = oz * corr010 + fz * corr011;
+                real cpm = oz * corr100 + fz * corr101;
+                real cpp = oz * corr110 + fz * corr111;
+                real cm = oy * cmm + fy * cmp;
+                real cp = oy * cpm + fy * cpp;
+                real corrVal = ox * cm + fx * cp;
 
                 // Correction gradient (unit cell coords)
-                float corr_dfx = cp - cm;
-                float corr_dfy = ox * (cmp - cmm) + fx * (cpp - cpm);
-                float corr_dfz = ox * (oy * (corr001 - corr000) + fy * (corr011 - corr010))
+                real corr_dfx = cp - cm;
+                real corr_dfy = ox * (cmp - cmm) + fx * (cpp - cpm);
+                real corr_dfz = ox * (oy * (corr001 - corr000) + fy * (corr011 - corr010))
                                + fx * (oy * (corr101 - corr100) + fy * (corr111 - corr110));
 
                 // Correction mixed Hessian (trilinear pure d2 = 0)
-                float corr_d2xy = oz * (corr000 - corr010 - corr100 + corr110)
+                real corr_d2xy = oz * (corr000 - corr010 - corr100 + corr110)
                                 + fz * (corr001 - corr011 - corr101 + corr111);
-                float corr_d2xz = oy * (corr000 - corr001 - corr100 + corr101)
+                real corr_d2xz = oy * (corr000 - corr001 - corr100 + corr101)
                                 + fy * (corr010 - corr011 - corr110 + corr111);
-                float corr_d2yz = ox * (corr000 - corr001 - corr010 + corr011)
+                real corr_d2yz = ox * (corr000 - corr001 - corr010 + corr011)
                                 + fx * (corr100 - corr101 - corr110 + corr111);
 
                 // Combine HCT polynomial Hessian + trilinear correction Hessian
@@ -945,30 +945,30 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
         }
 
         // Combine all 4 grids at 8 corners
-        float v000 = gridHctProbe[c000] + dCorr_dN * gridCorrectionN[corrOffset + c000]
+        real v000 = gridHctProbe[c000] + dCorr_dN * gridCorrectionN[corrOffset + c000]
                    + dCorr_dA * gridCorrectionA[corrOffset + c000] + dCorr_dB * gridCorrectionB[corrOffset + c000];
-        float v001 = gridHctProbe[c001] + dCorr_dN * gridCorrectionN[corrOffset + c001]
+        real v001 = gridHctProbe[c001] + dCorr_dN * gridCorrectionN[corrOffset + c001]
                    + dCorr_dA * gridCorrectionA[corrOffset + c001] + dCorr_dB * gridCorrectionB[corrOffset + c001];
-        float v010 = gridHctProbe[c010] + dCorr_dN * gridCorrectionN[corrOffset + c010]
+        real v010 = gridHctProbe[c010] + dCorr_dN * gridCorrectionN[corrOffset + c010]
                    + dCorr_dA * gridCorrectionA[corrOffset + c010] + dCorr_dB * gridCorrectionB[corrOffset + c010];
-        float v011 = gridHctProbe[c011] + dCorr_dN * gridCorrectionN[corrOffset + c011]
+        real v011 = gridHctProbe[c011] + dCorr_dN * gridCorrectionN[corrOffset + c011]
                    + dCorr_dA * gridCorrectionA[corrOffset + c011] + dCorr_dB * gridCorrectionB[corrOffset + c011];
-        float v100 = gridHctProbe[c100] + dCorr_dN * gridCorrectionN[corrOffset + c100]
+        real v100 = gridHctProbe[c100] + dCorr_dN * gridCorrectionN[corrOffset + c100]
                    + dCorr_dA * gridCorrectionA[corrOffset + c100] + dCorr_dB * gridCorrectionB[corrOffset + c100];
-        float v101 = gridHctProbe[c101] + dCorr_dN * gridCorrectionN[corrOffset + c101]
+        real v101 = gridHctProbe[c101] + dCorr_dN * gridCorrectionN[corrOffset + c101]
                    + dCorr_dA * gridCorrectionA[corrOffset + c101] + dCorr_dB * gridCorrectionB[corrOffset + c101];
-        float v110 = gridHctProbe[c110] + dCorr_dN * gridCorrectionN[corrOffset + c110]
+        real v110 = gridHctProbe[c110] + dCorr_dN * gridCorrectionN[corrOffset + c110]
                    + dCorr_dA * gridCorrectionA[corrOffset + c110] + dCorr_dB * gridCorrectionB[corrOffset + c110];
-        float v111 = gridHctProbe[c111] + dCorr_dN * gridCorrectionN[corrOffset + c111]
+        real v111 = gridHctProbe[c111] + dCorr_dN * gridCorrectionN[corrOffset + c111]
                    + dCorr_dA * gridCorrectionA[corrOffset + c111] + dCorr_dB * gridCorrectionB[corrOffset + c111];
 
         // Trilinear interpolation
-        float vmm = oz * v000 + fz * v001;
-        float vmp = oz * v010 + fz * v011;
-        float vpm = oz * v100 + fz * v101;
-        float vpp = oz * v110 + fz * v111;
-        float vm = oy * vmm + fy * vmp;
-        float vp = oy * vpm + fy * vpp;
+        real vmm = oz * v000 + fz * v001;
+        real vmp = oz * v010 + fz * v011;
+        real vpm = oz * v100 + fz * v101;
+        real vpp = oz * v110 + fz * v111;
+        real vm = oy * vmm + fy * vmp;
+        real vp = oy * vpm + fy * vpp;
         result.hct = ox * vm + fx * vp;
 
         // Gradient
@@ -1041,7 +1041,7 @@ extern "C" __global__ void computeReceptorHCT(
 
     // Get position
     real4 pos = posq[particleIdx];
-    float3 position = make_float3(pos.x, pos.y, pos.z);
+    real3 position = make_real3(pos.x, pos.y, pos.z);
 
     // Get radius and compute offset radius
     float R_i = radii[templateIdx];
@@ -1503,7 +1503,7 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
     int templateIdx = atomInGroup % templateNumAtoms;
 
     real4 pos = posq[particleIdx];
-    float3 position = make_float3(pos.x, pos.y, pos.z);
+    real3 position = make_real3(pos.x, pos.y, pos.z);
 
     float R_i = radii[templateIdx];
     float R_i_off = R_i - DIELECTRIC_OFFSET;
@@ -1974,7 +1974,7 @@ extern "C" __global__ void computeHCTJacobian(
     }
     int binOffset = binIdx * numPoints;
 
-    float3 position = make_float3(pos_k.x, pos_k.y, pos_k.z);
+    real3 position = make_real3(pos_k.x, pos_k.y, pos_k.z);
     GBSAInterpolationResult gridResult = interpolateGBSAGrids(
         position, R_k_off, R_probe_off,
         gridCounts, gridSpacing, originX, originY, originZ,
@@ -2114,7 +2114,7 @@ extern "C" __global__ void computeReceptorGridHessian(
 
     // Analytical Hessian: single interpolation with second derivatives
     GBSAHessianResult hres = interpolateGBSAGridsWithHessian(
-        make_float3(pk.x, pk.y, pk.z), R_k_off, R_probe_off,
+        make_real3(pk.x, pk.y, pk.z), R_k_off, R_probe_off,
         gridCounts, gridSpacing, originX, originY, originZ,
         gridHctProbe, gridHctDerivatives,
         gridCorrectionN, gridCorrectionA, gridCorrectionB,
