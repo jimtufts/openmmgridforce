@@ -2304,7 +2304,7 @@ extern "C" __global__ void assembleGBSAHessian(
     const float* __restrict__ dR_dPsi,
     const float* __restrict__ gridHCTHessian,
     int totalParticles,
-    float* __restrict__ hessian
+    mixed* __restrict__ hessian
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int dim3N = 3 * totalParticles;
@@ -2614,7 +2614,7 @@ extern "C" __global__ void assembleGBSAHessian(
     }
 
 write_result:
-    float H_store = (float)H_val;
+    mixed H_store = (mixed)H_val;
     hessian[row * dim3N + col] = H_store;
     if (col > row) hessian[col * dim3N + row] = H_store;
 }

@@ -704,7 +704,7 @@ void CudaCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
         hessianJacobian.initialize<float>(cu, totalParticles * dim3N, "hessianJacobian");
         hessianCouplingMatrix.initialize<float>(cu, totalParticles * totalParticles, "hessianCouplingM");
         hessianGridHCTHessian.initialize<float>(cu, totalParticles * 6, "hessianGridHCTHessian");
-        hessianMatrix.initialize<float>(cu, dim3N * dim3N, "hessianMatrix");
+        initMixedEnergyBuffer(cu, hessianMatrix, dim3N * dim3N, "hessianMatrix");
         hessianBuffersInitialized = true;
     }
 
@@ -802,14 +802,9 @@ void CudaCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
     };
     cu.executeKernel(assembleGBSAHessianKernel, assembleArgs, numBlocksH * blockSize, blockSize);
 
-    // Download Hessian from GPU
-    vector<float> hessianFloat(dim3N * dim3N);
-    hessianMatrix.download(hessianFloat);
-
-    // Convert to double
-    for (int i = 0; i < dim3N * dim3N; i++) {
-        lastFullHessian[i] = static_cast<double>(hessianFloat[i]);
-    }
+    // Download Hessian from GPU (mixed: double in mixed/double, float in single)
+    lastFullHessian.resize(dim3N * dim3N);
+    downloadMixedEnergy(cu, hessianMatrix, lastFullHessian);
 
     // Extract diagonal blocks: [dxx, dyy, dzz, dxy, dxz, dyz] per atom
     for (int i = 0; i < totalParticles; i++) {
