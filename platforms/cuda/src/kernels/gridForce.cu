@@ -121,7 +121,7 @@ extern "C" __global__ void computeGridForce(
         }
         else if (invPowerMode == 0) {
             // No inv_power transformation - use shared library directly
-            float3 absPosition = make_float3(posOrig.x, posOrig.y, posOrig.z);
+            real3 absPosition = make_real3(posOrig.x, posOrig.y, posOrig.z);
 
             InterpolationResult result = interpolateGrid(
                 gridValues, gridDerivatives, gridCounts, gridSpacing,
@@ -129,17 +129,17 @@ extern "C" __global__ void computeGridForce(
                 interpolationMethod, true, true);
 
             if (result.isInside) {
-                float val = result.value;
-                float gx = result.gradient.x;
-                float gy = result.gradient.y;
-                float gz = result.gradient.z;
+                real val = result.value;
+                real gx = result.gradient.x;
+                real gy = result.gradient.y;
+                real gz = result.gradient.z;
 
                 if (arcsinhScale > 0.0f) {
                     // Arcsinh inverse: V = scale * sinh(g), dV/dr = scale * cosh(g) * dg/dr
-                    float sinhG = sinhf(val);
-                    float coshG = coshf(val);
+                    real sinhG = sinh(val);
+                    real coshG = cosh(val);
                     val = arcsinhScale * sinhG;
-                    float chainFactor = arcsinhScale * coshG;
+                    real chainFactor = arcsinhScale * coshG;
                     gx *= chainFactor;
                     gy *= chainFactor;
                     gz *= chainFactor;
@@ -153,8 +153,8 @@ extern "C" __global__ void computeGridForce(
                 if (effectiveCap > 0.0f) {
                     // Tanh cap: f(v) = C * tanh(v/C), bounded by ±C
                     // Gradient factor: sech²(v/C) = 1 - tanh²(v/C)
-                    float t = tanhf(val / effectiveCap);
-                    float gradFactor = 1.0f - t * t;
+                    real t = tanh(val / effectiveCap);
+                    real gradFactor = 1.0f - t * t;
                     val = effectiveCap * t;
                     gx *= gradFactor;
                     gy *= gradFactor;

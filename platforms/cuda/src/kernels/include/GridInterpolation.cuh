@@ -29,8 +29,8 @@
  * Result of grid interpolation containing value and gradient.
  */
 struct InterpolationResult {
-    float value;      // Interpolated value
-    float3 gradient;  // Gradient - either physical (per nm) or raw (per unit cell), depending on divideBySpacing flag
+    real value;      // Interpolated value
+    real3 gradient;  // Gradient - either physical (per nm) or raw (per unit cell), depending on divideBySpacing flag
     bool isInside;    // Whether the query point was inside the grid
 };
 
@@ -38,18 +38,18 @@ struct InterpolationResult {
  * Check if a position is inside the grid bounds.
  */
 __device__ inline bool isInsideGrid(
-    float3 position,
+    real3 position,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ)
+    real originX, real originY, real originZ)
 {
-    float relX = position.x - originX;
-    float relY = position.y - originY;
-    float relZ = position.z - originZ;
+    real relX = position.x - originX;
+    real relY = position.y - originY;
+    real relZ = position.z - originZ;
 
-    float extentX = gridSpacing[0] * (gridCounts[0] - 1);
-    float extentY = gridSpacing[1] * (gridCounts[1] - 1);
-    float extentZ = gridSpacing[2] * (gridCounts[2] - 1);
+    real extentX = gridSpacing[0] * (gridCounts[0] - 1);
+    real extentY = gridSpacing[1] * (gridCounts[1] - 1);
+    real extentZ = gridSpacing[2] * (gridCounts[2] - 1);
 
     return (relX >= 0.0f && relX <= extentX &&
             relY >= 0.0f && relY <= extentY &&
@@ -61,21 +61,21 @@ __device__ inline bool isInsideGrid(
  * Returns false if position is outside grid.
  */
 __device__ inline bool computeGridCell(
-    float3 position,
+    real3 position,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
+    real originX, real originY, real originZ,
     int& ix, int& iy, int& iz,
-    float& fx, float& fy, float& fz)
+    real& fx, real& fy, real& fz)
 {
     // Transform to grid-relative coordinates
-    float3 pos;
+    real3 pos;
     pos.x = position.x - originX;
     pos.y = position.y - originY;
     pos.z = position.z - originZ;
 
     // Check bounds
-    float3 gridCorner;
+    real3 gridCorner;
     gridCorner.x = gridSpacing[0] * (gridCounts[0] - 1);
     gridCorner.y = gridSpacing[1] * (gridCounts[1] - 1);
     gridCorner.z = gridSpacing[2] * (gridCounts[2] - 1);
@@ -115,26 +115,26 @@ __device__ inline InterpolationResult trilinearInterpolate(
     const float* __restrict__ gridValues,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     bool computeGradient = true,
     bool divideBySpacing = true)
 {
     InterpolationResult result;
     result.value = 0.0f;
-    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    result.gradient = make_real3(0.0f, 0.0f, 0.0f);
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
 
     if (!result.isInside) return result;
 
-    float ox = 1.0f - fx;
-    float oy = 1.0f - fy;
-    float oz = 1.0f - fz;
+    real ox = 1.0f - fx;
+    real oy = 1.0f - fy;
+    real oz = 1.0f - fz;
 
     int nyz = gridCounts[1] * gridCounts[2];
     int baseIndex = ix * nyz + iy * gridCounts[2] + iz;
@@ -143,30 +143,30 @@ __device__ inline InterpolationResult trilinearInterpolate(
     int ipp = ip + gridCounts[2];
 
     // Get 8 corner values
-    float vmmm = gridValues[baseIndex];
-    float vmmp = gridValues[baseIndex + 1];
-    float vmpm = gridValues[imp];
-    float vmpp = gridValues[imp + 1];
-    float vpmm = gridValues[ip];
-    float vpmp = gridValues[ip + 1];
-    float vppm = gridValues[ipp];
-    float vppp = gridValues[ipp + 1];
+    real vmmm = gridValues[baseIndex];
+    real vmmp = gridValues[baseIndex + 1];
+    real vmpm = gridValues[imp];
+    real vmpp = gridValues[imp + 1];
+    real vpmm = gridValues[ip];
+    real vpmp = gridValues[ip + 1];
+    real vppm = gridValues[ipp];
+    real vppp = gridValues[ipp + 1];
 
     // Trilinear interpolation
-    float vmm = oz * vmmm + fz * vmmp;
-    float vmp = oz * vmpm + fz * vmpp;
-    float vpm = oz * vpmm + fz * vpmp;
-    float vpp = oz * vppm + fz * vppp;
+    real vmm = oz * vmmm + fz * vmmp;
+    real vmp = oz * vmpm + fz * vmpp;
+    real vpm = oz * vpmm + fz * vpmp;
+    real vpp = oz * vppm + fz * vppp;
 
-    float vm = oy * vmm + fy * vmp;
-    float vp = oy * vpm + fy * vpp;
+    real vm = oy * vmm + fy * vmp;
+    real vp = oy * vpm + fy * vpp;
 
     result.value = ox * vm + fx * vp;
 
     if (computeGradient) {
-        float dx = (vp - vm);
-        float dy = (ox * (vmp - vmm) + fx * (vpp - vpm));
-        float dz = (ox * (oy * (vmmp - vmmm) + fy * (vmpp - vmpm)) +
+        real dx = (vp - vm);
+        real dy = (ox * (vmp - vmm) + fx * (vpp - vpm));
+        real dz = (ox * (oy * (vmmp - vmmm) + fy * (vmpp - vmpm)) +
                     fx * (oy * (vpmp - vpmm) + fy * (vppp - vppm)));
 
         if (divideBySpacing) {
@@ -195,17 +195,17 @@ __device__ inline InterpolationResult bsplineInterpolate(
     const float* __restrict__ gridValues,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     bool computeGradient = true,
     bool divideBySpacing = true)
 {
     InterpolationResult result;
     result.value = 0.0f;
-    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    result.gradient = make_real3(0.0f, 0.0f, 0.0f);
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -215,11 +215,11 @@ __device__ inline InterpolationResult bsplineInterpolate(
     int nyz = gridCounts[1] * gridCounts[2];
 
     // Precompute B-spline basis functions
-    float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
-    float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
-    float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+    real bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+    real by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+    real bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
 
-    float dbx[4], dby[4], dbz[4];
+    real dbx[4], dby[4], dbz[4];
     if (computeGradient) {
         dbx[0] = bspline_deriv0(fx); dbx[1] = bspline_deriv1(fx);
         dbx[2] = bspline_deriv2(fx); dbx[3] = bspline_deriv3(fx);
@@ -229,8 +229,8 @@ __device__ inline InterpolationResult bsplineInterpolate(
         dbz[2] = bspline_deriv2(fz); dbz[3] = bspline_deriv3(fz);
     }
 
-    float interpolated = 0.0f;
-    float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+    real interpolated = 0.0f;
+    real dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
 
     for (int i = 0; i < 4; i++) {
         int gx = min(max(ix - 1 + i, 0), gridCounts[0] - 1);
@@ -239,9 +239,9 @@ __device__ inline InterpolationResult bsplineInterpolate(
             for (int k = 0; k < 4; k++) {
                 int gz = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
                 int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                float val = gridValues[gridIdx];
+                real val = gridValues[gridIdx];
 
-                float weight = bx[i] * by[j] * bz[k];
+                real weight = bx[i] * by[j] * bz[k];
                 interpolated += weight * val;
 
                 if (computeGradient) {
@@ -284,14 +284,14 @@ __device__ inline InterpolationResult tricubicInterpolate(
     const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     bool computeGradient = true,
     bool divideBySpacing = true)
 {
     InterpolationResult result;
     result.value = 0.0f;
-    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    result.gradient = make_real3(0.0f, 0.0f, 0.0f);
 
     if (gridDerivatives == 0) {
         result.isInside = false;
@@ -299,7 +299,7 @@ __device__ inline InterpolationResult tricubicInterpolate(
     }
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -366,14 +366,14 @@ __device__ inline InterpolationResult triquinticInterpolate(
     const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     bool computeGradient = true,
     bool divideBySpacing = true)
 {
     InterpolationResult result;
     result.value = 0.0f;
-    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    result.gradient = make_real3(0.0f, 0.0f, 0.0f);
 
     if (gridDerivatives == 0) {
         result.isInside = false;
@@ -381,7 +381,7 @@ __device__ inline InterpolationResult triquinticInterpolate(
     }
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -432,7 +432,7 @@ __device__ inline InterpolationResult triquinticInterpolate(
 
 /**
  * Full real-precision triquintic value + physical gradient: position, fractional
- * coords, assembly, eval, and result all stay real, with no float truncation.
+ * coords, assembly, eval, and result all stay real, with no real truncation.
  * Returns false if the position is outside the grid. Only valid for NONE inv_power
  * mode with no arcsinh/cap (caller guards this).
  */
@@ -493,17 +493,17 @@ __device__ inline InterpolationResult quinticBsplineInterpolate(
     const float* __restrict__ gridValues,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     bool computeGradient = true,
     bool divideBySpacing = true)
 {
     InterpolationResult result;
     result.value = 0.0f;
-    result.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    result.gradient = make_real3(0.0f, 0.0f, 0.0f);
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -513,14 +513,14 @@ __device__ inline InterpolationResult quinticBsplineInterpolate(
     int nyz = gridCounts[1] * gridCounts[2];
 
     // Precompute quintic B-spline basis functions (6 per axis)
-    float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+    real bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
                    qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
-    float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+    real by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
                    qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
-    float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+    real bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
                    qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
 
-    float dbx[6], dby[6], dbz[6];
+    real dbx[6], dby[6], dbz[6];
     if (computeGradient) {
         dbx[0] = qbspline_deriv0(fx); dbx[1] = qbspline_deriv1(fx);
         dbx[2] = qbspline_deriv2(fx); dbx[3] = qbspline_deriv3(fx);
@@ -533,8 +533,8 @@ __device__ inline InterpolationResult quinticBsplineInterpolate(
         dbz[4] = qbspline_deriv4(fz); dbz[5] = qbspline_deriv5(fz);
     }
 
-    float interpolated = 0.0f;
-    float dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
+    real interpolated = 0.0f;
+    real dvdx = 0.0f, dvdy = 0.0f, dvdz = 0.0f;
 
     // 6x6x6 stencil: offsets -2..+3 from cell corner
     for (int i = 0; i < 6; i++) {
@@ -544,9 +544,9 @@ __device__ inline InterpolationResult quinticBsplineInterpolate(
             for (int k = 0; k < 6; k++) {
                 int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
                 int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                float val = gridValues[gridIdx];
+                real val = gridValues[gridIdx];
 
-                float weight = bx[i] * by[j] * bz[k];
+                real weight = bx[i] * by[j] * bz[k];
                 interpolated += weight * val;
 
                 if (computeGradient) {
@@ -595,8 +595,8 @@ __device__ inline InterpolationResult interpolateGrid(
     const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     int method,
     bool computeGradient = true,
     bool divideBySpacing = true)
@@ -628,8 +628,8 @@ __device__ inline InterpolationResult interpolateGrid(
  * Uses static allocation for CUDA efficiency.
  */
 struct MultiGridResult {
-    float values[MULTI_GRID_MAX];      // Interpolated values
-    float3 gradients[MULTI_GRID_MAX];  // Gradients in real space (per nm)
+    real values[MULTI_GRID_MAX];      // Interpolated values
+    real3 gradients[MULTI_GRID_MAX];  // Gradients in real space (per nm)
     int numGrids;                       // Actual number of grids used
     bool isInside;                      // Whether query point was inside grid
 };
@@ -651,8 +651,8 @@ __device__ inline MultiGridResult trilinearInterpolateMultipleWithGradients(
     int numGrids,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position)
+    real originX, real originY, real originZ,
+    real3 position)
 {
     MultiGridResult result;
     result.numGrids = numGrids;
@@ -660,11 +660,11 @@ __device__ inline MultiGridResult trilinearInterpolateMultipleWithGradients(
     // Initialize to zero
     for (int g = 0; g < numGrids; g++) {
         result.values[g] = 0.0f;
-        result.gradients[g] = make_float3(0.0f, 0.0f, 0.0f);
+        result.gradients[g] = make_real3(0.0f, 0.0f, 0.0f);
     }
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -674,9 +674,9 @@ __device__ inline MultiGridResult trilinearInterpolateMultipleWithGradients(
     }
 
     // Precompute complementary fractions
-    float ox = 1.0f - fx;
-    float oy = 1.0f - fy;
-    float oz = 1.0f - fz;
+    real ox = 1.0f - fx;
+    real oy = 1.0f - fy;
+    real oz = 1.0f - fz;
 
     // Grid indexing
     int nyz = gridCounts[1] * gridCounts[2];
@@ -694,46 +694,46 @@ __device__ inline MultiGridResult trilinearInterpolateMultipleWithGradients(
     int c111 = baseIndex + nyz + nz + 1;
 
     // Inverse spacing for gradient conversion
-    float invSpacingX = 1.0f / gridSpacing[0];
-    float invSpacingY = 1.0f / gridSpacing[1];
-    float invSpacingZ = 1.0f / gridSpacing[2];
+    real invSpacingX = 1.0f / gridSpacing[0];
+    real invSpacingY = 1.0f / gridSpacing[1];
+    real invSpacingZ = 1.0f / gridSpacing[2];
 
     // Process each grid
     for (int g = 0; g < numGrids; g++) {
         const float* grid = gridValues[g];
 
         // Load corner values
-        float v000 = grid[c000];
-        float v001 = grid[c001];
-        float v010 = grid[c010];
-        float v011 = grid[c011];
-        float v100 = grid[c100];
-        float v101 = grid[c101];
-        float v110 = grid[c110];
-        float v111 = grid[c111];
+        real v000 = grid[c000];
+        real v001 = grid[c001];
+        real v010 = grid[c010];
+        real v011 = grid[c011];
+        real v100 = grid[c100];
+        real v101 = grid[c101];
+        real v110 = grid[c110];
+        real v111 = grid[c111];
 
         // Trilinear interpolation for value
         // v = ox*oy*oz*v000 + ox*oy*fz*v001 + ox*fy*oz*v010 + ox*fy*fz*v011
         //   + fx*oy*oz*v100 + fx*oy*fz*v101 + fx*fy*oz*v110 + fx*fy*fz*v111
-        float vmm = oz * v000 + fz * v001;  // v at (0, 0, z)
-        float vmp = oz * v010 + fz * v011;  // v at (0, 1, z)
-        float vpm = oz * v100 + fz * v101;  // v at (1, 0, z)
-        float vpp = oz * v110 + fz * v111;  // v at (1, 1, z)
+        real vmm = oz * v000 + fz * v001;  // v at (0, 0, z)
+        real vmp = oz * v010 + fz * v011;  // v at (0, 1, z)
+        real vpm = oz * v100 + fz * v101;  // v at (1, 0, z)
+        real vpp = oz * v110 + fz * v111;  // v at (1, 1, z)
 
-        float vm = oy * vmm + fy * vmp;     // v at (0, y, z)
-        float vp = oy * vpm + fy * vpp;     // v at (1, y, z)
+        real vm = oy * vmm + fy * vmp;     // v at (0, y, z)
+        real vp = oy * vpm + fy * vpp;     // v at (1, y, z)
 
         result.values[g] = ox * vm + fx * vp;
 
         // Analytical gradient in fractional coordinates
         // dv/dfx = vp - vm
-        float dv_dfx = vp - vm;
+        real dv_dfx = vp - vm;
 
         // dv/dfy = ox*(vmp - vmm) + fx*(vpp - vpm)
-        float dv_dfy = ox * (vmp - vmm) + fx * (vpp - vpm);
+        real dv_dfy = ox * (vmp - vmm) + fx * (vpp - vpm);
 
         // dv/dfz = ox*(oy*(v001-v000) + fy*(v011-v010)) + fx*(oy*(v101-v100) + fy*(v111-v110))
-        float dv_dfz = ox * (oy * (v001 - v000) + fy * (v011 - v010)) +
+        real dv_dfz = ox * (oy * (v001 - v000) + fy * (v011 - v010)) +
                        fx * (oy * (v101 - v100) + fy * (v111 - v110));
 
         // Convert to real-space gradients
@@ -762,8 +762,8 @@ __device__ inline MultiGridResult bsplineInterpolateMultipleWithGradients(
     int numGrids,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position)
+    real originX, real originY, real originZ,
+    real3 position)
 {
     MultiGridResult result;
     result.numGrids = numGrids;
@@ -771,11 +771,11 @@ __device__ inline MultiGridResult bsplineInterpolateMultipleWithGradients(
     // Initialize to zero
     for (int g = 0; g < numGrids; g++) {
         result.values[g] = 0.0f;
-        result.gradients[g] = make_float3(0.0f, 0.0f, 0.0f);
+        result.gradients[g] = make_real3(0.0f, 0.0f, 0.0f);
     }
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -788,18 +788,18 @@ __device__ inline MultiGridResult bsplineInterpolateMultipleWithGradients(
     int nz = gridCounts[2];
 
     // Precompute B-spline basis functions and derivatives
-    float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
-    float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
-    float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+    real bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+    real by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+    real bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
 
-    float dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
-    float dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
-    float dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+    real dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+    real dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+    real dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
 
     // Inverse spacing for gradient conversion
-    float invSpacingX = 1.0f / gridSpacing[0];
-    float invSpacingY = 1.0f / gridSpacing[1];
-    float invSpacingZ = 1.0f / gridSpacing[2];
+    real invSpacingX = 1.0f / gridSpacing[0];
+    real invSpacingY = 1.0f / gridSpacing[1];
+    real invSpacingZ = 1.0f / gridSpacing[2];
 
     // Loop over 4x4x4 stencil
     for (int i = 0; i < 4; i++) {
@@ -810,13 +810,13 @@ __device__ inline MultiGridResult bsplineInterpolateMultipleWithGradients(
                 int gz = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
                 int gridIdx = gx * nyz + gy * nz + gz;
 
-                float weight = bx[i] * by[j] * bz[k];
-                float dwdx = dbx[i] * by[j] * bz[k];
-                float dwdy = bx[i] * dby[j] * bz[k];
-                float dwdz = bx[i] * by[j] * dbz[k];
+                real weight = bx[i] * by[j] * bz[k];
+                real dwdx = dbx[i] * by[j] * bz[k];
+                real dwdy = bx[i] * dby[j] * bz[k];
+                real dwdz = bx[i] * by[j] * dbz[k];
 
                 for (int g = 0; g < numGrids; g++) {
-                    float val = gridValues[g][gridIdx];
+                    real val = gridValues[g][gridIdx];
                     result.values[g] += weight * val;
                     result.gradients[g].x += dwdx * val;
                     result.gradients[g].y += dwdy * val;
@@ -853,8 +853,8 @@ __device__ inline MultiGridResult quinticBsplineInterpolateMultipleWithGradients
     int numGrids,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position)
+    real originX, real originY, real originZ,
+    real3 position)
 {
     MultiGridResult result;
     result.numGrids = numGrids;
@@ -862,11 +862,11 @@ __device__ inline MultiGridResult quinticBsplineInterpolateMultipleWithGradients
     // Initialize to zero
     for (int g = 0; g < numGrids; g++) {
         result.values[g] = 0.0f;
-        result.gradients[g] = make_float3(0.0f, 0.0f, 0.0f);
+        result.gradients[g] = make_real3(0.0f, 0.0f, 0.0f);
     }
 
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     result.isInside = computeGridCell(position, gridCounts, gridSpacing,
                                        originX, originY, originZ,
                                        ix, iy, iz, fx, fy, fz);
@@ -879,24 +879,24 @@ __device__ inline MultiGridResult quinticBsplineInterpolateMultipleWithGradients
     int nz = gridCounts[2];
 
     // Precompute quintic B-spline basis functions and derivatives
-    float bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
+    real bx[6] = {qbspline_basis0(fx), qbspline_basis1(fx), qbspline_basis2(fx),
                    qbspline_basis3(fx), qbspline_basis4(fx), qbspline_basis5(fx)};
-    float by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
+    real by[6] = {qbspline_basis0(fy), qbspline_basis1(fy), qbspline_basis2(fy),
                    qbspline_basis3(fy), qbspline_basis4(fy), qbspline_basis5(fy)};
-    float bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
+    real bz[6] = {qbspline_basis0(fz), qbspline_basis1(fz), qbspline_basis2(fz),
                    qbspline_basis3(fz), qbspline_basis4(fz), qbspline_basis5(fz)};
 
-    float dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
+    real dbx[6] = {qbspline_deriv0(fx), qbspline_deriv1(fx), qbspline_deriv2(fx),
                     qbspline_deriv3(fx), qbspline_deriv4(fx), qbspline_deriv5(fx)};
-    float dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
+    real dby[6] = {qbspline_deriv0(fy), qbspline_deriv1(fy), qbspline_deriv2(fy),
                     qbspline_deriv3(fy), qbspline_deriv4(fy), qbspline_deriv5(fy)};
-    float dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
+    real dbz[6] = {qbspline_deriv0(fz), qbspline_deriv1(fz), qbspline_deriv2(fz),
                     qbspline_deriv3(fz), qbspline_deriv4(fz), qbspline_deriv5(fz)};
 
     // Inverse spacing for gradient conversion
-    float invSpacingX = 1.0f / gridSpacing[0];
-    float invSpacingY = 1.0f / gridSpacing[1];
-    float invSpacingZ = 1.0f / gridSpacing[2];
+    real invSpacingX = 1.0f / gridSpacing[0];
+    real invSpacingY = 1.0f / gridSpacing[1];
+    real invSpacingZ = 1.0f / gridSpacing[2];
 
     // Loop over 6x6x6 stencil: offsets -2..+3 from cell corner
     for (int i = 0; i < 6; i++) {
@@ -907,13 +907,13 @@ __device__ inline MultiGridResult quinticBsplineInterpolateMultipleWithGradients
                 int gz = min(max(iz - 2 + k, 0), gridCounts[2] - 1);
                 int gridIdx = gx * nyz + gy * nz + gz;
 
-                float weight = bx[i] * by[j] * bz[k];
-                float dwdx = dbx[i] * by[j] * bz[k];
-                float dwdy = bx[i] * dby[j] * bz[k];
-                float dwdz = bx[i] * by[j] * dbz[k];
+                real weight = bx[i] * by[j] * bz[k];
+                real dwdx = dbx[i] * by[j] * bz[k];
+                real dwdy = bx[i] * dby[j] * bz[k];
+                real dwdz = bx[i] * by[j] * dbz[k];
 
                 for (int g = 0; g < numGrids; g++) {
-                    float val = gridValues[g][gridIdx];
+                    real val = gridValues[g][gridIdx];
                     result.values[g] += weight * val;
                     result.gradients[g].x += dwdx * val;
                     result.gradients[g].y += dwdy * val;
@@ -954,8 +954,8 @@ __device__ inline MultiGridResult interpolateMultipleGridsWithGradients(
     int numGrids,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     int method)
 {
     switch (method) {
@@ -998,13 +998,13 @@ __device__ inline bool interpolateMultipleGrids(
     int numGrids,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    float originX, float originY, float originZ,
-    float3 position,
+    real originX, real originY, real originZ,
+    real3 position,
     int method,
     float* results)
 {
     int ix, iy, iz;
-    float fx, fy, fz;
+    real fx, fy, fz;
     bool isInside = computeGridCell(position, gridCounts, gridSpacing,
                                      originX, originY, originZ,
                                      ix, iy, iz, fx, fy, fz);
@@ -1025,9 +1025,9 @@ __device__ inline bool interpolateMultipleGrids(
 
     if (method == 1) {
         // B-spline interpolation (4x4x4)
-        float bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
-        float by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
-        float bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+        real bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+        real by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+        real bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
 
         for (int i = 0; i < 4; i++) {
             int gx = min(max(ix - 1 + i, 0), gridCounts[0] - 1);
@@ -1036,7 +1036,7 @@ __device__ inline bool interpolateMultipleGrids(
                 for (int k = 0; k < 4; k++) {
                     int gz = min(max(iz - 1 + k, 0), gridCounts[2] - 1);
                     int gridIdx = gx * nyz + gy * gridCounts[2] + gz;
-                    float weight = bx[i] * by[j] * bz[k];
+                    real weight = bx[i] * by[j] * bz[k];
 
                     for (int g = 0; g < numGrids; g++) {
                         results[g] += weight * gridValues[g][gridIdx];
@@ -1046,11 +1046,11 @@ __device__ inline bool interpolateMultipleGrids(
         }
     } else {
         // Trilinear interpolation (2x2x2)
-        float ox = 1.0f - fx;
-        float oy = 1.0f - fy;
-        float oz = 1.0f - fz;
+        real ox = 1.0f - fx;
+        real oy = 1.0f - fy;
+        real oz = 1.0f - fz;
 
-        float weights[8] = {
+        real weights[8] = {
             ox * oy * oz, ox * oy * fz, ox * fy * oz, ox * fy * fz,
             fx * oy * oz, fx * oy * fz, fx * fy * oz, fx * fy * fz
         };

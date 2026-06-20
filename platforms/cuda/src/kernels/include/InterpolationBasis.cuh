@@ -7,24 +7,24 @@
  */
 
 // Cubic B-spline basis functions
-__device__ inline float bspline_basis0(float t) { return (1.0f - t) * (1.0f - t) * (1.0f - t) / 6.0f; }
-__device__ inline float bspline_basis1(float t) { return (3.0f * t * t * t - 6.0f * t * t + 4.0f) / 6.0f; }
-__device__ inline float bspline_basis2(float t) { return (-3.0f * t * t * t + 3.0f * t * t + 3.0f * t + 1.0f) / 6.0f; }
-__device__ inline float bspline_basis3(float t) { return t * t * t / 6.0f; }
+__device__ inline real bspline_basis0(real t) { return (1.0f - t) * (1.0f - t) * (1.0f - t) / 6.0f; }
+__device__ inline real bspline_basis1(real t) { return (3.0f * t * t * t - 6.0f * t * t + 4.0f) / 6.0f; }
+__device__ inline real bspline_basis2(real t) { return (-3.0f * t * t * t + 3.0f * t * t + 3.0f * t + 1.0f) / 6.0f; }
+__device__ inline real bspline_basis3(real t) { return t * t * t / 6.0f; }
 
 // Derivatives of cubic B-spline basis functions
-__device__ inline float bspline_deriv0(float t) { return -(1.0f - t) * (1.0f - t) / 2.0f; }
-__device__ inline float bspline_deriv1(float t) { return (3.0f * t * t - 4.0f * t) / 2.0f; }
-__device__ inline float bspline_deriv2(float t) { return (-3.0f * t * t + 2.0f * t + 1.0f) / 2.0f; }
-__device__ inline float bspline_deriv3(float t) { return t * t / 2.0f; }
+__device__ inline real bspline_deriv0(real t) { return -(1.0f - t) * (1.0f - t) / 2.0f; }
+__device__ inline real bspline_deriv1(real t) { return (3.0f * t * t - 4.0f * t) / 2.0f; }
+__device__ inline real bspline_deriv2(real t) { return (-3.0f * t * t + 2.0f * t + 1.0f) / 2.0f; }
+__device__ inline real bspline_deriv3(real t) { return t * t / 2.0f; }
 
 // Second derivatives of cubic B-spline basis functions
 // Used for Hessian computation in normal modes analysis
 // Derived from: B0(t) = (1-t)³/6, B1(t) = (3t³-6t²+4)/6, etc.
-__device__ inline float bspline_deriv2_0(float t) { return 1.0f - t; }
-__device__ inline float bspline_deriv2_1(float t) { return 3.0f * t - 2.0f; }
-__device__ inline float bspline_deriv2_2(float t) { return -3.0f * t + 1.0f; }
-__device__ inline float bspline_deriv2_3(float t) { return t; }
+__device__ inline real bspline_deriv2_0(real t) { return 1.0f - t; }
+__device__ inline real bspline_deriv2_1(real t) { return 3.0f * t - 2.0f; }
+__device__ inline real bspline_deriv2_2(real t) { return -3.0f * t + 1.0f; }
+__device__ inline real bspline_deriv2_3(real t) { return t; }
 
 // =============================================================================
 // Quintic B-spline basis functions (degree 5, 6-point stencil)
@@ -44,27 +44,27 @@ __device__ inline float bspline_deriv2_3(float t) { return t; }
 // At t=0: weights = [1, 26, 66, 26, 1, 0] / 120
 // At t=1: weights = [0, 1, 26, 66, 26, 1] / 120
 
-__device__ inline float qbspline_basis0(float t) {
-    float s = 1.0f - t;
+__device__ inline real qbspline_basis0(real t) {
+    real s = 1.0f - t;
     return s*s*s*s*s / 120.0f;
 }
-__device__ inline float qbspline_basis1(float t) {
-    float a = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_basis1(real t) {
+    real a = 2.0f - t; real s = 1.0f - t;
     return (a*a*a*a*a - 6.0f*s*s*s*s*s) / 120.0f;
 }
-__device__ inline float qbspline_basis2(float t) {
-    float a = 3.0f - t; float b = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_basis2(real t) {
+    real a = 3.0f - t; real b = 2.0f - t; real s = 1.0f - t;
     return (a*a*a*a*a - 6.0f*b*b*b*b*b + 15.0f*s*s*s*s*s) / 120.0f;
 }
-__device__ inline float qbspline_basis3(float t) {
-    float a = 2.0f + t; float b = 1.0f + t;
+__device__ inline real qbspline_basis3(real t) {
+    real a = 2.0f + t; real b = 1.0f + t;
     return (a*a*a*a*a - 6.0f*b*b*b*b*b + 15.0f*t*t*t*t*t) / 120.0f;
 }
-__device__ inline float qbspline_basis4(float t) {
-    float a = 1.0f + t;
+__device__ inline real qbspline_basis4(real t) {
+    real a = 1.0f + t;
     return (a*a*a*a*a - 6.0f*t*t*t*t*t) / 120.0f;
 }
-__device__ inline float qbspline_basis5(float t) {
+__device__ inline real qbspline_basis5(real t) {
     return t*t*t*t*t / 120.0f;
 }
 
@@ -77,27 +77,27 @@ __device__ inline float qbspline_basis5(float t) {
 //   w4'(t) = [5(1+t)^4 - 30*t^4] / 120
 //   w5'(t) = 5*t^4 / 120 = t^4 / 24
 
-__device__ inline float qbspline_deriv0(float t) {
-    float s = 1.0f - t;
+__device__ inline real qbspline_deriv0(real t) {
+    real s = 1.0f - t;
     return -5.0f*s*s*s*s / 120.0f;
 }
-__device__ inline float qbspline_deriv1(float t) {
-    float a = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_deriv1(real t) {
+    real a = 2.0f - t; real s = 1.0f - t;
     return (-5.0f*a*a*a*a + 30.0f*s*s*s*s) / 120.0f;
 }
-__device__ inline float qbspline_deriv2(float t) {
-    float a = 3.0f - t; float b = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_deriv2(real t) {
+    real a = 3.0f - t; real b = 2.0f - t; real s = 1.0f - t;
     return (-5.0f*a*a*a*a + 30.0f*b*b*b*b - 75.0f*s*s*s*s) / 120.0f;
 }
-__device__ inline float qbspline_deriv3(float t) {
-    float a = 2.0f + t; float b = 1.0f + t;
+__device__ inline real qbspline_deriv3(real t) {
+    real a = 2.0f + t; real b = 1.0f + t;
     return (5.0f*a*a*a*a - 30.0f*b*b*b*b + 75.0f*t*t*t*t) / 120.0f;
 }
-__device__ inline float qbspline_deriv4(float t) {
-    float a = 1.0f + t;
+__device__ inline real qbspline_deriv4(real t) {
+    real a = 1.0f + t;
     return (5.0f*a*a*a*a - 30.0f*t*t*t*t) / 120.0f;
 }
-__device__ inline float qbspline_deriv5(float t) {
+__device__ inline real qbspline_deriv5(real t) {
     return 5.0f*t*t*t*t / 120.0f;
 }
 
@@ -110,27 +110,27 @@ __device__ inline float qbspline_deriv5(float t) {
 //   w4''(t) = [20(1+t)^3 - 120*t^3] / 120
 //   w5''(t) = 20*t^3 / 120
 
-__device__ inline float qbspline_deriv2_0(float t) {
-    float s = 1.0f - t;
+__device__ inline real qbspline_deriv2_0(real t) {
+    real s = 1.0f - t;
     return 20.0f*s*s*s / 120.0f;
 }
-__device__ inline float qbspline_deriv2_1(float t) {
-    float a = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_deriv2_1(real t) {
+    real a = 2.0f - t; real s = 1.0f - t;
     return (20.0f*a*a*a - 120.0f*s*s*s) / 120.0f;
 }
-__device__ inline float qbspline_deriv2_2(float t) {
-    float a = 3.0f - t; float b = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_deriv2_2(real t) {
+    real a = 3.0f - t; real b = 2.0f - t; real s = 1.0f - t;
     return (20.0f*a*a*a - 120.0f*b*b*b + 300.0f*s*s*s) / 120.0f;
 }
-__device__ inline float qbspline_deriv2_3(float t) {
-    float a = 2.0f + t; float b = 1.0f + t;
+__device__ inline real qbspline_deriv2_3(real t) {
+    real a = 2.0f + t; real b = 1.0f + t;
     return (20.0f*a*a*a - 120.0f*b*b*b + 300.0f*t*t*t) / 120.0f;
 }
-__device__ inline float qbspline_deriv2_4(float t) {
-    float a = 1.0f + t;
+__device__ inline real qbspline_deriv2_4(real t) {
+    real a = 1.0f + t;
     return (20.0f*a*a*a - 120.0f*t*t*t) / 120.0f;
 }
-__device__ inline float qbspline_deriv2_5(float t) {
+__device__ inline real qbspline_deriv2_5(real t) {
     return 20.0f*t*t*t / 120.0f;
 }
 
@@ -143,27 +143,27 @@ __device__ inline float qbspline_deriv2_5(float t) {
 //   w4'''(t) = [60(1+t)^2 - 360*t^2] / 120
 //   w5'''(t) = 60*t^2 / 120
 
-__device__ inline float qbspline_deriv3_0(float t) {
-    float s = 1.0f - t;
+__device__ inline real qbspline_deriv3_0(real t) {
+    real s = 1.0f - t;
     return -60.0f*s*s / 120.0f;
 }
-__device__ inline float qbspline_deriv3_1(float t) {
-    float a = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_deriv3_1(real t) {
+    real a = 2.0f - t; real s = 1.0f - t;
     return (-60.0f*a*a + 360.0f*s*s) / 120.0f;
 }
-__device__ inline float qbspline_deriv3_2(float t) {
-    float a = 3.0f - t; float b = 2.0f - t; float s = 1.0f - t;
+__device__ inline real qbspline_deriv3_2(real t) {
+    real a = 3.0f - t; real b = 2.0f - t; real s = 1.0f - t;
     return (-60.0f*a*a + 360.0f*b*b - 900.0f*s*s) / 120.0f;
 }
-__device__ inline float qbspline_deriv3_3(float t) {
-    float a = 2.0f + t; float b = 1.0f + t;
+__device__ inline real qbspline_deriv3_3(real t) {
+    real a = 2.0f + t; real b = 1.0f + t;
     return (60.0f*a*a - 360.0f*b*b + 900.0f*t*t) / 120.0f;
 }
-__device__ inline float qbspline_deriv3_4(float t) {
-    float a = 1.0f + t;
+__device__ inline real qbspline_deriv3_4(real t) {
+    real a = 1.0f + t;
     return (60.0f*a*a - 360.0f*t*t) / 120.0f;
 }
-__device__ inline float qbspline_deriv3_5(float t) {
+__device__ inline real qbspline_deriv3_5(real t) {
     return 60.0f*t*t / 120.0f;
 }
 
