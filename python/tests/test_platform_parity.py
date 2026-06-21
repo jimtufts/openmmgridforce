@@ -51,12 +51,8 @@ TOL = {
 # as GAP rather than failing the run; remove the entry when the gap is closed.
 # Keys: (case, label, kind).
 OPEN_GAPS = {
-    # CUDA's isolated-GBSA Hessian omits the PAIRWISE receptor-desolvation and
-    # cross-term second derivatives, so its PAIRWISE Hessian disagrees with the
-    # (JAX-validated) Reference. Tracked pending the CUDA port of those terms.
-    ('IsolatedGBSAForce[PAIRWISE] Hessian', 'CUDA/single', 'hessian'),
-    ('IsolatedGBSAForce[PAIRWISE] Hessian', 'CUDA/mixed', 'hessian'),
-    ('IsolatedGBSAForce[PAIRWISE] Hessian', 'CUDA/double', 'hessian'),
+    # No known gaps currently. Add (case, label, kind) tuples here when one is
+    # identified, so it is tracked explicitly rather than silently passing.
 }
 
 _failures = []

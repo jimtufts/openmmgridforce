@@ -172,10 +172,23 @@ private:
     OpenMM::CudaArray hessianDRdPsi;             // [N] double
     OpenMM::CudaArray hessianD2RdPsi2;           // [N] double
     OpenMM::CudaArray hessianDEdHCT;             // [N] double
+    OpenMM::CudaArray hessianLigGBdEdR;          // [N] real — ligand-GB-only dE/dR (no cross)
     OpenMM::CudaArray hessianJacobian;           // [N * 3N] double
     OpenMM::CudaArray hessianRecD2Psi;           // [N * 6] double
     OpenMM::CudaArray hessianCouplingMatrix;     // [N * N] double
     OpenMM::CudaArray hessianMatrix;             // [3N * 3N] double
+    // PAIRWISE receptor-desolvation + cross-term Hessian working buffers.
+    // Allocated lazily alongside the rest of the Hessian buffers, only
+    // sized/used when numReceptorAtoms > 0 and receptorMode == PAIRWISE.
+    OpenMM::CudaArray hessianRecBorn;            // [K*Nr] receptor Born radii
+    OpenMM::CudaArray hessianRecDRdPsi;          // [K*Nr] dR^R/dPsi
+    OpenMM::CudaArray hessianRecD2RdPsi2;        // [K*Nr] d2R^R/dPsi2
+    OpenMM::CudaArray hessianRecDeDR;            // [K*Nr] dE_rec/dR^R
+    OpenMM::CudaArray hessianRecJacobian;        // [K*Nr*n3] JR
+    OpenMM::CudaArray hessianRecCoupling;        // [K*Nr*Nr] MR
+    OpenMM::CudaArray hessianCrossDRL;           // [totalParticles] dE_cross/dR^L
+    OpenMM::CudaArray hessianCrossDRR;           // [K*Nr] dE_cross/dR^R
+    bool hessianPairwiseBuffersInitialized = false;
     // Zero-filled dummy exclusion buffers: IsolatedGBSAForce has no
     // exclusion API (all pairs contribute by design), but the shared
     // Hessian kernels (ported from GBSAGridForce) read exclusion lists.
@@ -238,6 +251,7 @@ private:
     CUfunction computeReceptorPairwiseHessianKernel;        // legacy float path (debug)
     CUfunction computeBornCouplingMatrixKernel;             // legacy float path (debug)
     CUfunction assembleGBSAHessianKernel;                   // legacy float path (debug)
+    CUfunction computeLigandGBBornDerivDoubleKernel;        // ligand-GB-only dE/dR (double)
     CUfunction prepareHessianIntermediatesDoubleKernel;     // OBC-II transforms (double)
     CUfunction computeHCTJacobianPairwiseDoubleKernel;      // dPsi/dx (double)
     CUfunction computeReceptorPairwiseHessianDoubleKernel;  // d2Psi/dx2 (double)
@@ -246,7 +260,14 @@ private:
     CUfunction convertTiledHCTToDoubleKernel;               // fixed-point -> double (unused)
     CUfunction computeBornRadiiOBCDoubleKernel;             // OBC2 transform (double)
     CUfunction computeHctReceptorPairwiseDoubleKernel;      // receptor->ligand HCT in double
-    CUfunction computeHctLigandPairwiseDoubleKernel;        // ligand-ligand HCT in double
+    CUfunction computeHctLigandPairwiseDoubleKernel;
+    // PAIRWISE receptor-desolvation + cross-term Hessian kernels (double).
+    CUfunction pairwiseRecBornDoubleKernel;                 // recBorn + transform derivs
+    CUfunction pairwiseRecCouplingDoubleKernel;             // recDeDR + MR
+    CUfunction pairwiseRecJacobianDoubleKernel;             // JR = dPsiR/dx
+    CUfunction pairwiseCrossBornDeriv1DoubleKernel;         // dCross_dR* + explicit-r cross
+    CUfunction pairwiseBornGradHessianDoubleKernel;         // Born-gradient spatial Hessians
+    CUfunction pairwiseOuterProductHessianDoubleKernel;        // ligand-ligand HCT in double
 
     // Host-side results cache
     mutable std::vector<double> groupEnergiesHost;
