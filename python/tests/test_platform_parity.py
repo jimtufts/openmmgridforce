@@ -234,12 +234,28 @@ def nb_section(specs):
                 inf.addException(a1, a2, qqv, sig.value_in_unit(unit.nanometer), epsv)
         inf.addParticleGroup("g0", list(range(n)))
         system.addForce(inf)
-        return system
+        return system, inf
 
     case = "IsolatedNonbondedForce"
     print(f"\n=== {case} ===")
-    results = eval_all(build, inpcrd.positions, specs)
+    results = eval_all(lambda: build()[0], inpcrd.positions, specs)
     compare(case, results, specs)
+
+    # Analytical Hessian parity (group 0). The Reference Hessian is validated
+    # against JAX autodiff of the LJ+Coulomb energy to machine precision.
+    print("  -- analytical Hessian (group 0) --")
+    hess = {}
+    for spec in specs:
+        system, force = build()
+        try:
+            ctx, _ = _context(system, spec)
+            ctx.setPositions(inpcrd.positions)
+            ctx.getState(getEnergy=True)  # execute() before computeHessian()
+            hess[spec[0]] = np.array(force.computeHessian(ctx))
+            del ctx
+        except Exception as e:
+            hess[spec[0]] = ('EXC', repr(e))
+    _compare_hessian(case + " Hessian", hess, specs)
 
     # Anchor against vanilla OpenMM NonbondedForce (single group => identical).
     omm_sys = mm.System()
