@@ -32,6 +32,7 @@
 #include <iostream>
 
 #include "CpuGridForceKernelFactory.h"
+#include "CpuGridForceKernels.h"
 #include "CpuIsolatedNonbondedKernels.h"
 #include "CpuIsolatedBondedKernels.h"
 #include "CpuIsolatedGBSAKernels.h"
@@ -83,7 +84,7 @@ KernelImpl* CpuGridForceKernelFactory::createKernelImpl(std::string name, const 
     // CpuPlatform::PlatformData inherits from ReferencePlatform::PlatformData,
     // so the Reference kernels work correctly on the CPU platform.
     if (name == CalcGridForceKernel::Name())
-        return new ReferenceCalcGridForceKernel(name, platform);
+        return new CpuCalcGridForceKernel(name, platform);
     if (name == CalcBondedHessianKernel::Name())
         return new ReferenceCalcBondedHessianKernel(name, platform);
     if (name == CalcIsolatedNonbondedForceKernel::Name())

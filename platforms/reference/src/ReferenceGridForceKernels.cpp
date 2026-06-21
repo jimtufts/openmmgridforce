@@ -730,33 +730,22 @@ static inline void applyRuntimeCap(double cap, double& interpolated, Vec3& grd) 
     }
 }
 
-double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
-                                             bool includeForces,
-                                             bool includeEnergy) {
+void ReferenceCalcGridForceKernel::computeAtom(int ia,
+                                               vector<Vec3>& posData,
+                                               vector<Vec3>& forceData,
+                                               bool includeForces,
+                                               bool includeEnergy,
+                                               double& atomEnergy,
+                                               double& atomUnscaled,
+                                               int& groupIdx) {
 
-    g_lastContext = &context;
-    vector<Vec3> &posData = extractPositions(context);
-    vector<Vec3> &forceData = extractForces(context);
+    atomEnergy = 0.0;
+    atomUnscaled = 0.0;
+    groupIdx = -1;
 
     const int nyz = g_counts[1] * g_counts[2];
-    Vec3 hCorner(g_spacing[0] * (g_counts[0] - 1),
-                 g_spacing[1] * (g_counts[1] - 1),
-                 g_spacing[2] * (g_counts[2] - 1));
 
-    double energy = 0.0;
-    int natom_lig = g_scaling_factors.size();
-
-    // Reset per-group energies
-    for (size_t g = 0; g < g_groupEnergies.size(); g++) {
-        g_groupEnergies[g] = 0.0;
-    }
-    for (size_t g = 0; g < g_groupUnscaledEnergies.size(); g++) {
-        g_groupUnscaledEnergies[g] = 0.0;
-    }
-
-    for (int ia = 0; ia < natom_lig; ++ia) {
-        double energy_before = energy;
-
+    {
         // Get the actual particle index for this ligand atom
         int particle_idx = (g_ligand_atoms.empty()) ? ia : g_ligand_atoms[ia];
 
@@ -777,7 +766,6 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
 
         // Compute effective scaling factor including global and per-group alchemical scaling
         double groupScaling = 1.0;
-        int groupIdx = -1;
         auto it = g_atomToGroup.find(particle_idx);
         if (it != g_atomToGroup.end()) {
             groupIdx = it->second;
@@ -875,7 +863,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 applyRuntimeCap(effectiveCap, interpolated, grd);
 
                 // Energy and force
-                energy += effectiveScaling * interpolated;
+                atomEnergy += effectiveScaling * interpolated;
                 forceData[ia] -= effectiveScaling * grd;
 
             } else if (g_interpolationMethod == 2) {
@@ -977,7 +965,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 applyRuntimeCap(effectiveCap, interpolated, grd);
 
                 // Energy and force
-                energy += effectiveScaling * interpolated;
+                atomEnergy += effectiveScaling * interpolated;
                 forceData[ia] -= effectiveScaling * grd;
 
             } else if (g_interpolationMethod == 3) {
@@ -1091,7 +1079,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                 applyRuntimeCap(effectiveCap, interpolated, grd);
 
                 // Energy and force
-                energy += effectiveScaling * interpolated;
+                atomEnergy += effectiveScaling * interpolated;
                 forceData[ia] -= effectiveScaling * grd;
 
             } else {
@@ -1156,14 +1144,14 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
             // Apply runtime cap (tanh capping after interpolation)
             applyRuntimeCap(effectiveCap, interpolated, grd);
 
-            energy += effectiveScaling * interpolated;
+            atomEnergy += effectiveScaling * interpolated;
             forceData[ia] -= effectiveScaling * grd;
 
             }  // End of if-else interpolation method selection
 
             // Track unscaled per-group energy (omits group scaling factor)
             if (groupIdx >= 0) {
-                g_groupUnscaledEnergies[groupIdx] += unscaledScaling * interpolated;
+                atomUnscaled += unscaledScaling * interpolated;
             }
         } else {
             // Out of bounds - apply restraint based on distance from grid boundaries
@@ -1180,7 +1168,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                     dev = pi[k] - effMax[k];  // Positive distance from upper bound
                 }
                 double oobTerm = 0.5 * g_outOfBoundsRestraint * dev * dev;
-                energy += oobTerm;
+                atomEnergy += oobTerm;
                 oobEnergy += oobTerm;
                 grd[k] = g_outOfBoundsRestraint * dev;
             }
@@ -1189,13 +1177,63 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
 
             // Track OOB energy in unscaled buffer too (OOB is not group-scaled)
             if (groupIdx >= 0) {
-                g_groupUnscaledEnergies[groupIdx] += oobEnergy;
+                atomUnscaled += oobEnergy;
             }
         }
+    }
+}
 
-        // Track per-group energy contribution
-        if (groupIdx >= 0) {
-            g_groupEnergies[groupIdx] += energy - energy_before;
+void ReferenceCalcGridForceKernel::runAtoms(ContextImpl& context,
+                                            vector<Vec3>& posData,
+                                            vector<Vec3>& forceData,
+                                            bool includeForces,
+                                            bool includeEnergy) {
+    int natom_lig = g_scaling_factors.size();
+    g_atomEnergyContribution.resize(natom_lig);
+    g_atomUnscaledContribution.resize(natom_lig);
+    g_atomGroupIdx.resize(natom_lig);
+
+    for (int ia = 0; ia < natom_lig; ++ia) {
+        computeAtom(ia, posData, forceData, includeForces, includeEnergy,
+                    g_atomEnergyContribution[ia], g_atomUnscaledContribution[ia],
+                    g_atomGroupIdx[ia]);
+    }
+}
+
+double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
+                                             bool includeForces,
+                                             bool includeEnergy) {
+
+    g_lastContext = &context;
+    vector<Vec3> &posData = extractPositions(context);
+    vector<Vec3> &forceData = extractForces(context);
+
+    const int nyz = g_counts[1] * g_counts[2];
+    Vec3 hCorner(g_spacing[0] * (g_counts[0] - 1),
+                 g_spacing[1] * (g_counts[1] - 1),
+                 g_spacing[2] * (g_counts[2] - 1));
+
+    int natom_lig = g_scaling_factors.size();
+
+    // Reset per-group energies
+    for (size_t g = 0; g < g_groupEnergies.size(); g++) {
+        g_groupEnergies[g] = 0.0;
+    }
+    for (size_t g = 0; g < g_groupUnscaledEnergies.size(); g++) {
+        g_groupUnscaledEnergies[g] = 0.0;
+    }
+
+    runAtoms(context, posData, forceData, includeForces, includeEnergy);
+
+    // Reduce the per-atom contributions serially in atom order so the result is
+    // bit-for-bit identical to the original serial accumulation.
+    double energy = 0.0;
+    for (int ia = 0; ia < natom_lig; ++ia) {
+        energy += g_atomEnergyContribution[ia];
+        int gi = g_atomGroupIdx[ia];
+        if (gi >= 0) {
+            g_groupEnergies[gi] += g_atomEnergyContribution[ia];
+            g_groupUnscaledEnergies[gi] += g_atomUnscaledContribution[ia];
         }
     }
 

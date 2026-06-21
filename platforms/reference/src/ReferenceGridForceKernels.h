@@ -108,7 +108,31 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<int> getNumNegative() override;
     double getTotalEntropy() override;
 
-   private:
+   protected:
+    /**
+     * Compute one ligand atom's contribution: writes forceData[ia] and returns
+     * this atom's energy contribution, unscaled per-group contribution, and the
+     * group index it maps to. Per-atom force writes are disjoint, so distinct
+     * atoms never write the same force entry; execute() reduces the returned
+     * per-atom contributions serially in atom order.
+     */
+    void computeAtom(int ia, std::vector<OpenMM::Vec3>& posData,
+                     std::vector<OpenMM::Vec3>& forceData,
+                     bool includeForces, bool includeEnergy,
+                     double& atomEnergy, double& atomUnscaled, int& groupIdx);
+
+    // Fill the per-atom result arrays. Serial here; the CPU platform overrides
+    // to distribute atoms across the thread pool.
+    virtual void runAtoms(OpenMM::ContextImpl& context,
+                          std::vector<OpenMM::Vec3>& posData,
+                          std::vector<OpenMM::Vec3>& forceData,
+                          bool includeForces, bool includeEnergy);
+
+    // Per-atom contributions filled by runAtoms() and reduced in execute().
+    std::vector<double> g_atomEnergyContribution;
+    std::vector<double> g_atomUnscaledContribution;
+    std::vector<int> g_atomGroupIdx;
+
     /**
      * Compute the per-atom 3x3 interpolant Hessian blocks for the current
      * positions. Shared by computeHessian() (and used to seed analyzeHessian()).
