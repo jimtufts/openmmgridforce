@@ -19,7 +19,7 @@ using namespace OpenMM;
 using namespace std;
 
 // Coulomb constant in kJ*nm/mol/e^2
-static const float ONE_4PI_EPS0 = 138.935456f;
+static const double ONE_4PI_EPS0 = 138.935456;
 
 // Energy buffers follow the context precision (mixed = double in mixed/double),
 // so high-magnitude energies are not narrowed to fp32 on accumulation/readback.
@@ -38,6 +38,54 @@ static void downloadMixedEnergy(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf,
         std::vector<float> tmp(out.size());
         buf.download(tmp);
         out.assign(tmp.begin(), tmp.end());
+    }
+}
+
+// Geometry/parameter buffers that feed the HCT/Born/GB math follow the context
+// precision: in double mode `real` is double, so receptor positions and the
+// scalar parameter arrays must be uploaded as double4/double to avoid silently
+// narrowing the reference geometry to single precision. In single/mixed mode
+// `real` is float, so these remain float4/float and the numerics are unchanged.
+static int realElementSize(OpenMM::CudaContext& cu) {
+    return cu.getUseDoublePrecision() ? sizeof(double) : sizeof(float);
+}
+
+static int real4ElementSize(OpenMM::CudaContext& cu) {
+    return cu.getUseDoublePrecision() ? sizeof(double4) : sizeof(float4);
+}
+
+// Upload an x/y/z position array as real4 (w=0) at context precision.
+static void uploadRealPositions(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf,
+                                const std::vector<double>& xyz, int n, const char* name) {
+    buf.initialize(cu, n, real4ElementSize(cu), name);
+    if (cu.getUseDoublePrecision()) {
+        std::vector<double4> p(n);
+        for (int i = 0; i < n; i++)
+            p[i] = make_double4(xyz[i*3], xyz[i*3+1], xyz[i*3+2], 0.0);
+        buf.upload(p);
+    } else {
+        std::vector<float4> p(n);
+        for (int i = 0; i < n; i++)
+            p[i] = make_float4((float)xyz[i*3], (float)xyz[i*3+1], (float)xyz[i*3+2], 0.0f);
+        buf.upload(p);
+    }
+}
+
+// Allocate a compute buffer of `real` elements at context precision.
+static void initRealBuffer(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf, int n, const char* name) {
+    buf.initialize(cu, n, realElementSize(cu), name);
+}
+
+// Upload a scalar parameter array as real at context precision.
+static void uploadRealScalars(OpenMM::CudaContext& cu, OpenMM::CudaArray& buf,
+                              const std::vector<double>& vals, const char* name) {
+    int n = (int)vals.size();
+    buf.initialize(cu, n, realElementSize(cu), name);
+    if (cu.getUseDoublePrecision()) {
+        buf.upload(vals);
+    } else {
+        std::vector<float> f(vals.begin(), vals.end());
+        buf.upload(f);
     }
 }
 
@@ -103,27 +151,24 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     // Compute GB prefactor: -138.935456 * (1/ε_solute - 1/ε_solvent)
     double soluteDielectric = force.getSoluteDielectric();
     double solventDielectric = force.getSolventDielectric();
-    prefactor = static_cast<float>(-ONE_4PI_EPS0 * (1.0/soluteDielectric - 1.0/solventDielectric));
+    prefactor = -ONE_4PI_EPS0 * (1.0/soluteDielectric - 1.0/solventDielectric);
 
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
     interpolationMethod = force.getInterpolationMethod();
 
-    // Upload ligand atom parameters
-    vector<float> chargesVec(numAtoms), radiiVec(numAtoms), scalesVec(numAtoms);
+    // Upload ligand atom parameters at context precision (real)
+    vector<double> chargesVec(numAtoms), radiiVec(numAtoms), scalesVec(numAtoms);
     for (int i = 0; i < numAtoms; i++) {
         double q, r, s;
         force.getAtomParameters(i, q, r, s);
-        chargesVec[i] = static_cast<float>(q);
-        radiiVec[i] = static_cast<float>(r);
-        scalesVec[i] = static_cast<float>(s);
+        chargesVec[i] = q;
+        radiiVec[i] = r;
+        scalesVec[i] = s;
     }
-    charges.initialize<float>(cu, numAtoms, "isolatedGbsaCharges");
-    charges.upload(chargesVec);
-    radii.initialize<float>(cu, numAtoms, "isolatedGbsaRadii");
-    radii.upload(radiiVec);
-    scaleFactors.initialize<float>(cu, numAtoms, "isolatedGbsaScaleFactors");
-    scaleFactors.upload(scalesVec);
+    uploadRealScalars(cu, charges, chargesVec, "isolatedGbsaCharges");
+    uploadRealScalars(cu, radii, radiiVec, "isolatedGbsaRadii");
+    uploadRealScalars(cu, scaleFactors, scalesVec, "isolatedGbsaScaleFactors");
 
     // Initialize receptor mode specific data
     if (receptorMode == IsolatedGBSAForce::GRID) {
@@ -223,42 +268,31 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
             }
             numReceptorAtoms = nRec;
 
-            // Upload receptor positions (persistent)
-            vector<float3> posF(nRec);
-            for (int j = 0; j < nRec; j++) {
-                posF[j] = make_float3(
-                    static_cast<float>(recPos[j * 3]),
-                    static_cast<float>(recPos[j * 3 + 1]),
-                    static_cast<float>(recPos[j * 3 + 2]));
-            }
-            receptorPositions.initialize<float3>(
-                cu, nRec, "isolatedGbsaReceptorPositions");
-            receptorPositions.upload(posF);
+            // Upload receptor positions (persistent) at context precision
+            uploadRealPositions(cu, receptorPositions, recPos, nRec,
+                                "isolatedGbsaReceptorPositions");
 
-            // Upload receptor charges (persistent)
-            vector<float> recChargesF(nRec);
+            // Upload receptor charges (persistent) at context precision
+            vector<double> recChargesD(nRec);
             for (int j = 0; j < nRec; j++) {
                 double q, r, s;
                 force.getReceptorAtomParameters(j, q, r, s);
-                recChargesF[j] = static_cast<float>(q);
+                recChargesD[j] = q;
             }
-            receptorCharges.initialize<float>(
-                cu, nRec, "isolatedGbsaReceptorCharges");
-            receptorCharges.upload(recChargesF);
+            uploadRealScalars(cu, receptorCharges, recChargesD,
+                              "isolatedGbsaReceptorCharges");
 
             // Upload baseline receptor Born radii, replicated K times
             // (the kernel indexes as receptorBornRadii[group * nRec + j])
             int K = numParticleGroups;
-            vector<float> recBornF(K * nRec);
+            vector<double> recBornD(K * nRec);
             for (int g = 0; g < K; g++) {
                 for (int j = 0; j < nRec; j++) {
-                    recBornF[g * nRec + j] =
-                        static_cast<float>(recBornBaseline[j]);
+                    recBornD[g * nRec + j] = recBornBaseline[j];
                 }
             }
-            receptorBornRadii.initialize<float>(
-                cu, K * nRec, "isolatedGbsaReceptorBornRadii");
-            receptorBornRadii.upload(recBornF);
+            uploadRealScalars(cu, receptorBornRadii, recBornD,
+                              "isolatedGbsaReceptorBornRadii");
         }
 
     } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
@@ -272,7 +306,12 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
             throw OpenMMException("IsolatedGBSAForce: receptor positions size mismatch");
         }
 
-        // Upload receptor positions as float3
+        // Upload receptor positions at context precision (real4)
+        uploadRealPositions(cu, receptorPositions, recPos, numReceptorAtoms,
+                            "isolatedGbsaReceptorPositions");
+
+        // Local float copy of positions used only for tile bounding spheres
+        // (tile-skipping geometry; precision here is irrelevant).
         vector<float3> positionsF(numReceptorAtoms);
         for (int i = 0; i < numReceptorAtoms; i++) {
             positionsF[i] = make_float3(
@@ -281,24 +320,19 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
                 static_cast<float>(recPos[i*3 + 2])
             );
         }
-        receptorPositions.initialize<float3>(cu, numReceptorAtoms, "isolatedGbsaReceptorPositions");
-        receptorPositions.upload(positionsF);
 
-        // Upload receptor parameters
-        vector<float> recRadii(numReceptorAtoms), recScales(numReceptorAtoms), recCharges(numReceptorAtoms);
+        // Upload receptor parameters at context precision
+        vector<double> recRadiiD(numReceptorAtoms), recScalesD(numReceptorAtoms), recChargesD(numReceptorAtoms);
         for (int i = 0; i < numReceptorAtoms; i++) {
             double q, r, s;
             force.getReceptorAtomParameters(i, q, r, s);
-            recCharges[i] = static_cast<float>(q);
-            recRadii[i] = static_cast<float>(r);
-            recScales[i] = static_cast<float>(s);
+            recChargesD[i] = q;
+            recRadiiD[i] = r;
+            recScalesD[i] = s;
         }
-        receptorRadii.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorRadii");
-        receptorRadii.upload(recRadii);
-        receptorScaleFactors.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorScaleFactors");
-        receptorScaleFactors.upload(recScales);
-        receptorCharges.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorCharges");
-        receptorCharges.upload(recCharges);
+        uploadRealScalars(cu, receptorRadii, recRadiiD, "isolatedGbsaReceptorRadii");
+        uploadRealScalars(cu, receptorScaleFactors, recScalesD, "isolatedGbsaReceptorScaleFactors");
+        uploadRealScalars(cu, receptorCharges, recChargesD, "isolatedGbsaReceptorCharges");
 
         // Precompute receptor block bounding spheres for tile-skipping
         {
@@ -332,9 +366,9 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         }
 
         // Allocate constant receptor buffers (per-group buffers allocated after groups are known)
-        receptorSelfHCT.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorSelfHCT");
-        receptorBornRadiiRef.initialize<float>(cu, numReceptorAtoms, "isolatedGbsaReceptorBornRadiiRef");
-        receptorReferenceEnergy.initialize<float>(cu, 1, "isolatedGbsaReceptorReferenceEnergy");
+        initRealBuffer(cu, receptorSelfHCT, numReceptorAtoms, "isolatedGbsaReceptorSelfHCT");
+        initRealBuffer(cu, receptorBornRadiiRef, numReceptorAtoms, "isolatedGbsaReceptorBornRadiiRef");
+        initRealBuffer(cu, receptorReferenceEnergy, 1, "isolatedGbsaReceptorReferenceEnergy");
     }
 
     // Process particle groups
@@ -415,11 +449,11 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
 
     // Allocate per-group receptor buffers for PAIRWISE mode (now that K is known)
     if (receptorMode == IsolatedGBSAForce::PAIRWISE && numReceptorAtoms > 0) {
-        ligandToReceptorHCT.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaLigandToReceptorHCT");
-        receptorBornRadii.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornRadii");
-        receptorEnergy.initialize<float>(cu, numParticleGroups, "isolatedGbsaReceptorEnergy");
-        receptorDeDR.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDR");
-        receptorBornForces.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornForces");
+        initRealBuffer(cu, ligandToReceptorHCT, numReceptorAtoms * numParticleGroups, "isolatedGbsaLigandToReceptorHCT");
+        initRealBuffer(cu, receptorBornRadii, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornRadii");
+        initRealBuffer(cu, receptorEnergy, numParticleGroups, "isolatedGbsaReceptorEnergy");
+        initRealBuffer(cu, receptorDeDR, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorDeDR");
+        initRealBuffer(cu, receptorBornForces, numReceptorAtoms * numParticleGroups, "isolatedGbsaReceptorBornForces");
 
         // Fixed-point accumulators for tiled HCT kernel
         hctReceptorFixed.initialize<unsigned long long>(cu, totalParticles, "hctReceptorFixed");
@@ -427,26 +461,26 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
 
         // Tiled force kernel buffers
         dEdR_crossTerm.initialize<unsigned long long>(cu, totalParticles, "dEdR_crossTerm");
-        bornForceLig.initialize<float>(cu, totalParticles, "bornForceLig");
+        initRealBuffer(cu, bornForceLig, totalParticles, "bornForceLig");
 
         // Tile-skip cache for locality cutoff
         if (receptorLocalityCutoff > 0.0f) {
             int numRecBlocks = (numReceptorAtoms + 31) / 32;
-            hctRecBlockCache.initialize<float>(cu, totalParticles * numRecBlocks, "hctRecBlockCache");
-            ligToRecHCTCache.initialize<float>(cu, numReceptorAtoms * numParticleGroups, "ligToRecHCTCache");
-            crossTermBlockCache.initialize<float>(cu, numParticleGroups * numRecBlocks, "crossTermBlockCache");
+            initRealBuffer(cu, hctRecBlockCache, totalParticles * numRecBlocks, "hctRecBlockCache");
+            initRealBuffer(cu, ligToRecHCTCache, numReceptorAtoms * numParticleGroups, "ligToRecHCTCache");
+            initRealBuffer(cu, crossTermBlockCache, numParticleGroups * numRecBlocks, "crossTermBlockCache");
             hasTileCache = false;
             hasCrossTermCache = false;
         }
     }
 
-    // Allocate intermediate result buffers
+    // Allocate intermediate result buffers at context precision (real)
     if (totalParticles > 0) {
-        hctReceptor.initialize<float>(cu, totalParticles, "isolatedGbsaHctReceptor");
-        hctLigand.initialize<float>(cu, totalParticles, "isolatedGbsaHctLigand");
-        bornRadii.initialize<float>(cu, totalParticles, "isolatedGbsaBornRadii");
-        dE_dR.initialize<float>(cu, totalParticles, "isolatedGbsaDEdR");
-        atomEnergies.initialize<float>(cu, totalParticles, "isolatedGbsaAtomEnergies");
+        initRealBuffer(cu, hctReceptor, totalParticles, "isolatedGbsaHctReceptor");
+        initRealBuffer(cu, hctLigand, totalParticles, "isolatedGbsaHctLigand");
+        initRealBuffer(cu, bornRadii, totalParticles, "isolatedGbsaBornRadii");
+        initRealBuffer(cu, dE_dR, totalParticles, "isolatedGbsaDEdR");
+        initRealBuffer(cu, atomEnergies, totalParticles, "isolatedGbsaAtomEnergies");
     }
 
     CUmodule module = cu.createModule(
@@ -552,23 +586,36 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         // setup and runtime (~11 kJ/mol over ~87M pair terms). The dE/dR
         // output goes to the receptorDeDR scratch buffer (group 0 slice),
         // which is overwritten at runtime and so is safe to clobber.
-        vector<float> zeroEnergy(1, 0.0f);
-        receptorReferenceEnergy.upload(zeroEnergy);
+        if (cu.getUseDoublePrecision()) {
+            vector<double> zeroEnergy(1, 0.0);
+            receptorReferenceEnergy.upload(zeroEnergy);
+        } else {
+            vector<float> zeroEnergy(1, 0.0f);
+            receptorReferenceEnergy.upload(zeroEnergy);
+        }
         CUdeviceptr scratchDeDRPtr = receptorDeDR.getDevicePointer();
         cu.clearBuffer(receptorDeDR);
 
+        float prefactorFloatInit = (float)prefactor;
+        void* prefactorArgInit = (cu.getUseDoublePrecision() ? (void*)&prefactor : (void*)&prefactorFloatInit);
         void* refEnergyTiledArgs[] = {
             &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiRefPtr,
-            &numReceptorAtoms, &prefactor, &receptorRefEnergyPtr,
+            &numReceptorAtoms, prefactorArgInit, &receptorRefEnergyPtr,
             &scratchDeDRPtr, &numTiles
         };
         cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel,
                          refEnergyTiledArgs, recNumBlocks * recBlockSize, recBlockSize);
 
         // Download and cache reference energy
-        vector<float> refEnergy(1);
-        receptorReferenceEnergy.download(refEnergy);
-        receptorReferenceEnergyValue = refEnergy[0];
+        if (cu.getUseDoublePrecision()) {
+            vector<double> refEnergy(1);
+            receptorReferenceEnergy.download(refEnergy);
+            receptorReferenceEnergyValue = refEnergy[0];
+        } else {
+            vector<float> refEnergy(1);
+            receptorReferenceEnergy.download(refEnergy);
+            receptorReferenceEnergyValue = refEnergy[0];
+        }
     }
 
     hasInitializedKernel = true;
@@ -585,6 +632,11 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     if (totalParticles == 0) return 0.0;
 
     int paddedNumAtoms = cu.getPaddedNumAtoms();
+
+    // Precision-aware prefactor: kernels take `real prefactor`, so pass an
+    // 8-byte double in double mode and a 4-byte float in single/mixed mode.
+    float prefactorFloat = (float)prefactor;
+    void* prefactorArg = (cu.getUseDoublePrecision() ? (void*)&prefactor : (void*)&prefactorFloat);
 
     // Clear energy and intermediate buffers (async GPU clears — no CPU-GPU sync)
     cu.clearBuffer(groupEnergies);
@@ -731,7 +783,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             // Device-to-device copy of ligandToReceptorHCT → ligToRecHCTCache
             CUdeviceptr srcPtr = ligandToReceptorHCT.getDevicePointer();
             CUdeviceptr dstPtr = ligToRecHCTCache.getDevicePointer();
-            cuMemcpyDtoD(dstPtr, srcPtr, ligRecTotal * sizeof(float));
+            cuMemcpyDtoD(dstPtr, srcPtr, ligRecTotal * (size_t)realElementSize(cu));
             hasTileCache = true;
         }
 
@@ -771,7 +823,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
     // Step 4: Compute GB energy and forces
     void* energyArgs[] = {
         &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
-        &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor,
+        &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
         &forcePtr, &groupEnergiesPtr, &groupLigandEnergiesPtr, &paddedNumAtoms,
         &globalScalingFactor, &groupScalingFactorsPtr, &groupUnscaledEnergiesPtr
     };
@@ -794,7 +846,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiPtr,
             &groupStartPtr, &numParticleGroups,
             &numReceptorAtoms, &numAtoms,
-            &prefactor,
+            prefactorArg,
             &groupCrossPtr,
             &forcePtr, &paddedNumAtoms,
             &globalScalingFactor, &groupScalingFactorsPtr,
@@ -861,9 +913,12 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.clearBuffer(receptorDeDR);  // clear ALL groups' dE/dR at once (async)
         }
 
+        double refEnergyDouble = receptorReferenceEnergyValue;
+        float refEnergyFloat = receptorReferenceEnergyValue;
+        void* refEnergyArg = (cu.getUseDoublePrecision() ? (void*)&refEnergyDouble : (void*)&refEnergyFloat);
         for (int g = 0; g < numParticleGroups; g++) {
-            CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + g * numReceptorAtoms * sizeof(float);
-            CUdeviceptr groupDeDRPtr = receptorDeDRPtr + g * numReceptorAtoms * sizeof(float);
+            CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + (size_t)g * numReceptorAtoms * realElementSize(cu);
+            CUdeviceptr groupDeDRPtr = receptorDeDRPtr + (size_t)g * numReceptorAtoms * realElementSize(cu);
             cu.clearBuffer(receptorEnergy);
 
             if (includeForces) {
@@ -873,7 +928,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 // lanes per step (no SIMT race).
                 void* tiledArgs[] = {
                     &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
-                    &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &groupDeDRPtr,
+                    &numReceptorAtoms, prefactorArg, &receptorEnergyPtr, &groupDeDRPtr,
                     &numTiles
                 };
                 cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel,
@@ -882,13 +937,13 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 // Energy only
                 void* recEnergyArgs[] = {
                     &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
-                    &numReceptorAtoms, &prefactor, &receptorEnergyPtr, &numTiles
+                    &numReceptorAtoms, prefactorArg, &receptorEnergyPtr, &numTiles
                 };
                 cu.executeKernel(computeReceptorGBEnergyTiledKernel, recEnergyArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
             }
 
             void* accumArgs[] = {
-                &receptorEnergyPtr, &receptorReferenceEnergyValue, &g,
+                &receptorEnergyPtr, refEnergyArg, &g,
                 &globalScalingFactor, &groupScalingFactorsPtr,
                 &groupEnergiesPtr, &groupDesolvPtr, &groupUnscaledEnergiesPtr
             };
@@ -912,7 +967,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &ligandChargesPtrC, &ligandBornRadiiPtrC,
                 &receptorChargesPtrC, &receptorBornRadiiPtr,
                 &groupStartPtr, &numParticleGroups, &numReceptorAtoms,
-                &numAtoms, &prefactor, &receptorDeDRPtr
+                &numAtoms, prefactorArg, &receptorDeDRPtr
             };
             cu.executeKernel(accumulateCrossTermReceptorDeDRKernel,
                              crossDedrArgs, crossBlocks * blockSize, blockSize);
@@ -967,7 +1022,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr, &receptorChargesPtr2,
             &receptorBornRadiiPtr, &bornForcesRecPtr2,
             &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &numAtoms,
-            &prefactor, &cutoffDistance, &forcePtr, &paddedNumAtoms,
+            prefactorArg, &cutoffDistance, &forcePtr, &paddedNumAtoms,
             &groupCrossTermPtr, &dEdRCrossTermPtr,
             &globalScalingFactor, &groupScalingFactorsPtr, &numRecBlocks2,
             &recBlockBoundsPtr2, &forceTileSkipCutoff, &crossCachePtr
@@ -1011,7 +1066,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         CUdeviceptr dE_dRPtr_for_reduce = dE_dR.getDevicePointer();
         void* bornDerivArgsEarly[] = {
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
-            &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor,
+            &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
             &dE_dRPtr_for_reduce,
             &globalScalingFactor, &groupScalingFactorsPtr
         };
@@ -1110,7 +1165,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         if (receptorMode != IsolatedGBSAForce::PAIRWISE) {
             void* bornDerivArgs[] = {
                 &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
-                &groupStartPtr, &numParticleGroups, &numAtoms, &prefactor,
+                &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
                 &dE_dRPtr,
                 &globalScalingFactor, &groupScalingFactorsPtr
             };
@@ -1143,7 +1198,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &receptorPosPtr2, &receptorChargesPtr2, &receptorBornRadiiPtr2,
                 &groupStartPtr, &numParticleGroups,
                 &numReceptorAtoms, &numAtoms,
-                &prefactor,
+                prefactorArg,
                 &dE_dRPtr,
                 &globalScalingFactor, &groupScalingFactorsPtr,
             };
@@ -1256,7 +1311,7 @@ void CudaCalcIsolatedGBSAForceKernel::updateParametersInContext(ContextImpl& con
     // Update solvent parameters
     double soluteDielectric = force.getSoluteDielectric();
     double solventDielectric = force.getSolventDielectric();
-    prefactor = static_cast<float>(-ONE_4PI_EPS0 * (1.0/soluteDielectric - 1.0/solventDielectric));
+    prefactor = -ONE_4PI_EPS0 * (1.0/soluteDielectric - 1.0/solventDielectric);
 
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
@@ -1545,11 +1600,14 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
     // in accumulateSADerivativesKernel (line 1097).
     float saProbeRadius = (receptorMode == IsolatedGBSAForce::GRID)
                           ? probeRadius : 0.14f;
+    // The gbsaHessianDouble kernels take a `float prefactor` (cast to double
+    // internally), so pass a float copy of the now-double prefactor member.
+    float prefactorHessF = (float)prefactor;
     void* couplingArgs[] = {
         &posqPtr, &particleIndicesPtr, &chargesPtr, &radiiPtr,
         &bornRadiiDoublePtr, &dRdPsiPtr, &d2RdPsi2Ptr, &dE_dRPtr,
         &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
-        &numParticleGroups, &templateN, &prefactor,
+        &numParticleGroups, &templateN, &prefactorHessF,
         &includeSAInt, &surfaceTension, &saProbeRadius,
         &totalParticles, &couplingPtr
     };
@@ -1562,7 +1620,7 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
     void* assembleArgs[] = {
         &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiDoublePtr,
         &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
-        &numParticleGroups, &templateN, &prefactor,
+        &numParticleGroups, &templateN, &prefactorHessF,
         &jacobianPtr, &couplingPtr, &dE_dHCTPtr, &scaleFactorsPtr, &radiiPtr,
         &dRdPsiPtr, &recD2PsiPtr,
         &totalParticles, &hessianPtr

@@ -32,20 +32,20 @@
  * Atom data structure for tiled HCT computation.
  */
 typedef struct {
-    float x, y, z;
-    float radius;
-    float scaledRadius;
-    float hctSum;
+    real x, y, z;
+    real radius;
+    real scaledRadius;
+    real hctSum;
 } TiledAtomDataHCT;
 
 /**
  * Atom data structure for tiled GB energy computation.
  */
 typedef struct {
-    float x, y, z;
-    float charge;
-    float bornRadius;
-    float energy;
+    real x, y, z;
+    real charge;
+    real bornRadius;
+    real energy;
 } TiledAtomDataGB;
 
 /**
@@ -56,9 +56,9 @@ typedef struct {
  * Work is evenly distributed across all warps.
  */
 extern "C" __global__ void computeReceptorSelfHCTTiled(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     float cutoffDistance,
     unsigned long long* __restrict__ receptorSelfHCT,  // Fixed-point accumulator
@@ -82,7 +82,7 @@ extern "C" __global__ void computeReceptorSelfHCTTiled(
     while (pos < end) {
         // Convert linear tile index to (x, y) tile coordinates
         // Using the formula from OpenMM: upper triangle enumeration
-        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrtf((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
+        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrt((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
         int x = pos - y * NUM_BLOCKS + y * (y + 1) / 2;
 
         // Handle roundoff errors
@@ -96,8 +96,8 @@ extern "C" __global__ void computeReceptorSelfHCTTiled(
         unsigned int atom2 = y * TILE_SIZE + tgx;
 
         // Load atom1 data (tile X)
-        float3 pos1 = make_float3(0, 0, 0);
-        float R1 = 0.1f, R1_off = 0.1f, S1 = 0.1f;
+        real4 pos1 = make_real4(0, 0, 0, 0);
+        real R1 = 0.1f, R1_off = 0.1f, S1 = 0.1f;
         if (atom1 < numReceptorAtoms) {
             pos1 = receptorPositions[atom1];
             R1 = receptorRadii[atom1];
@@ -107,12 +107,12 @@ extern "C" __global__ void computeReceptorSelfHCTTiled(
 
         // Load atom2 data into shared memory (tile Y)
         if (atom2 < numReceptorAtoms) {
-            float3 pos2 = receptorPositions[atom2];
+            real4 pos2 = receptorPositions[atom2];
             localData[tbx + tgx].x = pos2.x;
             localData[tbx + tgx].y = pos2.y;
             localData[tbx + tgx].z = pos2.z;
             localData[tbx + tgx].radius = receptorRadii[atom2];
-            float R2_off = receptorRadii[atom2] - DIELECTRIC_OFFSET;
+            real R2_off = receptorRadii[atom2] - DIELECTRIC_OFFSET;
             localData[tbx + tgx].scaledRadius = R2_off * receptorScaleFactors[atom2];
         } else {
             localData[tbx + tgx].x = 0;
@@ -125,35 +125,35 @@ extern "C" __global__ void computeReceptorSelfHCTTiled(
         __syncwarp();
 
         // Accumulate HCT for atom1
-        float hctSum1 = 0.0f;
+        real hctSum1 = 0.0f;
 
         if (x == y) {
             // Diagonal tile: only compute j > i to avoid double counting
             for (int j = 0; j < TILE_SIZE; j++) {
                 int atom2_j = y * TILE_SIZE + j;
                 if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms && atom2_j != atom1) {
-                    float dx = pos1.x - localData[tbx + j].x;
-                    float dy = pos1.y - localData[tbx + j].y;
-                    float dz = pos1.z - localData[tbx + j].z;
-                    float r2 = dx * dx + dy * dy + dz * dz;
+                    real dx = pos1.x - localData[tbx + j].x;
+                    real dy = pos1.y - localData[tbx + j].y;
+                    real dz = pos1.z - localData[tbx + j].z;
+                    real r2 = dx * dx + dy * dy + dz * dz;
 
                     if (!useCutoff || r2 < cutoff2) {
-                        float r = sqrtf(r2);
+                        real r = sqrt(r2);
                         if (r > 1e-6f) {
-                            float S_j = localData[tbx + j].scaledRadius;
-                            float r_plus_Sj = r + S_j;
+                            real S_j = localData[tbx + j].scaledRadius;
+                            real r_plus_Sj = r + S_j;
 
                             if (R1_off < r_plus_Sj) {
-                                float r_minus_Sj = fabsf(r - S_j);
-                                float l_ij = (R1_off > r_minus_Sj) ? (1.0f / R1_off) : (1.0f / r_minus_Sj);
-                                float u_ij = 1.0f / r_plus_Sj;
-                                float l_ij2 = l_ij * l_ij;
-                                float u_ij2 = u_ij * u_ij;
-                                float r_inv = 1.0f / r;
+                                real r_minus_Sj = fabs(r - S_j);
+                                real l_ij = (R1_off > r_minus_Sj) ? (1.0f / R1_off) : (1.0f / r_minus_Sj);
+                                real u_ij = 1.0f / r_plus_Sj;
+                                real l_ij2 = l_ij * l_ij;
+                                real u_ij2 = u_ij * u_ij;
+                                real r_inv = 1.0f / r;
 
-                                float term = l_ij - u_ij +
+                                real term = l_ij - u_ij +
                                              0.25f * r * (u_ij2 - l_ij2) +
-                                             0.5f * r_inv * logf(u_ij / l_ij) +
+                                             0.5f * r_inv * log(u_ij / l_ij) +
                                              0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
                                 if (R1_off < (S_j - r)) {
@@ -172,29 +172,29 @@ extern "C" __global__ void computeReceptorSelfHCTTiled(
             for (int j = 0; j < TILE_SIZE; j++) {
                 int atom2_j = y * TILE_SIZE + tj;
                 if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = pos1.x - localData[tbx + tj].x;
-                    float dy = pos1.y - localData[tbx + tj].y;
-                    float dz = pos1.z - localData[tbx + tj].z;
-                    float r2 = dx * dx + dy * dy + dz * dz;
+                    real dx = pos1.x - localData[tbx + tj].x;
+                    real dy = pos1.y - localData[tbx + tj].y;
+                    real dz = pos1.z - localData[tbx + tj].z;
+                    real r2 = dx * dx + dy * dy + dz * dz;
 
                     if (!useCutoff || r2 < cutoff2) {
-                        float r = sqrtf(r2);
+                        real r = sqrt(r2);
                         if (r > 1e-6f) {
                             // Contribution to atom1 from atom2
-                            float S_j = localData[tbx + tj].scaledRadius;
-                            float r_plus_Sj = r + S_j;
+                            real S_j = localData[tbx + tj].scaledRadius;
+                            real r_plus_Sj = r + S_j;
 
                             if (R1_off < r_plus_Sj) {
-                                float r_minus_Sj = fabsf(r - S_j);
-                                float l_ij = (R1_off > r_minus_Sj) ? (1.0f / R1_off) : (1.0f / r_minus_Sj);
-                                float u_ij = 1.0f / r_plus_Sj;
-                                float l_ij2 = l_ij * l_ij;
-                                float u_ij2 = u_ij * u_ij;
-                                float r_inv = 1.0f / r;
+                                real r_minus_Sj = fabs(r - S_j);
+                                real l_ij = (R1_off > r_minus_Sj) ? (1.0f / R1_off) : (1.0f / r_minus_Sj);
+                                real u_ij = 1.0f / r_plus_Sj;
+                                real l_ij2 = l_ij * l_ij;
+                                real u_ij2 = u_ij * u_ij;
+                                real r_inv = 1.0f / r;
 
-                                float term = l_ij - u_ij +
+                                real term = l_ij - u_ij +
                                              0.25f * r * (u_ij2 - l_ij2) +
-                                             0.5f * r_inv * logf(u_ij / l_ij) +
+                                             0.5f * r_inv * log(u_ij / l_ij) +
                                              0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
                                 if (R1_off < (S_j - r)) {
@@ -205,20 +205,20 @@ extern "C" __global__ void computeReceptorSelfHCTTiled(
                             }
 
                             // Contribution to atom2 from atom1
-                            float R2_off = localData[tbx + tj].radius - DIELECTRIC_OFFSET;
-                            float r_plus_S1 = r + S1;
+                            real R2_off = localData[tbx + tj].radius - DIELECTRIC_OFFSET;
+                            real r_plus_S1 = r + S1;
 
                             if (R2_off < r_plus_S1) {
-                                float r_minus_S1 = fabsf(r - S1);
-                                float l_ji = (R2_off > r_minus_S1) ? (1.0f / R2_off) : (1.0f / r_minus_S1);
-                                float u_ji = 1.0f / r_plus_S1;
-                                float l_ji2 = l_ji * l_ji;
-                                float u_ji2 = u_ji * u_ji;
-                                float r_inv = 1.0f / r;
+                                real r_minus_S1 = fabs(r - S1);
+                                real l_ji = (R2_off > r_minus_S1) ? (1.0f / R2_off) : (1.0f / r_minus_S1);
+                                real u_ji = 1.0f / r_plus_S1;
+                                real l_ji2 = l_ji * l_ji;
+                                real u_ji2 = u_ji * u_ji;
+                                real r_inv = 1.0f / r;
 
-                                float term = l_ji - u_ji +
+                                real term = l_ji - u_ji +
                                              0.25f * r * (u_ji2 - l_ji2) +
-                                             0.5f * r_inv * logf(u_ji / l_ji) +
+                                             0.5f * r_inv * log(u_ji / l_ji) +
                                              0.25f * S1 * S1 * r_inv * (l_ji2 - u_ji2);
 
                                 if (R2_off < (S1 - r)) {
@@ -256,14 +256,14 @@ extern "C" __global__ void computeReceptorSelfHCTTiled(
  */
 extern "C" __global__ void convertHCTToFloat(
     const unsigned long long* __restrict__ hctFixed,
-    float* __restrict__ hctFloat,
+    real* __restrict__ hctFloat,
     int numAtoms
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numAtoms) return;
 
     // Convert from fixed-point (scaled by 2^32) back to float
-    hctFloat[i] = (float)(hctFixed[i] / (double)0x100000000);
+    hctFloat[i] = (real)(hctFixed[i] / (double)0x100000000);
 }
 
 /**
@@ -271,12 +271,12 @@ extern "C" __global__ void convertHCTToFloat(
  * Uses OpenMM-style tile-based parallelization.
  */
 extern "C" __global__ void computeReceptorGBEnergyTiled(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
-    float prefactor,
-    float* __restrict__ receptorEnergy,
+    real prefactor,
+    real* __restrict__ receptorEnergy,
     int numTiles
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
@@ -285,11 +285,11 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
     const int tbx = threadIdx.x - tgx;
 
     __shared__ TiledAtomDataGB localData[256];
-    __shared__ float energyBuffer[256];
+    __shared__ real energyBuffer[256];
 
     const int NUM_BLOCKS = (numReceptorAtoms + TILE_SIZE - 1) / TILE_SIZE;
 
-    float energy = 0.0f;
+    real energy = 0.0f;
 
     // Each warp processes a range of tiles
     int pos = (int)(((long long)warp * numTiles) / totalWarps);
@@ -297,7 +297,7 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
 
     while (pos < end) {
         // Convert linear tile index to (x, y) tile coordinates
-        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrtf((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
+        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrt((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
         int x = pos - y * NUM_BLOCKS + y * (y + 1) / 2;
 
         if (x < y || x >= NUM_BLOCKS) {
@@ -309,8 +309,8 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
         unsigned int atom2 = y * TILE_SIZE + tgx;
 
         // Load atom1 data
-        float3 pos1 = make_float3(0, 0, 0);
-        float q1 = 0, R1 = 1.0f;
+        real4 pos1 = make_real4(0, 0, 0, 0);
+        real q1 = 0, R1 = 1.0f;
         if (atom1 < numReceptorAtoms) {
             pos1 = receptorPositions[atom1];
             q1 = receptorCharges[atom1];
@@ -319,7 +319,7 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
 
         // Load atom2 data into shared memory
         if (atom2 < numReceptorAtoms) {
-            float3 pos2 = receptorPositions[atom2];
+            real4 pos2 = receptorPositions[atom2];
             localData[tbx + tgx].x = pos2.x;
             localData[tbx + tgx].y = pos2.y;
             localData[tbx + tgx].z = pos2.z;
@@ -346,19 +346,19 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
             for (int j = tgx + 1; j < TILE_SIZE; j++) {
                 int atom2_j = y * TILE_SIZE + j;
                 if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = localData[tbx + j].x - pos1.x;
-                    float dy = localData[tbx + j].y - pos1.y;
-                    float dz = localData[tbx + j].z - pos1.z;
-                    float r2 = dx * dx + dy * dy + dz * dz;
-                    float r = sqrtf(r2);
+                    real dx = localData[tbx + j].x - pos1.x;
+                    real dy = localData[tbx + j].y - pos1.y;
+                    real dz = localData[tbx + j].z - pos1.z;
+                    real r2 = dx * dx + dy * dy + dz * dz;
+                    real r = sqrt(r2);
 
-                    float q2 = localData[tbx + j].charge;
-                    float R2 = localData[tbx + j].bornRadius;
-                    float RiRj = R1 * R2;
-                    float expArg = -r2 / (4.0f * RiRj);
-                    float expTerm = expf(expArg);
-                    float f_gb2 = r2 + RiRj * expTerm;
-                    float f_gb = sqrtf(f_gb2);
+                    real q2 = localData[tbx + j].charge;
+                    real R2 = localData[tbx + j].bornRadius;
+                    real RiRj = R1 * R2;
+                    real expArg = -r2 / (4.0f * RiRj);
+                    real expTerm = exp(expArg);
+                    real f_gb2 = r2 + RiRj * expTerm;
+                    real f_gb = sqrt(f_gb2);
 
                     energy += prefactor * q1 * q2 / f_gb;
                 }
@@ -369,19 +369,19 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
             for (int j = 0; j < TILE_SIZE; j++) {
                 int atom2_j = y * TILE_SIZE + tj;
                 if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = localData[tbx + tj].x - pos1.x;
-                    float dy = localData[tbx + tj].y - pos1.y;
-                    float dz = localData[tbx + tj].z - pos1.z;
-                    float r2 = dx * dx + dy * dy + dz * dz;
-                    float r = sqrtf(r2);
+                    real dx = localData[tbx + tj].x - pos1.x;
+                    real dy = localData[tbx + tj].y - pos1.y;
+                    real dz = localData[tbx + tj].z - pos1.z;
+                    real r2 = dx * dx + dy * dy + dz * dz;
+                    real r = sqrt(r2);
 
-                    float q2 = localData[tbx + tj].charge;
-                    float R2 = localData[tbx + tj].bornRadius;
-                    float RiRj = R1 * R2;
-                    float expArg = -r2 / (4.0f * RiRj);
-                    float expTerm = expf(expArg);
-                    float f_gb2 = r2 + RiRj * expTerm;
-                    float f_gb = sqrtf(f_gb2);
+                    real q2 = localData[tbx + tj].charge;
+                    real R2 = localData[tbx + tj].bornRadius;
+                    real RiRj = R1 * R2;
+                    real expArg = -r2 / (4.0f * RiRj);
+                    real expTerm = exp(expArg);
+                    real f_gb2 = r2 + RiRj * expTerm;
+                    real f_gb = sqrt(f_gb2);
 
                     // Each pair counted once (atom1 in tile X, atom2 in tile Y, x > y)
                     energy += prefactor * q1 * q2 / f_gb;
@@ -428,25 +428,25 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
  * thread accumulates only its OWN dE/dR — no factor-of-2 needed.
  */
 extern "C" __global__ void computeReceptorGBEnergyAndDeDRSimple(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
-    float prefactor,
-    float* __restrict__ receptorEnergy,     // [1] scalar, atomicAdd
-    float* __restrict__ receptorDeDR        // [numReceptorAtoms] per-atom
+    real prefactor,
+    real* __restrict__ receptorEnergy,     // [1] scalar, atomicAdd
+    real* __restrict__ receptorDeDR        // [numReceptorAtoms] per-atom
 ) {
     const int BATCH = 128;
-    __shared__ float3 sPos[BATCH];
-    __shared__ float  sQ[BATCH];
-    __shared__ float  sR[BATCH];
+    __shared__ real4 sPos[BATCH];
+    __shared__ real sQ[BATCH];
+    __shared__ real sR[BATCH];
 
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     bool valid_i = (i < numReceptorAtoms);
 
-    float3 pos_i = make_float3(0, 0, 0);
-    float q_i = 0.0f;
-    float R_i = 1.0f;
+    real4 pos_i = make_real4(0, 0, 0, 0);
+    real q_i = 0.0f;
+    real R_i = 1.0f;
     if (valid_i) {
         pos_i = receptorPositions[i];
         q_i = receptorCharges[i];
@@ -454,8 +454,8 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRSimple(
     }
 
     // Self term
-    float my_energy = valid_i ? (0.5f * prefactor * q_i * q_i / R_i) : 0.0f;
-    float my_dEdR   = valid_i ? (-0.5f * prefactor * q_i * q_i / (R_i * R_i)) : 0.0f;
+    real my_energy = valid_i ? (0.5f * prefactor * q_i * q_i / R_i) : 0.0f;
+    real my_dEdR   = valid_i ? (-0.5f * prefactor * q_i * q_i / (R_i * R_i)) : 0.0f;
 
     // Iterate over batches of J atoms
     for (int jStart = 0; jStart < numReceptorAtoms; jStart += BATCH) {
@@ -475,22 +475,22 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRSimple(
             for (int t = 0; t < batchSize; t++) {
                 int j = jStart + t;
                 if (j == i) continue;
-                float dx = sPos[t].x - pos_i.x;
-                float dy = sPos[t].y - pos_i.y;
-                float dz = sPos[t].z - pos_i.z;
-                float r2 = dx*dx + dy*dy + dz*dz;
+                real dx = sPos[t].x - pos_i.x;
+                real dy = sPos[t].y - pos_i.y;
+                real dz = sPos[t].z - pos_i.z;
+                real r2 = dx*dx + dy*dy + dz*dz;
 
-                float q_j = sQ[t];
-                float R_j = sR[t];
-                float RiRj = R_i * R_j;
-                float D = r2 / (4.0f * RiRj);
-                float expTerm = expf(-D);
-                float f_gb2 = r2 + RiRj * expTerm;
-                float f_gb = sqrtf(f_gb2);
+                real q_j = sQ[t];
+                real R_j = sR[t];
+                real RiRj = R_i * R_j;
+                real D = r2 / (4.0f * RiRj);
+                real expTerm = exp(-D);
+                real f_gb2 = r2 + RiRj * expTerm;
+                real f_gb = sqrt(f_gb2);
 
                 my_energy += 0.5f * prefactor * q_i * q_j / f_gb;
 
-                float dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + D);
+                real dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + D);
                 my_dEdR += -prefactor * q_i * q_j * dFgbDRi / f_gb2;
             }
         }
@@ -505,13 +505,13 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRSimple(
 
 
 extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
-    float prefactor,
-    float* __restrict__ receptorEnergy,    // [1] scalar output
-    float* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output
+    real prefactor,
+    real* __restrict__ receptorEnergy,    // [1] scalar output
+    real* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output
     int numTiles
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
@@ -520,12 +520,12 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
     const int tbx = threadIdx.x - tgx;
 
     __shared__ TiledAtomDataGB localData[256];
-    __shared__ float energyBuffer[256];
+    __shared__ real energyBuffer[256];
 
     const int NUM_BLOCKS = (numReceptorAtoms + TILE_SIZE - 1) / TILE_SIZE;
 
-    float energy = 0.0f;
-    float myDeDR = 0.0f;  // dE/dR for atom1 (this thread's atom)
+    real energy = 0.0f;
+    real myDeDR = 0.0f;  // dE/dR for atom1 (this thread's atom)
 
     int pos = (int)(((long long)warp * numTiles) / totalWarps);
     int end = (int)(((long long)(warp + 1) * numTiles) / totalWarps);
@@ -535,7 +535,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
     int prevAtom1 = -1;
 
     while (pos < end) {
-        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrtf((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
+        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrt((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
         int x = pos - y * NUM_BLOCKS + y * (y + 1) / 2;
         if (x < y || x >= NUM_BLOCKS) {
             y += (x < y ? -1 : 1);
@@ -553,8 +553,8 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
         prevAtom1 = atom1;
 
         // Load atom1
-        float3 pos1 = make_float3(0, 0, 0);
-        float q1 = 0, R1 = 1.0f;
+        real4 pos1 = make_real4(0, 0, 0, 0);
+        real q1 = 0, R1 = 1.0f;
         if (atom1 < numReceptorAtoms) {
             pos1 = receptorPositions[atom1];
             q1 = receptorCharges[atom1];
@@ -563,7 +563,7 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
 
         // Load atom2 into shared memory
         if (atom2 < numReceptorAtoms) {
-            float3 pos2 = receptorPositions[atom2];
+            real4 pos2 = receptorPositions[atom2];
             localData[tbx + tgx].x = pos2.x;
             localData[tbx + tgx].y = pos2.y;
             localData[tbx + tgx].z = pos2.z;
@@ -594,25 +594,25 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
             for (int j = 0; j < TILE_SIZE; j++) {
                 int atom2_j = y * TILE_SIZE + tj;
                 if ((int)atom1 < atom2_j && atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = localData[tbx + tj].x - pos1.x;
-                    float dy = localData[tbx + tj].y - pos1.y;
-                    float dz = localData[tbx + tj].z - pos1.z;
-                    float r2 = dx*dx + dy*dy + dz*dz;
+                    real dx = localData[tbx + tj].x - pos1.x;
+                    real dy = localData[tbx + tj].y - pos1.y;
+                    real dz = localData[tbx + tj].z - pos1.z;
+                    real r2 = dx*dx + dy*dy + dz*dz;
 
-                    float q2 = localData[tbx + tj].charge;
-                    float R2 = localData[tbx + tj].bornRadius;
-                    float RiRj = R1 * R2;
-                    float expArg = -r2 / (4.0f * RiRj);
-                    float expTerm = expf(expArg);
-                    float f_gb2 = r2 + RiRj * expTerm;
-                    float f_gb = sqrtf(f_gb2);
-                    float invFgb2 = 1.0f / f_gb2;
+                    real q2 = localData[tbx + tj].charge;
+                    real R2 = localData[tbx + tj].bornRadius;
+                    real RiRj = R1 * R2;
+                    real expArg = -r2 / (4.0f * RiRj);
+                    real expTerm = exp(expArg);
+                    real f_gb2 = r2 + RiRj * expTerm;
+                    real f_gb = sqrt(f_gb2);
+                    real invFgb2 = 1.0f / f_gb2;
 
                     energy += prefactor * q1 * q2 / f_gb;
 
-                    float factor = -prefactor * q1 * q2 * invFgb2;
-                    float dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-                    float dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    real factor = -prefactor * q1 * q2 * invFgb2;
+                    real dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    real dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     myDeDR += factor * dFgbDR1;
                     localData[tbx + tj].energy += factor * dFgbDR2;
                 }
@@ -631,25 +631,25 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
             for (int j = 0; j < TILE_SIZE; j++) {
                 int atom2_j = y * TILE_SIZE + tj;
                 if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = localData[tbx + tj].x - pos1.x;
-                    float dy = localData[tbx + tj].y - pos1.y;
-                    float dz = localData[tbx + tj].z - pos1.z;
-                    float r2 = dx*dx + dy*dy + dz*dz;
+                    real dx = localData[tbx + tj].x - pos1.x;
+                    real dy = localData[tbx + tj].y - pos1.y;
+                    real dz = localData[tbx + tj].z - pos1.z;
+                    real r2 = dx*dx + dy*dy + dz*dz;
 
-                    float q2 = localData[tbx + tj].charge;
-                    float R2 = localData[tbx + tj].bornRadius;
-                    float RiRj = R1 * R2;
-                    float expArg = -r2 / (4.0f * RiRj);
-                    float expTerm = expf(expArg);
-                    float f_gb2 = r2 + RiRj * expTerm;
-                    float f_gb = sqrtf(f_gb2);
-                    float invFgb2 = 1.0f / f_gb2;
+                    real q2 = localData[tbx + tj].charge;
+                    real R2 = localData[tbx + tj].bornRadius;
+                    real RiRj = R1 * R2;
+                    real expArg = -r2 / (4.0f * RiRj);
+                    real expTerm = exp(expArg);
+                    real f_gb2 = r2 + RiRj * expTerm;
+                    real f_gb = sqrt(f_gb2);
+                    real invFgb2 = 1.0f / f_gb2;
 
                     energy += prefactor * q1 * q2 / f_gb;
 
-                    float factor = -prefactor * q1 * q2 * invFgb2;
-                    float dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-                    float dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    real factor = -prefactor * q1 * q2 * invFgb2;
+                    real dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    real dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     myDeDR += factor * dFgbDR1;
                     localData[tbx + tj].energy += factor * dFgbDR2;
                 }
@@ -689,11 +689,11 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
  * Uses fixed-point atomicAdd for accumulation.
  */
 extern "C" __global__ void computeReceptorDeDRTiled(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
-    float prefactor,
+    real prefactor,
     unsigned long long* __restrict__ receptorDeDR,  // Fixed-point output
     int numTiles
 ) {
@@ -711,11 +711,11 @@ extern "C" __global__ void computeReceptorDeDRTiled(
     int end = (int)(((long long)(warp + 1) * numTiles) / totalWarps);
 
     // Local accumulator for dE/dR for atom1
-    float dEdR1 = 0.0f;
+    real dEdR1 = 0.0f;
 
     while (pos < end) {
         // Convert linear tile index to (x, y) tile coordinates
-        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrtf((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
+        int y = (int)floor(NUM_BLOCKS + 0.5f - sqrt((NUM_BLOCKS + 0.5f) * (NUM_BLOCKS + 0.5f) - 2.0f * pos));
         int x = pos - y * NUM_BLOCKS + y * (y + 1) / 2;
 
         // Handle roundoff errors
@@ -728,8 +728,8 @@ extern "C" __global__ void computeReceptorDeDRTiled(
         unsigned int atom2 = y * TILE_SIZE + tgx;
 
         // Load atom1 data
-        float3 pos1 = make_float3(0, 0, 0);
-        float q1 = 0, R1 = 1.0f;
+        real4 pos1 = make_real4(0, 0, 0, 0);
+        real q1 = 0, R1 = 1.0f;
         if (atom1 < numReceptorAtoms) {
             pos1 = receptorPositions[atom1];
             q1 = receptorCharges[atom1];
@@ -738,7 +738,7 @@ extern "C" __global__ void computeReceptorDeDRTiled(
 
         // Load atom2 data into shared memory
         if (atom2 < numReceptorAtoms) {
-            float3 pos2 = receptorPositions[atom2];
+            real4 pos2 = receptorPositions[atom2];
             localData[tbx + tgx].x = pos2.x;
             localData[tbx + tgx].y = pos2.y;
             localData[tbx + tgx].z = pos2.z;
@@ -766,21 +766,21 @@ extern "C" __global__ void computeReceptorDeDRTiled(
                 if (j == tgx) continue;
                 int atom2_j = y * TILE_SIZE + j;
                 if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = localData[tbx + j].x - pos1.x;
-                    float dy = localData[tbx + j].y - pos1.y;
-                    float dz = localData[tbx + j].z - pos1.z;
-                    float r2 = dx * dx + dy * dy + dz * dz;
+                    real dx = localData[tbx + j].x - pos1.x;
+                    real dy = localData[tbx + j].y - pos1.y;
+                    real dz = localData[tbx + j].z - pos1.z;
+                    real r2 = dx * dx + dy * dy + dz * dz;
 
-                    float q2 = localData[tbx + j].charge;
-                    float R2 = localData[tbx + j].bornRadius;
-                    float RiRj = R1 * R2;
-                    float expArg = -r2 / (4.0f * RiRj);
-                    float expTerm = expf(expArg);
-                    float f_gb2 = r2 + RiRj * expTerm;
-                    float f_gb = sqrtf(f_gb2);
+                    real q2 = localData[tbx + j].charge;
+                    real R2 = localData[tbx + j].bornRadius;
+                    real RiRj = R1 * R2;
+                    real expArg = -r2 / (4.0f * RiRj);
+                    real expTerm = exp(expArg);
+                    real f_gb2 = r2 + RiRj * expTerm;
+                    real f_gb = sqrt(f_gb2);
 
                     // dFgb/dRi = (Rj * exp / (2*fgb)) * (1 + r²/(4*RiRj))
-                    float dFgbDRi = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    real dFgbDRi = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
                     dEdR1 += -prefactor * q1 * q2 / (f_gb * f_gb) * dFgbDRi;
                 }
             }
@@ -790,22 +790,22 @@ extern "C" __global__ void computeReceptorDeDRTiled(
             for (int j = 0; j < TILE_SIZE; j++) {
                 int atom2_j = y * TILE_SIZE + tj;
                 if (atom1 < numReceptorAtoms && atom2_j < numReceptorAtoms) {
-                    float dx = localData[tbx + tj].x - pos1.x;
-                    float dy = localData[tbx + tj].y - pos1.y;
-                    float dz = localData[tbx + tj].z - pos1.z;
-                    float r2 = dx * dx + dy * dy + dz * dz;
+                    real dx = localData[tbx + tj].x - pos1.x;
+                    real dy = localData[tbx + tj].y - pos1.y;
+                    real dz = localData[tbx + tj].z - pos1.z;
+                    real r2 = dx * dx + dy * dy + dz * dz;
 
-                    float q2 = localData[tbx + tj].charge;
-                    float R2 = localData[tbx + tj].bornRadius;
-                    float RiRj = R1 * R2;
-                    float expArg = -r2 / (4.0f * RiRj);
-                    float expTerm = expf(expArg);
-                    float f_gb2 = r2 + RiRj * expTerm;
-                    float f_gb = sqrtf(f_gb2);
+                    real q2 = localData[tbx + tj].charge;
+                    real R2 = localData[tbx + tj].bornRadius;
+                    real RiRj = R1 * R2;
+                    real expArg = -r2 / (4.0f * RiRj);
+                    real expTerm = exp(expArg);
+                    real f_gb2 = r2 + RiRj * expTerm;
+                    real f_gb = sqrt(f_gb2);
 
                     // dFgb/dRi = (Rj * exp / (2*fgb)) * (1 + r²/(4*RiRj))
-                    float dFgbDRi = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-                    float dFgbDRj = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    real dFgbDRi = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                    real dFgbDRj = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
 
                     // Contribution to atom1 (in tile X)
                     dEdR1 += -prefactor * q1 * q2 / (f_gb * f_gb) * dFgbDRi;
@@ -849,43 +849,43 @@ extern "C" __global__ void computeReceptorDeDRTiled(
  * O(N²) but simple and correct.
  */
 extern "C" __global__ void computeReceptorDeDRSimple(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
-    float prefactor,
-    float* __restrict__ receptorDeDR
+    real prefactor,
+    real* __restrict__ receptorDeDR
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numReceptorAtoms) return;
 
-    float3 pos_i = receptorPositions[i];
-    float q_i = receptorCharges[i];
-    float R_i = receptorBornRadii[i];
+    real4 pos_i = receptorPositions[i];
+    real q_i = receptorCharges[i];
+    real R_i = receptorBornRadii[i];
 
     // Self term: dE_self/dR = -0.5 * prefactor * q² / R²
-    float dEdR = -0.5f * prefactor * q_i * q_i / (R_i * R_i);
+    real dEdR = -0.5f * prefactor * q_i * q_i / (R_i * R_i);
 
     // Pair terms
     for (int j = 0; j < numReceptorAtoms; j++) {
         if (j == i) continue;
 
-        float3 pos_j = receptorPositions[j];
-        float q_j = receptorCharges[j];
-        float R_j = receptorBornRadii[j];
+        real4 pos_j = receptorPositions[j];
+        real q_j = receptorCharges[j];
+        real R_j = receptorBornRadii[j];
 
-        float dx = pos_j.x - pos_i.x;
-        float dy = pos_j.y - pos_i.y;
-        float dz = pos_j.z - pos_i.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_j.x - pos_i.x;
+        real dy = pos_j.y - pos_i.y;
+        real dz = pos_j.z - pos_i.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
-        float RiRj = R_i * R_j;
-        float expArg = -r2 / (4.0f * RiRj);
-        float expTerm = expf(expArg);
-        float f_gb2 = r2 + RiRj * expTerm;
-        float f_gb = sqrtf(f_gb2);
+        real RiRj = R_i * R_j;
+        real expArg = -r2 / (4.0f * RiRj);
+        real expTerm = exp(expArg);
+        real f_gb2 = r2 + RiRj * expTerm;
+        real f_gb = sqrt(f_gb2);
 
-        float dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+        real dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
         dEdR += -prefactor * q_i * q_j / (f_gb * f_gb) * dFgbDRi;
     }
 
@@ -899,13 +899,13 @@ extern "C" __global__ void computeReceptorDeDRSimple(
 extern "C" __global__ void computeIsolatedLigandHCT(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float* __restrict__ scaleFactors,
+    const real* __restrict__ radii,
+    const real* __restrict__ scaleFactors,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctLigand
+    real* __restrict__ hctLigand
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -931,10 +931,10 @@ extern "C" __global__ void computeIsolatedLigandHCT(
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
     real4 pos_i = posq[particleIdx_i];
-    float R_i = radii[templateIdx_i];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx_i];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hct = 0.0f;
+    real hct = 0.0f;
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
@@ -948,37 +948,37 @@ extern "C" __global__ void computeIsolatedLigandHCT(
         int particleIdx_j = particleIndices[j];
         real4 pos_j = posq[particleIdx_j];
 
-        float dx = pos_i.x - pos_j.x;
-        float dy = pos_i.y - pos_j.y;
-        float dz = pos_i.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_i.x - pos_j.x;
+        real dy = pos_i.y - pos_j.y;
+        real dz = pos_i.z - pos_j.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         // Apply cutoff if enabled
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float R_j = radii[templateIdx_j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * scaleFactors[templateIdx_j];
+        real R_j = radii[templateIdx_j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * scaleFactors[templateIdx_j];
 
         // HCT integral computation
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_i_off >= r_plus_Sj) continue;  // No overlap
 
-        float r_minus_Sj = fabsf(r - S_j);
-        float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-        float u_ij = 1.0f / r_plus_Sj;
+        real r_minus_Sj = fabs(r - S_j);
+        real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+        real u_ij = 1.0f / r_plus_Sj;
 
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float r_inv = 1.0f / r;
+        real l_ij2 = l_ij * l_ij;
+        real u_ij2 = u_ij * u_ij;
+        real r_inv = 1.0f / r;
 
-        float term = l_ij - u_ij +
+        real term = l_ij - u_ij +
                      0.25f * r * (u_ij2 - l_ij2) +
-                     0.5f * r_inv * logf(u_ij / l_ij) +
+                     0.5f * r_inv * log(u_ij / l_ij) +
                      0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
         // Tinker correction: atom i completely inside atom j
@@ -1014,11 +1014,11 @@ extern "C" __global__ void computeIsolatedLigandHCT(
 extern "C" __global__ void computeReceptorLigandHCTTiled(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
@@ -1029,7 +1029,7 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
     int numTilesPerGroup,
     const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius) or NULL
     float localityCutoff,                             // tile-skip cutoff (-1 = no skip)
-    float* __restrict__ hctRecBlockCache,             // [totalParticles * numRecBlocks] or NULL
+    real* __restrict__ hctRecBlockCache,             // [totalParticles * numRecBlocks] or NULL
     int numRecBlocks,                                 // for cache indexing
     float globalScalingFactor,                        // alchemical scaling
     const float* __restrict__ groupScalingFactors     // per-group scaling
@@ -1041,10 +1041,10 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
 
     const int NUM_REC_BLOCKS = (numReceptorAtoms + TILE_SIZE - 1) / TILE_SIZE;
 
-    __shared__ float3 sLigPos[256];    // shared memory for ligand tile (8 warps × 32)
-    __shared__ float sLigR_off[256];
-    __shared__ float sLigS[256];
-    __shared__ float sLigHCT[256];     // ligand-side HCT accumulator
+    __shared__ real4 sLigPos[256];    // shared memory for ligand tile (8 warps × 32)
+    __shared__ real sLigR_off[256];
+    __shared__ real sLigS[256];
+    __shared__ real sLigHCT[256];     // ligand-side HCT accumulator
 
     int totalTiles = numTilesPerGroup * numGroups;
     float cutoff2 = cutoffDistance * cutoffDistance;
@@ -1071,13 +1071,13 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
 
         // Load receptor atom for this thread
         int recIdx = recBlock * TILE_SIZE + tgx;
-        float3 recPos = make_float3(0, 0, 0);
-        float recR_off = 0.1f;
-        float recS = 0.1f;
+        real4 recPos = make_real4(0, 0, 0, 0);
+        real recR_off = 0.1f;
+        real recS = 0.1f;
         bool validRec = (recIdx < numReceptorAtoms);
         if (validRec) {
             recPos = receptorPositions[recIdx];
-            float R = receptorRadii[recIdx];
+            real R = receptorRadii[recIdx];
             recR_off = R - DIELECTRIC_OFFSET;
             recS = recR_off * receptorScaleFactors[recIdx];
         }
@@ -1089,13 +1089,13 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
         if (validLig) {
             int particleIdx = particleIndices[ligGlobalIdx];
             real4 p = posq[particleIdx];
-            sLigPos[tbx + tgx] = make_float3(p.x, p.y, p.z);
+            sLigPos[tbx + tgx] = make_real4(p.x, p.y, p.z, 0);
             int templateIdx = ligLocalIdx % templateNumAtoms;
-            float R = ligandRadii[templateIdx];
+            real R = ligandRadii[templateIdx];
             sLigR_off[tbx + tgx] = R - DIELECTRIC_OFFSET;
             sLigS[tbx + tgx] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
         } else {
-            sLigPos[tbx + tgx] = make_float3(0, 0, 0);
+            sLigPos[tbx + tgx] = make_real4(0, 0, 0, 0);
             sLigR_off[tbx + tgx] = 0.1f;
             sLigS[tbx + tgx] = 0.1f;
         }
@@ -1111,16 +1111,16 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
             bool anyClose = false;
             int nInTile = min(TILE_SIZE, groupSize - ligBlock * TILE_SIZE);
             for (int i = 0; i < nInTile && !anyClose; i++) {
-                float dx = sLigPos[tbx + i].x - bounds.x;
-                float dy = sLigPos[tbx + i].y - bounds.y;
-                float dz = sLigPos[tbx + i].z - bounds.z;
+                real dx = sLigPos[tbx + i].x - bounds.x;
+                real dy = sLigPos[tbx + i].y - bounds.y;
+                real dz = sLigPos[tbx + i].z - bounds.z;
                 if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
             }
             if (!anyClose) continue;  // skip this tile
         }
 
         // Accumulate receptor-side HCT in register
-        float recHCT = 0.0f;
+        real recHCT = 0.0f;
 
         // Process all 32 ligand atoms in the tile
         unsigned int tj = tgx;
@@ -1129,39 +1129,39 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
             bool vLig = (ligLocal < groupSize);
 
             if (validRec && vLig) {
-                float dx = recPos.x - sLigPos[tbx + tj].x;
-                float dy = recPos.y - sLigPos[tbx + tj].y;
-                float dz = recPos.z - sLigPos[tbx + tj].z;
-                float r2 = dx*dx + dy*dy + dz*dz;
+                real dx = recPos.x - sLigPos[tbx + tj].x;
+                real dy = recPos.y - sLigPos[tbx + tj].y;
+                real dz = recPos.z - sLigPos[tbx + tj].z;
+                real r2 = dx*dx + dy*dy + dz*dz;
 
                 if (!useCutoff || r2 < cutoff2) {
-                    float invR = rsqrtf(r2);
-                    float r = r2 * invR;
+                    real invR = rsqrt(r2);
+                    real r = r2 * invR;
 
                     if (r > 1e-6f) {
-                        float lS = sLigS[tbx + tj];
-                        float lR_off = sLigR_off[tbx + tj];
+                        real lS = sLigS[tbx + tj];
+                        real lR_off = sLigR_off[tbx + tj];
 
                         // Ligand→Receptor: ligand screens receptor
-                        float r_plus_Si = r + lS;
+                        real r_plus_Si = r + lS;
                         if (recR_off < r_plus_Si) {
-                            float r_minus_Si = fabsf(r - lS);
-                            float l = (recR_off > r_minus_Si) ? (1.0f/recR_off) : (1.0f/r_minus_Si);
-                            float u = 1.0f / r_plus_Si;
-                            float l2 = l*l, u2 = u*u;
-                            float term = l - u + 0.25f*r*(u2-l2) + 0.5f*(1.0f/r)*logf(u/l) + 0.25f*lS*lS*(1.0f/r)*(l2-u2);
+                            real r_minus_Si = fabs(r - lS);
+                            real l = (recR_off > r_minus_Si) ? (1.0f/recR_off) : (1.0f/r_minus_Si);
+                            real u = 1.0f / r_plus_Si;
+                            real l2 = l*l, u2 = u*u;
+                            real term = l - u + 0.25f*r*(u2-l2) + 0.5f*(1.0f/r)*log(u/l) + 0.25f*lS*lS*(1.0f/r)*(l2-u2);
                             if (recR_off < (lS - r)) term += 2.0f*(1.0f/recR_off - l);
                             recHCT += term;
                         }
 
                         // Receptor→Ligand: receptor screens ligand
-                        float r_plus_Sj = r + recS;
+                        real r_plus_Sj = r + recS;
                         if (lR_off < r_plus_Sj) {
-                            float r_minus_Sj = fabsf(r - recS);
-                            float l = (lR_off > r_minus_Sj) ? (1.0f/lR_off) : (1.0f/r_minus_Sj);
-                            float u = 1.0f / r_plus_Sj;
-                            float l2 = l*l, u2 = u*u;
-                            float term = l - u + 0.25f*r*(u2-l2) + 0.5f*(1.0f/r)*logf(u/l) + 0.25f*recS*recS*(1.0f/r)*(l2-u2);
+                            real r_minus_Sj = fabs(r - recS);
+                            real l = (lR_off > r_minus_Sj) ? (1.0f/lR_off) : (1.0f/r_minus_Sj);
+                            real u = 1.0f / r_plus_Sj;
+                            real l2 = l*l, u2 = u*u;
+                            real term = l - u + 0.25f*r*(u2-l2) + 0.5f*(1.0f/r)*log(u/l) + 0.25f*recS*recS*(1.0f/r)*(l2-u2);
                             if (lR_off < (recS - r)) term += 2.0f*(1.0f/lR_off - l);
                             sLigHCT[tbx + tj] += term;
                         }
@@ -1180,7 +1180,7 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
         }
 
         // Ligand-side: write accumulated HCT from shared memory
-        float ligHCTVal = sLigHCT[tbx + tgx];
+        real ligHCTVal = sLigHCT[tbx + tgx];
         if (validLig && ligHCTVal != 0.0f) {
             atomicAdd(&global_hctReceptor[ligGlobalIdx],
                       (unsigned long long)(long long)(ligHCTVal * 0x100000000));
@@ -1199,7 +1199,7 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
  * adds the cached per-block partial sums for blocks that were skipped.
  */
 extern "C" __global__ void addDistantHCTFromCache(
-    const float* __restrict__ hctRecBlockCache,  // [totalParticles * numRecBlocks]
+    const real* __restrict__ hctRecBlockCache,  // [totalParticles * numRecBlocks]
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float4* __restrict__ recBlockBounds,   // [numRecBlocks]
@@ -1214,13 +1214,13 @@ extern "C" __global__ void addDistantHCTFromCache(
     int particleIdx = particleIndices[ligIdx];
     real4 p = posq[particleIdx];
 
-    float cachedSum = 0.0f;
+    real cachedSum = 0.0f;
     for (int b = 0; b < numRecBlocks; b++) {
         float4 bounds = recBlockBounds[b];
         float threshold = localityCutoff + bounds.w;
-        float dx = p.x - bounds.x;
-        float dy = p.y - bounds.y;
-        float dz = p.z - bounds.z;
+        real dx = p.x - bounds.x;
+        real dy = p.y - bounds.y;
+        real dz = p.z - bounds.z;
         if (dx*dx + dy*dy + dz*dz >= threshold * threshold) {
             // Block was distant (skipped by tiled kernel) → add cached value
             cachedSum += hctRecBlockCache[ligIdx * numRecBlocks + b];
@@ -1239,8 +1239,8 @@ extern "C" __global__ void addDistantHCTFromCache(
  * This kernel replaces zero with the cached full value for distant atoms.
  */
 extern "C" __global__ void restoreDistantLigToRecHCT(
-    const float* __restrict__ ligToRecHCTCache,  // [K * N_rec] cached values
-    float* __restrict__ ligandToReceptorHCT,     // [K * N_rec] current (post-conversion)
+    const real* __restrict__ ligToRecHCTCache,  // [K * N_rec] cached values
+    real* __restrict__ ligandToReceptorHCT,     // [K * N_rec] current (post-conversion)
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float4* __restrict__ recBlockBounds,
@@ -1269,9 +1269,9 @@ extern "C" __global__ void restoreDistantLigToRecHCT(
     for (int li = gs; li < ge && !anyClose; li++) {
         int particleIdx = particleIndices[li];
         real4 p = posq[particleIdx];
-        float dx = p.x - bounds.x;
-        float dy = p.y - bounds.y;
-        float dz = p.z - bounds.z;
+        real dx = p.x - bounds.x;
+        real dy = p.y - bounds.y;
+        real dz = p.z - bounds.z;
         if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
     }
 
@@ -1284,12 +1284,12 @@ extern "C" __global__ void restoreDistantLigToRecHCT(
 // Fixed-point to float conversion for tiled HCT results
 extern "C" __global__ void convertTiledHCTToFloat(
     const unsigned long long* __restrict__ hctFixed,
-    float* __restrict__ hctFloat,
+    real* __restrict__ hctFloat,
     int numAtoms
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numAtoms) return;
-    hctFloat[i] = (float)((long long)hctFixed[i] / (double)0x100000000);
+    hctFloat[i] = (real)((long long)hctFixed[i] / (double)0x100000000);
 }
 
 /**
@@ -1309,27 +1309,27 @@ extern "C" __global__ void convertTiledHCTToFloat(
 extern "C" __global__ void computeReceptorLigandHCTParallel(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor,
-    float* __restrict__ ligandToReceptorHCT
+    real* __restrict__ hctReceptor,
+    real* __restrict__ ligandToReceptorHCT
 ) {
     // Max ligand atoms we can handle in shared memory
     // 64 atoms × 20 bytes = 1280 bytes — well within shared memory limits
     const int MAX_LIG_ATOMS = 64;
 
     // Shared memory for ligand atoms (per warp would be ideal, but shared per block)
-    __shared__ float3 sLigPos[MAX_LIG_ATOMS];
-    __shared__ float sLigR_off[MAX_LIG_ATOMS];
-    __shared__ float sLigS[MAX_LIG_ATOMS];
+    __shared__ real4 sLigPos[MAX_LIG_ATOMS];
+    __shared__ real sLigR_off[MAX_LIG_ATOMS];
+    __shared__ real sLigS[MAX_LIG_ATOMS];
     __shared__ int sLigParticleIdx[MAX_LIG_ATOMS];
     __shared__ int sGroupIdx;
     __shared__ int sGroupStart;
@@ -1367,8 +1367,8 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
             int particleIdx = particleIndices[ligGlobalIdx];
             int templateIdx = (i % templateNumAtoms);
             real4 p = posq[particleIdx];
-            sLigPos[i] = make_float3(p.x, p.y, p.z);
-            float R = ligandRadii[templateIdx];
+            sLigPos[i] = make_real4(p.x, p.y, p.z, 0);
+            real R = ligandRadii[templateIdx];
             sLigR_off[i] = R - DIELECTRIC_OFFSET;
             sLigS[i] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
             sLigParticleIdx[i] = ligGlobalIdx;
@@ -1381,22 +1381,22 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
     }
 
     // Load this thread's receptor atom
-    float3 recPos = receptorPositions[recIdx];
-    float recR = receptorRadii[recIdx];
-    float recR_off = recR - DIELECTRIC_OFFSET;
-    float recS = recR_off * receptorScaleFactors[recIdx];
+    real4 recPos = receptorPositions[recIdx];
+    real recR = receptorRadii[recIdx];
+    real recR_off = recR - DIELECTRIC_OFFSET;
+    real recS = recR_off * receptorScaleFactors[recIdx];
 
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
     // Accumulate ligand→receptor HCT (this receptor atom screened by all ligand atoms)
-    float hctLigToRec = 0.0f;
+    real hctLigToRec = 0.0f;
 
     // Loop over ligand atoms
     int nLig = (ligGroupSize < MAX_LIG_ATOMS) ? ligGroupSize : MAX_LIG_ATOMS;
     for (int li = 0; li < nLig; li++) {
-        float3 ligPos;
-        float ligR_off, ligS;
+        real4 ligPos;
+        real ligR_off, ligS;
         int ligGlobalIdx;
 
         if (singleGroup) {
@@ -1409,46 +1409,46 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
             int particleIdx = particleIndices[idx];
             int templateIdx = li % templateNumAtoms;
             real4 p = posq[particleIdx];
-            ligPos = make_float3(p.x, p.y, p.z);
-            float R = ligandRadii[templateIdx];
+            ligPos = make_real4(p.x, p.y, p.z, 0);
+            real R = ligandRadii[templateIdx];
             ligR_off = R - DIELECTRIC_OFFSET;
             ligS = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
             ligGlobalIdx = idx;
         }
 
-        float dx = recPos.x - ligPos.x;
-        float dy = recPos.y - ligPos.y;
-        float dz = recPos.z - ligPos.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = recPos.x - ligPos.x;
+        real dy = recPos.y - ligPos.y;
+        real dz = recPos.z - ligPos.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
         // --- Ligand→Receptor HCT (ligand screens this receptor atom) ---
-        float r_plus_Si = r + ligS;
+        real r_plus_Si = r + ligS;
         if (recR_off < r_plus_Si) {
-            float r_minus_Si = fabsf(r - ligS);
-            float l = (recR_off > r_minus_Si) ? (1.0f / recR_off) : (1.0f / r_minus_Si);
-            float u = 1.0f / r_plus_Si;
-            float l2 = l*l, u2 = u*u;
-            float r_inv = 1.0f / r;
-            float term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*logf(u/l) + 0.25f*ligS*ligS*r_inv*(l2-u2);
+            real r_minus_Si = fabs(r - ligS);
+            real l = (recR_off > r_minus_Si) ? (1.0f / recR_off) : (1.0f / r_minus_Si);
+            real u = 1.0f / r_plus_Si;
+            real l2 = l*l, u2 = u*u;
+            real r_inv = 1.0f / r;
+            real term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u/l) + 0.25f*ligS*ligS*r_inv*(l2-u2);
             if (recR_off < (ligS - r)) term += 2.0f*(1.0f/recR_off - l);
             hctLigToRec += term;
         }
 
         // --- Receptor→Ligand HCT (this receptor screens ligand atom) ---
-        float r_plus_Sj = r + recS;
+        real r_plus_Sj = r + recS;
         if (ligR_off < r_plus_Sj) {
-            float r_minus_Sj = fabsf(r - recS);
-            float l = (ligR_off > r_minus_Sj) ? (1.0f / ligR_off) : (1.0f / r_minus_Sj);
-            float u = 1.0f / r_plus_Sj;
-            float l2 = l*l, u2 = u*u;
-            float r_inv = 1.0f / r;
-            float term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*logf(u/l) + 0.25f*recS*recS*r_inv*(l2-u2);
+            real r_minus_Sj = fabs(r - recS);
+            real l = (ligR_off > r_minus_Sj) ? (1.0f / ligR_off) : (1.0f / r_minus_Sj);
+            real u = 1.0f / r_plus_Sj;
+            real l2 = l*l, u2 = u*u;
+            real r_inv = 1.0f / r;
+            real term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u/l) + 0.25f*recS*recS*r_inv*(l2-u2);
             if (ligR_off < (recS - r)) term += 2.0f*(1.0f/ligR_off - l);
 
             // Accumulate into ligand atom's HCT via atomicAdd
@@ -1481,19 +1481,19 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
 extern "C" __global__ void computeFusedReceptorLigandHCT(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor,
-    float* __restrict__ ligandToReceptorHCT,
+    real* __restrict__ hctReceptor,
+    real* __restrict__ ligandToReceptorHCT,
     const int* __restrict__ isActiveRecAtom,
     int hasBaseline
 ) {
@@ -1508,9 +1508,9 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
         bool validLig = (ligIdx < totalParticles);
 
         // Load ligand atom data into registers
-        float4 ligPos = make_float4(0, 0, 0, 0);
-        float ligR_off = 0.1f;
-        float ligS = 0.1f;
+        real4 ligPos = make_real4(0, 0, 0, 0);
+        real ligR_off = 0.1f;
+        real ligS = 0.1f;
         int myGroupIdx = 0;
         int templateIdx = 0;
 
@@ -1529,12 +1529,12 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
                 }
             }
             templateIdx = atomInGroup % templateNumAtoms;
-            float R_i = ligandRadii[templateIdx];
+            real R_i = ligandRadii[templateIdx];
             ligR_off = R_i - DIELECTRIC_OFFSET;
             ligS = ligR_off * ligandScaleFactors[templateIdx];
         }
 
-        float hctLigAccum = 0.0f;  // receptor→ligand HCT for this ligand atom
+        real hctLigAccum = 0.0f;  // receptor→ligand HCT for this ligand atom
 
         float cutoff2 = cutoffDistance * cutoffDistance;
         bool useCutoff = (cutoffDistance > 0.0f);
@@ -1545,14 +1545,14 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
             int recIdx = recTile * TILE_SIZE + tgx;
 
             // Load receptor atom data into registers (one per thread)
-            float3 recPos = make_float3(0, 0, 0);
-            float recR_off = 0.1f;
-            float recS = 0.1f;
+            real4 recPos = make_real4(0, 0, 0, 0);
+            real recR_off = 0.1f;
+            real recS = 0.1f;
             bool validRec = (recIdx < numReceptorAtoms);
 
             if (validRec) {
                 recPos = receptorPositions[recIdx];
-                float R_j = receptorRadii[recIdx];
+                real R_j = receptorRadii[recIdx];
                 recR_off = R_j - DIELECTRIC_OFFSET;
                 recS = recR_off * receptorScaleFactors[recIdx];
             }
@@ -1560,12 +1560,12 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
             // Rotate receptor data through the warp via shuffle.
             // Each rotation presents one receptor atom to all 32 ligand threads.
             for (int rot = 0; rot < TILE_SIZE; rot++) {
-                float3 rPos;
+                real4 rPos;
                 rPos.x = __shfl_sync(0xFFFFFFFF, recPos.x, rot);
                 rPos.y = __shfl_sync(0xFFFFFFFF, recPos.y, rot);
                 rPos.z = __shfl_sync(0xFFFFFFFF, recPos.z, rot);
-                float rR_off = __shfl_sync(0xFFFFFFFF, recR_off, rot);
-                float rS = __shfl_sync(0xFFFFFFFF, recS, rot);
+                real rR_off = __shfl_sync(0xFFFFFFFF, recR_off, rot);
+                real rS = __shfl_sync(0xFFFFFFFF, recS, rot);
                 int rValid = __shfl_sync(0xFFFFFFFF, (int)validRec, rot);
                 int rIdx = recTile * TILE_SIZE + rot;
 
@@ -1575,26 +1575,26 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
                     !isActiveRecAtom[myGroupIdx * numReceptorAtoms + rIdx])
                     continue;
 
-                float dx = ligPos.x - rPos.x;
-                float dy = ligPos.y - rPos.y;
-                float dz = ligPos.z - rPos.z;
-                float r2 = dx*dx + dy*dy + dz*dz;
+                real dx = ligPos.x - rPos.x;
+                real dy = ligPos.y - rPos.y;
+                real dz = ligPos.z - rPos.z;
+                real r2 = dx*dx + dy*dy + dz*dz;
 
                 if (useCutoff && r2 > cutoff2) continue;
 
-                float r = sqrtf(r2);
+                real r = sqrt(r2);
                 if (r < 1e-6f) continue;
 
                 // Receptor→Ligand HCT (receptor j screens ligand i)
-                float r_plus_Sj = r + rS;
+                real r_plus_Sj = r + rS;
                 if (ligR_off < r_plus_Sj) {
-                    float r_minus_Sj = fabsf(r - rS);
-                    float l_ij = (ligR_off > r_minus_Sj) ? (1.0f / ligR_off) : (1.0f / r_minus_Sj);
-                    float u_ij = 1.0f / r_plus_Sj;
-                    float l2 = l_ij * l_ij;
-                    float u2 = u_ij * u_ij;
-                    float r_inv = 1.0f / r;
-                    float term = l_ij - u_ij + 0.25f*r*(u2-l2) + 0.5f*r_inv*logf(u_ij/l_ij) + 0.25f*rS*rS*r_inv*(l2-u2);
+                    real r_minus_Sj = fabs(r - rS);
+                    real l_ij = (ligR_off > r_minus_Sj) ? (1.0f / ligR_off) : (1.0f / r_minus_Sj);
+                    real u_ij = 1.0f / r_plus_Sj;
+                    real l2 = l_ij * l_ij;
+                    real u2 = u_ij * u_ij;
+                    real r_inv = 1.0f / r;
+                    real term = l_ij - u_ij + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u_ij/l_ij) + 0.25f*rS*rS*r_inv*(l2-u2);
                     if (ligR_off < (rS - r)) term += 2.0f * (1.0f/ligR_off - l_ij);
                     hctLigAccum += term;
                 }
@@ -1602,16 +1602,16 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
                 // Ligand→Receptor HCT (ligand i screens receptor j)
                 // Each ligand thread computes its contribution to receptor rIdx.
                 // Sum across the warp and write once via lane 0.
-                float recTerm = 0.0f;
-                float r_plus_Si = r + ligS;
+                real recTerm = 0.0f;
+                real r_plus_Si = r + ligS;
                 if (rR_off < r_plus_Si) {
-                    float r_minus_Si = fabsf(r - ligS);
-                    float l_ji = (rR_off > r_minus_Si) ? (1.0f / rR_off) : (1.0f / r_minus_Si);
-                    float u_ji = 1.0f / r_plus_Si;
-                    float l2 = l_ji * l_ji;
-                    float u2 = u_ji * u_ji;
-                    float r_inv = 1.0f / r;
-                    recTerm = l_ji - u_ji + 0.25f*r*(u2-l2) + 0.5f*r_inv*logf(u_ji/l_ji) + 0.25f*ligS*ligS*r_inv*(l2-u2);
+                    real r_minus_Si = fabs(r - ligS);
+                    real l_ji = (rR_off > r_minus_Si) ? (1.0f / rR_off) : (1.0f / r_minus_Si);
+                    real u_ji = 1.0f / r_plus_Si;
+                    real l2 = l_ji * l_ji;
+                    real u2 = u_ji * u_ji;
+                    real r_inv = 1.0f / r;
+                    recTerm = l_ji - u_ji + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u_ji/l_ji) + 0.25f*ligS*ligS*r_inv*(l2-u2);
                     if (rR_off < (ligS - r)) recTerm += 2.0f * (1.0f/rR_off - l_ji);
                 }
 
@@ -1640,22 +1640,22 @@ extern "C" __global__ void computeFusedReceptorLigandHCT(
 extern "C" __global__ void computeIsolatedReceptorHCTCellList(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     const int* __restrict__ cellAtomIdx,
     const int* __restrict__ cellStartArr,
     int numReceptorAtoms,
     int cellNx, int cellNy, int cellNz,
-    float cellOriginX, float cellOriginY, float cellOriginZ,
-    float cellSz,
+    real cellOriginX, real cellOriginY, real cellOriginZ,
+    real cellSz,
     const int* __restrict__ groupStart,
     int numGroups,
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor
+    real* __restrict__ hctReceptor
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -1673,10 +1673,10 @@ extern "C" __global__ void computeIsolatedReceptorHCTCellList(
 
     int particleIdx = particleIndices[idx];
     real4 pos = posq[particleIdx];
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hct = 0.0f;
+    real hct = 0.0f;
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
@@ -1703,35 +1703,35 @@ extern "C" __global__ void computeIsolatedReceptorHCTCellList(
                 for (int k = start; k < end; k++) {
                     int j = cellAtomIdx[k];
 
-                    float3 pos_rec = receptorPositions[j];
-                    float dx = pos.x - pos_rec.x;
-                    float dy = pos.y - pos_rec.y;
-                    float dz = pos.z - pos_rec.z;
-                    float r2 = dx*dx + dy*dy + dz*dz;
+                    real4 pos_rec = receptorPositions[j];
+                    real dx = pos.x - pos_rec.x;
+                    real dy = pos.y - pos_rec.y;
+                    real dz = pos.z - pos_rec.z;
+                    real r2 = dx*dx + dy*dy + dz*dz;
 
                     if (useCutoff && r2 > cutoff2) continue;
 
-                    float r = sqrtf(r2);
+                    real r = sqrt(r2);
                     if (r < 1e-6f) continue;
 
-                    float R_j = receptorRadii[j];
-                    float R_j_off = R_j - DIELECTRIC_OFFSET;
-                    float S_j = R_j_off * receptorScaleFactors[j];
+                    real R_j = receptorRadii[j];
+                    real R_j_off = R_j - DIELECTRIC_OFFSET;
+                    real S_j = R_j_off * receptorScaleFactors[j];
 
-                    float r_plus_Sj = r + S_j;
+                    real r_plus_Sj = r + S_j;
                     if (R_i_off >= r_plus_Sj) continue;
 
-                    float r_minus_Sj = fabsf(r - S_j);
-                    float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-                    float u_ij = 1.0f / r_plus_Sj;
+                    real r_minus_Sj = fabs(r - S_j);
+                    real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+                    real u_ij = 1.0f / r_plus_Sj;
 
-                    float l_ij2 = l_ij * l_ij;
-                    float u_ij2 = u_ij * u_ij;
-                    float r_inv = 1.0f / r;
+                    real l_ij2 = l_ij * l_ij;
+                    real u_ij2 = u_ij * u_ij;
+                    real r_inv = 1.0f / r;
 
-                    float term = l_ij - u_ij +
+                    real term = l_ij - u_ij +
                                  0.25f * r * (u_ij2 - l_ij2) +
-                                 0.5f * r_inv * logf(u_ij / l_ij) +
+                                 0.5f * r_inv * log(u_ij / l_ij) +
                                  0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
                     if (R_i_off < (S_j - r)) {
@@ -1757,10 +1757,10 @@ extern "C" __global__ void computeIsolatedReceptorHCTCellList(
 extern "C" __global__ void reconstructReceptorHCTCellList(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     const float* __restrict__ hctPerAtomBaseline,
     const float* __restrict__ baselineSum,
     const int* __restrict__ isActiveRecAtom,
@@ -1768,15 +1768,15 @@ extern "C" __global__ void reconstructReceptorHCTCellList(
     const int* __restrict__ cellStartArr,
     int numReceptorAtoms,
     int cellNx, int cellNy, int cellNz,
-    float cellOriginX, float cellOriginY, float cellOriginZ,
-    float cellSz,
+    real cellOriginX, real cellOriginY, real cellOriginZ,
+    real cellSz,
     float effectiveCutoff,
     const int* __restrict__ groupStart,
     int numGroups,
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor
+    real* __restrict__ hctReceptor
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -1798,11 +1798,11 @@ extern "C" __global__ void reconstructReceptorHCTCellList(
 
     int particleIdx = particleIndices[idx];
     real4 pos = posq[particleIdx];
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
     // Start with precomputed baseline sum
-    float hct = baselineSum[idx];
+    real hct = baselineSum[idx];
 
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
@@ -1839,34 +1839,34 @@ extern "C" __global__ void reconstructReceptorHCTCellList(
                     hct -= myBaseline[j];
 
                     // Compute fresh
-                    float3 pos_rec = receptorPositions[j];
-                    float dx = pos.x - pos_rec.x;
-                    float dy = pos.y - pos_rec.y;
-                    float dz = pos.z - pos_rec.z;
-                    float r2 = dx*dx + dy*dy + dz*dz;
+                    real4 pos_rec = receptorPositions[j];
+                    real dx = pos.x - pos_rec.x;
+                    real dy = pos.y - pos_rec.y;
+                    real dz = pos.z - pos_rec.z;
+                    real r2 = dx*dx + dy*dy + dz*dz;
 
                     if (useCutoff && r2 > cutoff2) continue;
 
-                    float r = sqrtf(r2);
+                    real r = sqrt(r2);
                     if (r < 1e-6f) continue;
 
-                    float R_j = receptorRadii[j];
-                    float R_j_off = R_j - DIELECTRIC_OFFSET;
-                    float S_j = R_j_off * receptorScaleFactors[j];
+                    real R_j = receptorRadii[j];
+                    real R_j_off = R_j - DIELECTRIC_OFFSET;
+                    real S_j = R_j_off * receptorScaleFactors[j];
 
-                    float r_plus_Sj = r + S_j;
+                    real r_plus_Sj = r + S_j;
                     if (R_i_off >= r_plus_Sj) continue;
 
-                    float r_minus_Sj = fabsf(r - S_j);
-                    float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-                    float u_ij = 1.0f / r_plus_Sj;
-                    float l_ij2 = l_ij * l_ij;
-                    float u_ij2 = u_ij * u_ij;
-                    float r_inv = 1.0f / r;
+                    real r_minus_Sj = fabs(r - S_j);
+                    real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+                    real u_ij = 1.0f / r_plus_Sj;
+                    real l_ij2 = l_ij * l_ij;
+                    real u_ij2 = u_ij * u_ij;
+                    real r_inv = 1.0f / r;
 
-                    float term = l_ij - u_ij +
+                    real term = l_ij - u_ij +
                                  0.25f * r * (u_ij2 - l_ij2) +
-                                 0.5f * r_inv * logf(u_ij / l_ij) +
+                                 0.5f * r_inv * log(u_ij / l_ij) +
                                  0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
                     if (R_i_off < (S_j - r)) {
@@ -1900,23 +1900,23 @@ extern "C" __global__ void reconstructReceptorHCTCellList(
 extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor,
+    real* __restrict__ hctReceptor,
     const int* __restrict__ isActiveRecAtom,
     int hasBaseline
 ) {
     // Shared memory for receptor tile data
-    __shared__ float3 tile_pos[TILE_SIZE * 8];  // 8 warps per block max
-    __shared__ float tile_scaledR[TILE_SIZE * 8];
+    __shared__ real4 tile_pos[TILE_SIZE * 8];  // 8 warps per block max
+    __shared__ real tile_scaledR[TILE_SIZE * 8];
 
     const int tgx = threadIdx.x & (TILE_SIZE - 1);  // Thread index within warp
     const int warpInBlock = threadIdx.x / TILE_SIZE;
@@ -1941,10 +1941,10 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
 
     int particleIdx = particleIndices[idx];
     real4 pos = posq[particleIdx];
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hct = 0.0f;
+    real hct = 0.0f;
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
@@ -1960,13 +1960,13 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
         // Cooperative load: each thread in the warp loads one receptor atom
         int loadIdx = recBase + tgx;
         if (loadIdx < numReceptorAtoms) {
-            float3 rp = receptorPositions[loadIdx];
+            real4 rp = receptorPositions[loadIdx];
             tile_pos[tileBase + tgx] = rp;
-            float R_j = receptorRadii[loadIdx];
-            float R_j_off = R_j - DIELECTRIC_OFFSET;
+            real R_j = receptorRadii[loadIdx];
+            real R_j_off = R_j - DIELECTRIC_OFFSET;
             tile_scaledR[tileBase + tgx] = R_j_off * receptorScaleFactors[loadIdx];
         } else {
-            tile_pos[tileBase + tgx] = make_float3(0, 0, 0);
+            tile_pos[tileBase + tgx] = make_real4(0, 0, 0, 0);
             tile_scaledR[tileBase + tgx] = 0.1f;
         }
         __syncwarp();
@@ -1979,32 +1979,32 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
             // Skip inactive atoms when baseline is available
             if (hasBaseline && activeMask != 0 && !activeMask[j]) continue;
 
-            float3 pos_rec = tile_pos[tileBase + t];
-            float dx = pos.x - pos_rec.x;
-            float dy = pos.y - pos_rec.y;
-            float dz = pos.z - pos_rec.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real4 pos_rec = tile_pos[tileBase + t];
+            real dx = pos.x - pos_rec.x;
+            real dy = pos.y - pos_rec.y;
+            real dz = pos.z - pos_rec.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
             if (useCutoff && r2 > cutoff2) continue;
 
-            float r = sqrtf(r2);
+            real r = sqrt(r2);
             if (r < 1e-6f) continue;
 
-            float S_j = tile_scaledR[tileBase + t];
-            float r_plus_Sj = r + S_j;
+            real S_j = tile_scaledR[tileBase + t];
+            real r_plus_Sj = r + S_j;
             if (R_i_off >= r_plus_Sj) continue;
 
-            float r_minus_Sj = fabsf(r - S_j);
-            float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-            float u_ij = 1.0f / r_plus_Sj;
+            real r_minus_Sj = fabs(r - S_j);
+            real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+            real u_ij = 1.0f / r_plus_Sj;
 
-            float l_ij2 = l_ij * l_ij;
-            float u_ij2 = u_ij * u_ij;
-            float r_inv = 1.0f / r;
+            real l_ij2 = l_ij * l_ij;
+            real u_ij2 = u_ij * u_ij;
+            real r_inv = 1.0f / r;
 
-            float term = l_ij - u_ij +
+            real term = l_ij - u_ij +
                          0.25f * r * (u_ij2 - l_ij2) +
-                         0.5f * r_inv * logf(u_ij / l_ij) +
+                         0.5f * r_inv * log(u_ij / l_ij) +
                          0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
             if (R_i_off < (S_j - r)) {
@@ -2026,17 +2026,17 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseTiled(
 extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor,
+    real* __restrict__ hctReceptor,
     const int* __restrict__ isActiveRecAtom
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2059,11 +2059,11 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
     int templateIdx = atomInGroup % templateNumAtoms;
 
     real4 pos = posq[particleIdx];
-    float3 pos_i = make_float3(pos.x, pos.y, pos.z);
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real4 pos_i = make_real4(pos.x, pos.y, pos.z, 0);
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hct = 0.0f;
+    real hct = 0.0f;
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
@@ -2071,38 +2071,38 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
     for (int j = 0; j < numReceptorAtoms; j++) {
         if (isActiveRecAtom != 0 && !isActiveRecAtom[myGroupIdx * numReceptorAtoms + j]) continue;
 
-        float3 pos_j = receptorPositions[j];
+        real4 pos_j = receptorPositions[j];
 
-        float dx = pos_i.x - pos_j.x;
-        float dy = pos_i.y - pos_j.y;
-        float dz = pos_i.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_i.x - pos_j.x;
+        real dy = pos_i.y - pos_j.y;
+        real dz = pos_i.z - pos_j.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float R_j = receptorRadii[j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * receptorScaleFactors[j];
+        real R_j = receptorRadii[j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * receptorScaleFactors[j];
 
         // HCT integral
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_i_off >= r_plus_Sj) continue;
 
-        float r_minus_Sj = fabsf(r - S_j);
-        float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-        float u_ij = 1.0f / r_plus_Sj;
+        real r_minus_Sj = fabs(r - S_j);
+        real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+        real u_ij = 1.0f / r_plus_Sj;
 
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float r_inv = 1.0f / r;
+        real l_ij2 = l_ij * l_ij;
+        real u_ij2 = u_ij * u_ij;
+        real r_inv = 1.0f / r;
 
-        float term = l_ij - u_ij +
+        real term = l_ij - u_ij +
                      0.25f * r * (u_ij2 - l_ij2) +
-                     0.5f * r_inv * logf(u_ij / l_ij) +
+                     0.5f * r_inv * log(u_ij / l_ij) +
                      0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
         if (R_i_off < (S_j - r)) {
@@ -2120,28 +2120,28 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwise(
  * R_born = 1 / (1/R_off - 0.5*R_off*HCT)
  */
 extern "C" __global__ void computeBornRadiiHCT(
-    const float* __restrict__ radii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
+    const real* __restrict__ radii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
     int numAtoms,
     int templateNumAtoms,
-    float* __restrict__ bornRadii
+    real* __restrict__ bornRadii
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numAtoms) return;
 
     int templateIdx = idx % templateNumAtoms;
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hctTotal = hctReceptor[idx] + hctLigand[idx];
+    real hctTotal = hctReceptor[idx] + hctLigand[idx];
 
     // Raw HCT: R_born = 1 / (1/R_off - psi), where psi = 0.5 * R_off * HCT
-    float psi = 0.5f * R_i_off * hctTotal;
-    float denom = 1.0f / R_i_off - psi;
+    real psi = 0.5f * R_i_off * hctTotal;
+    real denom = 1.0f / R_i_off - psi;
 
-    float bornRadius = (denom > 1e-6f) ? (1.0f / denom) : 50.0f;
-    bornRadius = fminf(bornRadius, 50.0f);
+    real bornRadius = (denom > 1e-6f) ? (1.0f / denom) : 50.0f;
+    bornRadius = fmin(bornRadius, (real)50.0);
 
     bornRadii[idx] = bornRadius;
 }
@@ -2150,33 +2150,33 @@ extern "C" __global__ void computeBornRadiiHCT(
  * Compute Born radii using OBC-II formula with tanh correction.
  */
 extern "C" __global__ void computeBornRadiiOBC(
-    const float* __restrict__ radii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
+    const real* __restrict__ radii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
     int numAtoms,
     int templateNumAtoms,
-    float* __restrict__ bornRadii
+    real* __restrict__ bornRadii
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numAtoms) return;
 
     int templateIdx = idx % templateNumAtoms;
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hctTotal = hctReceptor[idx] + hctLigand[idx];
-    float psi = 0.5f * R_i_off * hctTotal;
+    real hctTotal = hctReceptor[idx] + hctLigand[idx];
+    real psi = 0.5f * R_i_off * hctTotal;
 
     // OBC-II tanh correction
-    float psi2 = psi * psi;
-    float psi3 = psi2 * psi;
-    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
-    float tanhVal = tanhf(tanhArg);
+    real psi2 = psi * psi;
+    real psi3 = psi2 * psi;
+    real tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    real tanhVal = tanh(tanhArg);
 
-    float denom = 1.0f / R_i_off - tanhVal / R_i;
-    float bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
+    real denom = 1.0f / R_i_off - tanhVal / R_i;
+    real bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
 
-    bornRadius = fminf(bornRadius, 50.0f);
+    bornRadius = fmin(bornRadius, (real)50.0);
 
     bornRadii[idx] = bornRadius;
 }
@@ -2188,12 +2188,12 @@ extern "C" __global__ void computeBornRadiiOBC(
 extern "C" __global__ void computeIsolatedGBEnergy(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ charges,
-    const float* __restrict__ bornRadii,
+    const real* __restrict__ charges,
+    const real* __restrict__ bornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
-    float prefactor,
+    real prefactor,
     unsigned long long* __restrict__ forceBuffer,
     mixed* __restrict__ groupEnergies,
     mixed* __restrict__ groupLigandSelfEnergies,
@@ -2229,8 +2229,8 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
     real4 pos_i = posq[particleIdx_i];
-    float q_i = charges[templateIdx_i];
-    float R_i = bornRadii[idx];
+    real q_i = charges[templateIdx_i];
+    real R_i = bornRadii[idx];
 
     mixed energy = 0.0f;
     real3 force = make_real3(0.0f, 0.0f, 0.0f);
@@ -2300,8 +2300,8 @@ extern "C" __global__ void computeIsolatedGBEnergy(
  * Compute surface area energy (ACE approximation).
  */
 extern "C" __global__ void computeIsolatedSAEnergy(
-    const float* __restrict__ radii,
-    const float* __restrict__ bornRadii,
+    const real* __restrict__ radii,
+    const real* __restrict__ bornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
@@ -2332,21 +2332,21 @@ extern "C" __global__ void computeIsolatedSAEnergy(
     if (idx >= groupEndIdx) return;
 
     int templateIdx = atomInGroup % templateNumAtoms;
-    float R_i = radii[templateIdx];
-    float bornR = bornRadii[idx];
+    real R_i = radii[templateIdx];
+    real bornR = bornRadii[idx];
 
     // ACE surface area term with alchemical scaling
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
     float Rsolv = R_i + probeRadius;
-    float ratio = R_i / bornR;
-    float ratio6 = ratio * ratio * ratio * ratio * ratio * ratio;
-    float area = 4.0f * 3.14159265f * Rsolv * Rsolv * ratio6;
-    float saEnergy = surfaceTension * area * scale;
+    real ratio = R_i / bornR;
+    real ratio6 = ratio * ratio * ratio * ratio * ratio * ratio;
+    real area = 4.0f * 3.14159265f * Rsolv * Rsolv * ratio6;
+    real saEnergy = surfaceTension * area * scale;
 
     atomicAdd(&groupEnergies[groupIdx], saEnergy);
     // Accumulate unscaled SA energy (no per-group alchemical scaling)
     if (groupUnscaledEnergies != 0) {
-        float saEnergyUnscaled = surfaceTension * area * globalScalingFactor;
+        real saEnergyUnscaled = surfaceTension * area * globalScalingFactor;
         atomicAdd(&groupUnscaledEnergies[groupIdx], saEnergyUnscaled);
     }
 }
@@ -2369,9 +2369,9 @@ extern "C" __global__ void computeIsolatedSAEnergy(
  * Summed and multiplied by the alchemical scale, added to group desolvation.
  */
 extern "C" __global__ void computeReceptorDeltaSA(
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorBornRadii,     // per-group [g*N_r + i]
-    const float* __restrict__ receptorBornRadiiRef,  // per-atom (R alone)
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorBornRadii,     // per-group [g*N_r + i]
+    const real* __restrict__ receptorBornRadiiRef,  // per-atom (R alone)
     int numReceptorAtoms,
     int numGroups,
     float surfaceTension,
@@ -2393,19 +2393,19 @@ extern "C" __global__ void computeReceptorDeltaSA(
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
         if (scale < 0.05f) continue;
 
-        float R_i = receptorRadii[i];
-        float R_born_withL = receptorBornRadii[groupIdx * numReceptorAtoms + i];
-        float R_born_alone = receptorBornRadiiRef[i];
+        real R_i = receptorRadii[i];
+        real R_born_withL = receptorBornRadii[groupIdx * numReceptorAtoms + i];
+        real R_born_alone = receptorBornRadiiRef[i];
 
         // Skip atoms with no Born-radius change (e.g. inactive or far)
-        if (fabsf(R_born_withL - R_born_alone) < 1e-7f) continue;
+        if (fabs(R_born_withL - R_born_alone) < 1e-7f) continue;
 
         float Rsolv = R_i + probeRadius;
-        float ratio_w = R_i / R_born_withL;
-        float ratio_a = R_i / R_born_alone;
-        float ratio6_w = ratio_w*ratio_w*ratio_w*ratio_w*ratio_w*ratio_w;
-        float ratio6_a = ratio_a*ratio_a*ratio_a*ratio_a*ratio_a*ratio_a;
-        float dSA_i = surfaceTension * 4.0f * 3.14159265f
+        real ratio_w = R_i / R_born_withL;
+        real ratio_a = R_i / R_born_alone;
+        real ratio6_w = ratio_w*ratio_w*ratio_w*ratio_w*ratio_w*ratio_w;
+        real ratio6_a = ratio_a*ratio_a*ratio_a*ratio_a*ratio_a*ratio_a;
+        real dSA_i = surfaceTension * 4.0f * 3.14159265f
                       * Rsolv * Rsolv * (ratio6_w - ratio6_a);
 
         atomicAdd(&groupReceptorDesolvations[groupIdx], dSA_i * scale);
@@ -2423,13 +2423,13 @@ extern "C" __global__ void computeReceptorDeltaSA(
 extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ charges,
-    const float* __restrict__ bornRadii,
+    const real* __restrict__ charges,
+    const real* __restrict__ bornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
-    float prefactor,
-    float* __restrict__ dE_dR,
+    real prefactor,
+    real* __restrict__ dE_dR,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -2459,10 +2459,10 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
     real4 pos_i = posq[particleIdx_i];
-    float q_i = charges[templateIdx_i];
-    float R_i = bornRadii[idx];
+    real q_i = charges[templateIdx_i];
+    real R_i = bornRadii[idx];
 
-    float dEdRi = 0.0f;
+    real dEdRi = 0.0f;
 
     // Self term: E_self = 0.5 * prefactor * q_i^2 / R_i
     // dE/dR_i = -0.5 * prefactor * q_i^2 / R_i^2
@@ -2478,26 +2478,26 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
         int particleIdx_j = particleIndices[j];
 
         real4 pos_j = posq[particleIdx_j];
-        float q_j = charges[templateIdx_j];
-        float R_j = bornRadii[j];
+        real q_j = charges[templateIdx_j];
+        real R_j = bornRadii[j];
 
-        float dx = pos_j.x - pos_i.x;
-        float dy = pos_j.y - pos_i.y;
-        float dz = pos_j.z - pos_i.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_j.x - pos_i.x;
+        real dy = pos_j.y - pos_i.y;
+        real dz = pos_j.z - pos_i.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
-        float RiRj = R_i * R_j;
-        float expArg = -r2 / (4.0f * RiRj);
-        float expTerm = expf(expArg);
-        float f_gb2 = r2 + RiRj * expTerm;
-        float f_gb = sqrtf(f_gb2);
+        real RiRj = R_i * R_j;
+        real expArg = -r2 / (4.0f * RiRj);
+        real expTerm = exp(expArg);
+        real f_gb2 = r2 + RiRj * expTerm;
+        real f_gb = sqrt(f_gb2);
 
         // dE/dR_i from pair (i,j)
         // E = prefactor * q_i * q_j / f_gb
         // df_gb/dR_i = (1/(2*f_gb)) * R_j * exp(...) * (1 + r2/(4*R_i*R_j))
         //            = (R_j * expTerm / (2*f_gb)) * (1 + r2/(4*RiRj))
-        float dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-        float dEdR_pair = -prefactor * q_i * q_j / (f_gb * f_gb) * dFgbDRi;
+        real dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+        real dEdR_pair = -prefactor * q_i * q_j / (f_gb * f_gb) * dFgbDRi;
 
         dEdRi += dEdR_pair;
     }
@@ -2509,14 +2509,14 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
  * Accumulate dE/dR_born from surface area term.
  */
 extern "C" __global__ void accumulateIsolatedSADerivatives(
-    const float* __restrict__ radii,
-    const float* __restrict__ bornRadii,
+    const real* __restrict__ radii,
+    const real* __restrict__ bornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
     float surfaceTension,
     float probeRadius,
-    float* __restrict__ dE_dR,
+    real* __restrict__ dE_dR,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -2540,18 +2540,18 @@ extern "C" __global__ void accumulateIsolatedSADerivatives(
     if (idx >= groupEndIdx) return;
 
     int templateIdx = atomInGroup % templateNumAtoms;
-    float R_i = radii[templateIdx];
-    float bornR = bornRadii[idx];
+    real R_i = radii[templateIdx];
+    real bornR = bornRadii[idx];
 
     // E_SA = surfaceTension * 4*pi*(R_i+probe)^2 * (R_i/bornR)^6
     // dE_SA/dR_born = surfaceTension * 4*pi*(R_i+probe)^2 * 6 * (R_i/bornR)^5 * (-R_i/bornR^2)
     //              = -6 * surfaceTension * 4*pi*(R_i+probe)^2 * R_i^6 / bornR^7
     float Rsolv = R_i + probeRadius;
-    float ratio = R_i / bornR;
-    float ratio5 = ratio * ratio * ratio * ratio * ratio;
+    real ratio = R_i / bornR;
+    real ratio5 = ratio * ratio * ratio * ratio * ratio;
 
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-    float dEdR_SA = -6.0f * surfaceTension * 4.0f * 3.14159265f * Rsolv * Rsolv * ratio5 * R_i / (bornR * bornR);
+    real dEdR_SA = -6.0f * surfaceTension * 4.0f * 3.14159265f * Rsolv * Rsolv * ratio5 * R_i / (bornR * bornR);
 
     dE_dR[idx] += dEdR_SA * scale;
 }
@@ -2569,12 +2569,12 @@ extern "C" __global__ void accumulateIsolatedSADerivatives(
 extern "C" __global__ void computeIsolatedHCTChainRuleForces(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float* __restrict__ scaleFactors,
-    const float* __restrict__ bornRadii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
-    const float* __restrict__ dE_dR,
+    const real* __restrict__ radii,
+    const real* __restrict__ scaleFactors,
+    const real* __restrict__ bornRadii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
+    const real* __restrict__ dE_dR,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
@@ -2605,30 +2605,30 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
     int templateIdx_i = atomInGroup % templateNumAtoms;
 
     real4 pos_i = posq[particleIdx_i];
-    float R_i = radii[templateIdx_i];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
-    float S_i = R_i_off * scaleFactors[templateIdx_i];
-    float bornR_i = bornRadii[idx];
+    real R_i = radii[templateIdx_i];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
+    real S_i = R_i_off * scaleFactors[templateIdx_i];
+    real bornR_i = bornRadii[idx];
 
     // Compute bornForces[i] = dE/dR_born * R_born² * obcChain (OpenMM style)
     // obcChain = R_off * (α - 2β*ψ + 3γ*ψ²) * sech²(arg) / R
-    float hctTotal_i = hctReceptor[idx] + hctLigand[idx];
-    float psi_i = 0.5f * R_i_off * hctTotal_i;
-    float psi2_i = psi_i * psi_i;
-    float psi3_i = psi2_i * psi_i;
+    real hctTotal_i = hctReceptor[idx] + hctLigand[idx];
+    real psi_i = 0.5f * R_i_off * hctTotal_i;
+    real psi2_i = psi_i * psi_i;
+    real psi3_i = psi2_i * psi_i;
 
-    float tanhArg_i = OBC_ALPHA * psi_i - OBC_BETA * psi2_i + OBC_GAMMA * psi3_i;
-    float tanhVal_i = tanhf(tanhArg_i);
-    float sech2_i = 1.0f - tanhVal_i * tanhVal_i;
-    float dTanhArgDPsi_i = OBC_ALPHA - 2.0f * OBC_BETA * psi_i + 3.0f * OBC_GAMMA * psi2_i;
+    real tanhArg_i = OBC_ALPHA * psi_i - OBC_BETA * psi2_i + OBC_GAMMA * psi3_i;
+    real tanhVal_i = tanh(tanhArg_i);
+    real sech2_i = 1.0f - tanhVal_i * tanhVal_i;
+    real dTanhArgDPsi_i = OBC_ALPHA - 2.0f * OBC_BETA * psi_i + 3.0f * OBC_GAMMA * psi2_i;
 
     // obcChain[i] = R_off * (α - 2β*ψ + 3γ*ψ²) * sech²(arg) / R
-    float obcChain_i = R_i_off * dTanhArgDPsi_i * sech2_i / R_i;
+    real obcChain_i = R_i_off * dTanhArgDPsi_i * sech2_i / R_i;
 
     // bornForces[i] = dE/dR_born * R_born² * obcChain
-    float bornForces_i = dE_dR[idx] * bornR_i * bornR_i * obcChain_i;
+    real bornForces_i = dE_dR[idx] * bornR_i * bornR_i * obcChain_i;
 
-    float3 force_i = make_float3(0.0f, 0.0f, 0.0f);
+    real4 force_i = make_real4(0.0f, 0.0f, 0.0f, 0);
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
@@ -2642,43 +2642,43 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
         int particleIdx_j = particleIndices[j];
 
         real4 pos_j = posq[particleIdx_j];
-        float R_j = radii[templateIdx_j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * scaleFactors[templateIdx_j];
+        real R_j = radii[templateIdx_j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * scaleFactors[templateIdx_j];
 
         // delta = pos_i - pos_j (direction from j to i)
-        float dx = pos_i.x - pos_j.x;
-        float dy = pos_i.y - pos_j.y;
-        float dz = pos_i.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_i.x - pos_j.x;
+        real dy = pos_i.y - pos_j.y;
+        real dz = pos_i.z - pos_j.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
+        real r_inv = 1.0f / r;
+        real r2_inv = r_inv * r_inv;
 
         // --- Force from j screening i's Born radius ---
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_i_off < r_plus_Sj) {
-            float r_minus_Sj = fabsf(r - S_j);
-            float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-            float u_ij = 1.0f / r_plus_Sj;
+            real r_minus_Sj = fabs(r - S_j);
+            real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+            real u_ij = 1.0f / r_plus_Sj;
 
-            float l_ij2 = l_ij * l_ij;
-            float u_ij2 = u_ij * u_ij;
-            float S_j2 = S_j * S_j;
+            real l_ij2 = l_ij * l_ij;
+            real u_ij2 = u_ij * u_ij;
+            real S_j2 = S_j * S_j;
 
             // OpenMM's simplified formula (assumes dL/dr = dU/dr = 0)
             // t3 = 0.125*(1 + S²/r²)*(l² - u²) + 0.25*log(u/l)/r²
-            float t3 = 0.125f * (1.0f + S_j2 * r2_inv) * (l_ij2 - u_ij2)
-                     + 0.25f * logf(u_ij / l_ij) * r2_inv;
+            real t3 = 0.125f * (1.0f + S_j2 * r2_inv) * (l_ij2 - u_ij2)
+                     + 0.25f * log(u_ij / l_ij) * r2_inv;
 
             // de = bornForces[i] * t3 / r (OpenMM convention)
-            float de = bornForces_i * t3 * r_inv;
+            real de = bornForces_i * t3 * r_inv;
 
             // OpenMM: delta = pos_j - pos_i, force_i -= de * delta
             // My convention: dx = pos_i - pos_j = -delta
@@ -2709,7 +2709,7 @@ extern "C" __global__ void computeIsolatedHCTChainRuleForces(
 extern "C" __global__ void computeIsolatedReceptorHCTGrid(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
+    const real* __restrict__ radii,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridHctProbe,
     const float* __restrict__ gridHctDerivatives,
@@ -2728,7 +2728,7 @@ extern "C" __global__ void computeIsolatedReceptorHCTGrid(
     int interpolationMethod,
     bool useKDECorrections,
     bool hasBinnedKDEDerivatives,
-    float* __restrict__ hctReceptor
+    real* __restrict__ hctReceptor
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -2750,12 +2750,12 @@ extern "C" __global__ void computeIsolatedReceptorHCTGrid(
 
     // Get position
     real4 pos = posq[particleIdx];
-    float3 position = make_float3(pos.x, pos.y, pos.z);
+    real3 position = make_real3(pos.x, pos.y, pos.z);
 
     // Get radius and compute offset radius
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
-    float R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_probe_off = probeRadius - DIELECTRIC_OFFSET;
 
     // Grid dimensions
     int nx = gridCounts[0];
@@ -2791,11 +2791,11 @@ extern "C" __global__ void computeIsolatedReceptorHCTGrid(
 extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float* __restrict__ bornRadii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
-    const float* __restrict__ dE_dR,
+    const real* __restrict__ radii,
+    const real* __restrict__ bornRadii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
+    const real* __restrict__ dE_dR,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridHctProbe,
     const float* __restrict__ gridHctDerivatives,
@@ -2833,11 +2833,11 @@ extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
     int particleIdx = particleIndices[idx];
     int templateIdx = atomInGroup % templateNumAtoms;
     real4 pos = posq[particleIdx];
-    float3 position = make_float3(pos.x, pos.y, pos.z);
+    real3 position = make_real3(pos.x, pos.y, pos.z);
 
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
-    float R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_probe_off = probeRadius - DIELECTRIC_OFFSET;
 
     int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
     int binIdx = numBins - 1;
@@ -2861,22 +2861,22 @@ extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
 
     if (!result.isInside) return;
 
-    float hctTotal = hctReceptor[idx] + hctLigand[idx];
-    float psi = 0.5f * R_i_off * hctTotal;
-    float psi2 = psi * psi;
-    float psi3 = psi2 * psi;
-    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
-    float tanhVal = tanhf(tanhArg);
-    float sech2 = 1.0f - tanhVal * tanhVal;
-    float dTanhArgDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
-    float obcChain = R_i_off * dTanhArgDPsi * sech2 / R_i;
+    real hctTotal = hctReceptor[idx] + hctLigand[idx];
+    real psi = 0.5f * R_i_off * hctTotal;
+    real psi2 = psi * psi;
+    real psi3 = psi2 * psi;
+    real tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    real tanhVal = tanh(tanhArg);
+    real sech2 = 1.0f - tanhVal * tanhVal;
+    real dTanhArgDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    real obcChain = R_i_off * dTanhArgDPsi * sech2 / R_i;
 
-    float bornR = bornRadii[idx];
-    float bornForces = dE_dR[idx] * bornR * bornR * obcChain;
+    real bornR = bornRadii[idx];
+    real bornForces = dE_dR[idx] * bornR * bornR * obcChain;
 
-    float fx = -0.5f * bornForces * result.gradient.x;
-    float fy = -0.5f * bornForces * result.gradient.y;
-    float fz = -0.5f * bornForces * result.gradient.z;
+    real fx = -0.5f * bornForces * result.gradient.x;
+    real fy = -0.5f * bornForces * result.gradient.y;
+    real fz = -0.5f * bornForces * result.gradient.z;
 
     atomicAdd(&forceBuffer[particleIdx],
               static_cast<unsigned long long>((long long)(fx * 0x100000000)));
@@ -2889,14 +2889,14 @@ extern "C" __global__ void computeIsolatedReceptorHCTGradientForce(
 extern "C" __global__ void computeIsolatedReceptorHCTPairwiseChainRule(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float* __restrict__ bornRadii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
-    const float* __restrict__ dE_dR,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real* __restrict__ bornRadii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
+    const real* __restrict__ dE_dR,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
@@ -2918,58 +2918,58 @@ extern "C" __global__ void computeIsolatedReceptorHCTPairwiseChainRule(
  * This is constant - doesn't depend on ligand positions.
  */
 extern "C" __global__ void computeReceptorSelfHCT(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     float cutoffDistance,
-    float* __restrict__ receptorSelfHCT
+    real* __restrict__ receptorSelfHCT
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numReceptorAtoms) return;
 
-    float3 pos_i = receptorPositions[i];
-    float R_i = receptorRadii[i];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real4 pos_i = receptorPositions[i];
+    real R_i = receptorRadii[i];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hct = 0.0f;
+    real hct = 0.0f;
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
     for (int j = 0; j < numReceptorAtoms; j++) {
         if (j == i) continue;
 
-        float3 pos_j = receptorPositions[j];
-        float dx = pos_i.x - pos_j.x;
-        float dy = pos_i.y - pos_j.y;
-        float dz = pos_i.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real4 pos_j = receptorPositions[j];
+        real dx = pos_i.x - pos_j.x;
+        real dy = pos_i.y - pos_j.y;
+        real dz = pos_i.z - pos_j.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float R_j = receptorRadii[j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * receptorScaleFactors[j];
+        real R_j = receptorRadii[j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * receptorScaleFactors[j];
 
         // HCT integral
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_i_off >= r_plus_Sj) continue;
 
-        float r_minus_Sj = fabsf(r - S_j);
-        float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-        float u_ij = 1.0f / r_plus_Sj;
+        real r_minus_Sj = fabs(r - S_j);
+        real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+        real u_ij = 1.0f / r_plus_Sj;
 
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float r_inv = 1.0f / r;
+        real l_ij2 = l_ij * l_ij;
+        real u_ij2 = u_ij * u_ij;
+        real r_inv = 1.0f / r;
 
-        float term = l_ij - u_ij +
+        real term = l_ij - u_ij +
                      0.25f * r * (u_ij2 - l_ij2) +
-                     0.5f * r_inv * logf(u_ij / l_ij) +
+                     0.5f * r_inv * log(u_ij / l_ij) +
                      0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
         if (R_i_off < (S_j - r)) {
@@ -2987,29 +2987,29 @@ extern "C" __global__ void computeReceptorSelfHCT(
  * Used to compute reference energy at initialization.
  */
 extern "C" __global__ void computeReceptorBornRadiiReference(
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorSelfHCT,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorSelfHCT,
     int numReceptorAtoms,
-    float* __restrict__ receptorBornRadiiRef
+    real* __restrict__ receptorBornRadiiRef
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numReceptorAtoms) return;
 
-    float R_i = receptorRadii[i];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
-    float hct = receptorSelfHCT[i];
+    real R_i = receptorRadii[i];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
+    real hct = receptorSelfHCT[i];
 
     // OBC-II formula
-    float psi = 0.5f * R_i_off * hct;
-    float psi2 = psi * psi;
-    float psi3 = psi2 * psi;
+    real psi = 0.5f * R_i_off * hct;
+    real psi2 = psi * psi;
+    real psi3 = psi2 * psi;
 
-    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
-    float tanhVal = tanhf(tanhArg);
+    real tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    real tanhVal = tanh(tanhArg);
 
-    float denom = 1.0f / R_i_off - tanhVal / R_i;
-    float bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
-    bornRadius = fminf(bornRadius, 50.0f);
+    real denom = 1.0f / R_i_off - tanhVal / R_i;
+    real bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
+    bornRadius = fmin(bornRadius, (real)50.0);
 
     receptorBornRadiiRef[i] = bornRadius;
 }
@@ -3019,45 +3019,45 @@ extern "C" __global__ void computeReceptorBornRadiiReference(
  * Uses parallel reduction.
  */
 extern "C" __global__ void computeReceptorReferenceEnergy(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadiiRef,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadiiRef,
     int numReceptorAtoms,
-    float prefactor,
-    float* __restrict__ receptorReferenceEnergy
+    real prefactor,
+    real* __restrict__ receptorReferenceEnergy
 ) {
-    extern __shared__ float sdata[];
+    extern __shared__ real sdata[];
 
     int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-    float energy = 0.0f;
+    real energy = 0.0f;
 
     if (i < numReceptorAtoms) {
-        float3 pos_i = receptorPositions[i];
-        float q_i = receptorCharges[i];
-        float R_i = receptorBornRadiiRef[i];
+        real4 pos_i = receptorPositions[i];
+        real q_i = receptorCharges[i];
+        real R_i = receptorBornRadiiRef[i];
 
         // Self term
         energy += 0.5f * prefactor * q_i * q_i / R_i;
 
         // Pair terms (j > i to avoid double counting)
         for (int j = i + 1; j < numReceptorAtoms; j++) {
-            float3 pos_j = receptorPositions[j];
-            float q_j = receptorCharges[j];
-            float R_j = receptorBornRadiiRef[j];
+            real4 pos_j = receptorPositions[j];
+            real q_j = receptorCharges[j];
+            real R_j = receptorBornRadiiRef[j];
 
-            float dx = pos_j.x - pos_i.x;
-            float dy = pos_j.y - pos_i.y;
-            float dz = pos_j.z - pos_i.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
-            float r = sqrtf(r2);
+            real dx = pos_j.x - pos_i.x;
+            real dy = pos_j.y - pos_i.y;
+            real dz = pos_j.z - pos_i.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
+            real r = sqrt(r2);
 
-            float RiRj = R_i * R_j;
-            float expArg = -r2 / (4.0f * RiRj);
-            float expTerm = expf(expArg);
-            float f_gb2 = r2 + RiRj * expTerm;
-            float f_gb = sqrtf(f_gb2);
+            real RiRj = R_i * R_j;
+            real expArg = -r2 / (4.0f * RiRj);
+            real expTerm = exp(expArg);
+            real f_gb2 = r2 + RiRj * expTerm;
+            real f_gb = sqrt(f_gb2);
 
             energy += prefactor * q_i * q_j / f_gb;
         }
@@ -3090,16 +3090,16 @@ extern "C" __global__ void computeReceptorReferenceEnergy(
 extern "C" __global__ void computeLigandToReceptorHCT(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ ligandToReceptorHCT,
+    real* __restrict__ ligandToReceptorHCT,
     const int* __restrict__ isActiveRecAtom
 ) {
     // Grid-stride loop: each thread handles multiple (group, receptor_atom) pairs.
@@ -3117,11 +3117,11 @@ extern "C" __global__ void computeLigandToReceptorHCT(
             continue;
         }
 
-        float3 pos_rec = receptorPositions[recIdx];
-        float R_rec = receptorRadii[recIdx];
-        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        real4 pos_rec = receptorPositions[recIdx];
+        real R_rec = receptorRadii[recIdx];
+        real R_rec_off = R_rec - DIELECTRIC_OFFSET;
 
-        float hct = 0.0f;
+        real hct = 0.0f;
         float cutoff2 = cutoffDistance * cutoffDistance;
         bool useCutoff = (cutoffDistance > 0.0f);
 
@@ -3134,35 +3134,35 @@ extern "C" __global__ void computeLigandToReceptorHCT(
             int templateIdx = (k - groupStartIdx) % templateNumAtoms;
 
             real4 pos_lig = posq[particleIdx];
-            float dx = pos_rec.x - pos_lig.x;
-            float dy = pos_rec.y - pos_lig.y;
-            float dz = pos_rec.z - pos_lig.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real dx = pos_rec.x - pos_lig.x;
+            real dy = pos_rec.y - pos_lig.y;
+            real dz = pos_rec.z - pos_lig.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
             if (useCutoff && r2 > cutoff2) continue;
 
-            float r = sqrtf(r2);
+            real r = sqrt(r2);
             if (r < 1e-6f) continue;
 
-            float R_lig = ligandRadii[templateIdx];
-            float R_lig_off = R_lig - DIELECTRIC_OFFSET;
-            float S_lig = R_lig_off * ligandScaleFactors[templateIdx];
+            real R_lig = ligandRadii[templateIdx];
+            real R_lig_off = R_lig - DIELECTRIC_OFFSET;
+            real S_lig = R_lig_off * ligandScaleFactors[templateIdx];
 
             // HCT integral: how ligand atom screens receptor atom
-            float r_plus_Slig = r + S_lig;
+            real r_plus_Slig = r + S_lig;
             if (R_rec_off >= r_plus_Slig) continue;
 
-            float r_minus_Slig = fabsf(r - S_lig);
-            float l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
-            float u_ij = 1.0f / r_plus_Slig;
+            real r_minus_Slig = fabs(r - S_lig);
+            real l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
+            real u_ij = 1.0f / r_plus_Slig;
 
-            float l_ij2 = l_ij * l_ij;
-            float u_ij2 = u_ij * u_ij;
-            float r_inv = 1.0f / r;
+            real l_ij2 = l_ij * l_ij;
+            real u_ij2 = u_ij * u_ij;
+            real r_inv = 1.0f / r;
 
-            float term = l_ij - u_ij +
+            real term = l_ij - u_ij +
                          0.25f * r * (u_ij2 - l_ij2) +
-                         0.5f * r_inv * logf(u_ij / l_ij) +
+                         0.5f * r_inv * log(u_ij / l_ij) +
                          0.25f * S_lig * S_lig * r_inv * (l_ij2 - u_ij2);
 
             if (R_rec_off < (S_lig - r)) {
@@ -3185,13 +3185,13 @@ extern "C" __global__ void computeLigandToReceptorHCT(
  * Output: receptorBornRadii[groupIdx * numReceptorAtoms + i]
  */
 extern "C" __global__ void computeReceptorBornRadiiWithLigand(
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorSelfHCT,
-    const float* __restrict__ ligandToReceptorHCT,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorSelfHCT,
+    const real* __restrict__ ligandToReceptorHCT,
     int numReceptorAtoms,
     int numGroups,
-    float* __restrict__ receptorBornRadii,
-    const float* __restrict__ receptorBornRadiiRef,
+    real* __restrict__ receptorBornRadii,
+    const real* __restrict__ receptorBornRadiiRef,
     const int* __restrict__ isActiveRecAtom,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
@@ -3217,22 +3217,22 @@ extern "C" __global__ void computeReceptorBornRadiiWithLigand(
             continue;
         }
 
-        float R_i = receptorRadii[i];
-        float R_i_off = R_i - DIELECTRIC_OFFSET;
+        real R_i = receptorRadii[i];
+        real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-        float hctTotal = receptorSelfHCT[i] + ligandToReceptorHCT[groupIdx * numReceptorAtoms + i];
+        real hctTotal = receptorSelfHCT[i] + ligandToReceptorHCT[groupIdx * numReceptorAtoms + i];
 
     // OBC-II formula
-    float psi = 0.5f * R_i_off * hctTotal;
-    float psi2 = psi * psi;
-    float psi3 = psi2 * psi;
+    real psi = 0.5f * R_i_off * hctTotal;
+    real psi2 = psi * psi;
+    real psi3 = psi2 * psi;
 
-    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
-    float tanhVal = tanhf(tanhArg);
+    real tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi3;
+    real tanhVal = tanh(tanhArg);
 
-        float denom = 1.0f / R_i_off - tanhVal / R_i;
-        float bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
-        bornRadius = fminf(bornRadius, 50.0f);
+        real denom = 1.0f / R_i_off - tanhVal / R_i;
+        real bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
+        bornRadius = fmin(bornRadius, (real)50.0);
 
         receptorBornRadii[groupIdx * numReceptorAtoms + i] = bornRadius;
     }
@@ -3243,45 +3243,45 @@ extern "C" __global__ void computeReceptorBornRadiiWithLigand(
  * Uses shared memory reduction.
  */
 extern "C" __global__ void computeReceptorGBEnergy(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     int numReceptorAtoms,
-    float prefactor,
-    float* __restrict__ receptorEnergy
+    real prefactor,
+    real* __restrict__ receptorEnergy
 ) {
-    extern __shared__ float sdata[];
+    extern __shared__ real sdata[];
 
     int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-    float energy = 0.0f;
+    real energy = 0.0f;
 
     if (i < numReceptorAtoms) {
-        float3 pos_i = receptorPositions[i];
-        float q_i = receptorCharges[i];
-        float R_i = receptorBornRadii[i];
+        real4 pos_i = receptorPositions[i];
+        real q_i = receptorCharges[i];
+        real R_i = receptorBornRadii[i];
 
         // Self term
         energy += 0.5f * prefactor * q_i * q_i / R_i;
 
         // Pair terms (j > i)
         for (int j = i + 1; j < numReceptorAtoms; j++) {
-            float3 pos_j = receptorPositions[j];
-            float q_j = receptorCharges[j];
-            float R_j = receptorBornRadii[j];
+            real4 pos_j = receptorPositions[j];
+            real q_j = receptorCharges[j];
+            real R_j = receptorBornRadii[j];
 
-            float dx = pos_j.x - pos_i.x;
-            float dy = pos_j.y - pos_i.y;
-            float dz = pos_j.z - pos_i.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
-            float r = sqrtf(r2);
+            real dx = pos_j.x - pos_i.x;
+            real dy = pos_j.y - pos_i.y;
+            real dz = pos_j.z - pos_i.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
+            real r = sqrt(r2);
 
-            float RiRj = R_i * R_j;
-            float expArg = -r2 / (4.0f * RiRj);
-            float expTerm = expf(expArg);
-            float f_gb2 = r2 + RiRj * expTerm;
-            float f_gb = sqrtf(f_gb2);
+            real RiRj = R_i * R_j;
+            real expArg = -r2 / (4.0f * RiRj);
+            real expTerm = exp(expArg);
+            real f_gb2 = r2 + RiRj * expTerm;
+            real f_gb = sqrt(f_gb2);
 
             energy += prefactor * q_i * q_j / f_gb;
         }
@@ -3310,17 +3310,17 @@ extern "C" __global__ void computeReceptorGBEnergy(
 extern "C" __global__ void computeCrossTermGBEnergy(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandCharges,
-    const float* __restrict__ ligandBornRadii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real* __restrict__ ligandCharges,
+    const real* __restrict__ ligandBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
-    float prefactor,
-    float* __restrict__ crossTermEnergies,
+    real prefactor,
+    mixed* __restrict__ crossTermEnergies,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     float globalScalingFactor,
@@ -3354,44 +3354,44 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
     real4 pos_lig = posq[particleIdx_lig];
-    float q_lig = ligandCharges[templateIdx_lig];
-    float R_lig = ligandBornRadii[idx];
+    real q_lig = ligandCharges[templateIdx_lig];
+    real R_lig = ligandBornRadii[idx];
 
-    float energy = 0.0f;
-    float3 force_lig = make_float3(0.0f, 0.0f, 0.0f);
+    real energy = 0.0f;
+    real4 force_lig = make_real4(0.0f, 0.0f, 0.0f, 0);
 
     // Loop over all receptor atoms (cross-term is Coulomb-like — not pruned)
     // isActiveRecAtom parameter kept in signature for interface consistency but ignored
     // Minimum distance floor to prevent singularity when ligand overlaps receptor
-    const float MIN_CROSS_R2 = 0.01f;  // 0.1 nm = 1 Angstrom
+    const real MIN_CROSS_R2 = 0.01f;  // 0.1 nm = 1 Angstrom
     for (int j = 0; j < numReceptorAtoms; j++) {
-        float3 pos_rec = receptorPositions[j];
-        float q_rec = receptorCharges[j];
-        float R_rec = receptorBornRadii[groupIdx * numReceptorAtoms + j];
+        real4 pos_rec = receptorPositions[j];
+        real q_rec = receptorCharges[j];
+        real R_rec = receptorBornRadii[groupIdx * numReceptorAtoms + j];
 
-        float dx = pos_rec.x - pos_lig.x;
-        float dy = pos_rec.y - pos_lig.y;
-        float dz = pos_rec.z - pos_lig.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_rec.x - pos_lig.x;
+        real dy = pos_rec.y - pos_lig.y;
+        real dz = pos_rec.z - pos_lig.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
         if (r2 < MIN_CROSS_R2) continue;
-        float r = sqrtf(r2);
+        real r = sqrt(r2);
 
         // Still equation
-        float RiRj = R_lig * R_rec;
-        float expArg = -r2 / (4.0f * RiRj);
-        float expTerm = expf(expArg);
-        float f_gb2 = r2 + RiRj * expTerm;
-        float f_gb = sqrtf(f_gb2);
-        float invFgb = 1.0f / f_gb;
+        real RiRj = R_lig * R_rec;
+        real expArg = -r2 / (4.0f * RiRj);
+        real expTerm = exp(expArg);
+        real f_gb2 = r2 + RiRj * expTerm;
+        real f_gb = sqrt(f_gb2);
+        real invFgb = 1.0f / f_gb;
 
-        float pairEnergy = prefactor * q_lig * q_rec * invFgb;
+        real pairEnergy = prefactor * q_lig * q_rec * invFgb;
         energy += pairEnergy;
 
         // Force on ligand (scaled by alchemical factor)
-        float dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
-        float dEdR = -prefactor * q_lig * q_rec * invFgb * invFgb * dFgbDr * scale;
+        real dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
+        real dEdR = -prefactor * q_lig * q_rec * invFgb * invFgb * dFgbDr * scale;
 
-        float invR = 1.0f / r;
+        real invR = 1.0f / r;
         force_lig.x += dEdR * dx * invR;
         force_lig.y += dEdR * dy * invR;
         force_lig.z += dEdR * dz * invR;
@@ -3420,17 +3420,17 @@ extern "C" __global__ void computeCrossTermGBEnergy(
 extern "C" __global__ void accumulateCrossTermBornDerivatives(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandCharges,
-    const float* __restrict__ ligandBornRadii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real* __restrict__ ligandCharges,
+    const real* __restrict__ ligandBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
-    float prefactor,
-    float* __restrict__ dE_dR,
+    real prefactor,
+    real* __restrict__ dE_dR,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -3458,34 +3458,34 @@ extern "C" __global__ void accumulateCrossTermBornDerivatives(
     int templateIdx = atomInGroup % templateNumAtoms;
 
     real4 pos_lig = posq[particleIdx];
-    float q_lig = ligandCharges[templateIdx];
-    float R_lig = ligandBornRadii[idx];
+    real q_lig = ligandCharges[templateIdx];
+    real R_lig = ligandBornRadii[idx];
 
-    float dEdR_accum = 0.0f;
-    const float MIN_CROSS_R2 = 0.01f;
+    real dEdR_accum = 0.0f;
+    const real MIN_CROSS_R2 = 0.01f;
 
     for (int j = 0; j < numReceptorAtoms; j++) {
-        float3 pos_rec = receptorPositions[j];
-        float q_rec = receptorCharges[j];
-        float R_rec = receptorBornRadii[groupIdx * numReceptorAtoms + j];
+        real4 pos_rec = receptorPositions[j];
+        real q_rec = receptorCharges[j];
+        real R_rec = receptorBornRadii[groupIdx * numReceptorAtoms + j];
 
-        float dx = pos_rec.x - pos_lig.x;
-        float dy = pos_rec.y - pos_lig.y;
-        float dz = pos_rec.z - pos_lig.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_rec.x - pos_lig.x;
+        real dy = pos_rec.y - pos_lig.y;
+        real dz = pos_rec.z - pos_lig.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
         if (r2 < MIN_CROSS_R2) continue;
 
-        float RiRj = R_lig * R_rec;
-        float D = r2 / (4.0f * RiRj);
-        float expTerm = expf(-D);
-        float f_gb2 = r2 + RiRj * expTerm;
-        float invFgb2 = 1.0f / f_gb2;
-        float invFgb = rsqrtf(f_gb2);
+        real RiRj = R_lig * R_rec;
+        real D = r2 / (4.0f * RiRj);
+        real expTerm = exp(-D);
+        real f_gb2 = r2 + RiRj * expTerm;
+        real invFgb2 = 1.0f / f_gb2;
+        real invFgb = rsqrt(f_gb2);
 
         // dGpol/d(alpha2_ij) where alpha2_ij = R_i * R_j
         // = -0.5 * Gpol * exp(-D) * (1+D) / f_gb²
-        float Gpol = prefactor * q_lig * q_rec * invFgb;
-        float dGpol_dalpha2 = -0.5f * Gpol * expTerm * (1.0f + D) * invFgb2;
+        real Gpol = prefactor * q_lig * q_rec * invFgb;
+        real dGpol_dalpha2 = -0.5f * Gpol * expTerm * (1.0f + D) * invFgb2;
 
         // dE/dR_i = dGpol/d(alpha2) * d(alpha2)/dR_i = dGpol_dalpha2 * R_rec
         dEdR_accum += dGpol_dalpha2 * R_rec;
@@ -3511,19 +3511,19 @@ extern "C" __global__ void accumulateCrossTermBornDerivatives(
 extern "C" __global__ void computeReceptorDesolvationForces(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorSelfHCT,
-    const float* __restrict__ ligandToReceptorHCT,
-    const float* __restrict__ receptorBornRadii,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorSelfHCT,
+    const real* __restrict__ ligandToReceptorHCT,
+    const real* __restrict__ receptorBornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
-    float prefactor,
+    real prefactor,
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms
@@ -3551,44 +3551,44 @@ extern "C" __global__ void computeReceptorDesolvationForces(
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
     real4 pos_lig = posq[particleIdx_lig];
-    float R_lig = ligandRadii[templateIdx_lig];
-    float R_lig_off = R_lig - DIELECTRIC_OFFSET;
-    float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
+    real R_lig = ligandRadii[templateIdx_lig];
+    real R_lig_off = R_lig - DIELECTRIC_OFFSET;
+    real S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
 
-    float3 force_lig = make_float3(0.0f, 0.0f, 0.0f);
+    real4 force_lig = make_real4(0.0f, 0.0f, 0.0f, 0);
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
     // For each receptor atom, compute dE_rec/dr_lig through chain rule
     for (int recIdx = 0; recIdx < numReceptorAtoms; recIdx++) {
-        float3 pos_rec = receptorPositions[recIdx];
-        float R_rec = receptorRadii[recIdx];
-        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
-        float q_rec = receptorCharges[recIdx];
+        real4 pos_rec = receptorPositions[recIdx];
+        real R_rec = receptorRadii[recIdx];
+        real R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        real q_rec = receptorCharges[recIdx];
 
-        float dx = pos_rec.x - pos_lig.x;
-        float dy = pos_rec.y - pos_lig.y;
-        float dz = pos_rec.z - pos_lig.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_rec.x - pos_lig.x;
+        real dy = pos_rec.y - pos_lig.y;
+        real dz = pos_rec.z - pos_lig.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
         // Check if ligand screens this receptor atom
-        float r_plus_Slig = r + S_lig;
+        real r_plus_Slig = r + S_lig;
         if (R_rec_off >= r_plus_Slig) continue;
 
-        float r_minus_Slig = fabsf(r - S_lig);
-        float l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
-        float u_ij = 1.0f / r_plus_Slig;
+        real r_minus_Slig = fabs(r - S_lig);
+        real l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
+        real u_ij = 1.0f / r_plus_Slig;
 
         // Compute dE_rec/dR_born_rec for this receptor atom
         // This includes self term and all receptor-receptor pairs
-        float bornR_rec = receptorBornRadii[recIdx];
-        float dEdR_rec = 0.0f;
+        real bornR_rec = receptorBornRadii[recIdx];
+        real dEdR_rec = 0.0f;
 
         // Self term: dE_self/dR = -0.5 * prefactor * q² / R²
         dEdR_rec += -0.5f * prefactor * q_rec * q_rec / (bornR_rec * bornR_rec);
@@ -3597,52 +3597,52 @@ extern "C" __global__ void computeReceptorDesolvationForces(
         for (int j = 0; j < numReceptorAtoms; j++) {
             if (j == recIdx) continue;
 
-            float3 pos_j = receptorPositions[j];
-            float q_j = receptorCharges[j];
-            float R_j = receptorBornRadii[j];
+            real4 pos_j = receptorPositions[j];
+            real q_j = receptorCharges[j];
+            real R_j = receptorBornRadii[j];
 
-            float dx_rr = pos_j.x - pos_rec.x;
-            float dy_rr = pos_j.y - pos_rec.y;
-            float dz_rr = pos_j.z - pos_rec.z;
-            float r2_rr = dx_rr*dx_rr + dy_rr*dy_rr + dz_rr*dz_rr;
+            real dx_rr = pos_j.x - pos_rec.x;
+            real dy_rr = pos_j.y - pos_rec.y;
+            real dz_rr = pos_j.z - pos_rec.z;
+            real r2_rr = dx_rr*dx_rr + dy_rr*dy_rr + dz_rr*dz_rr;
 
-            float RiRj = bornR_rec * R_j;
-            float expArg = -r2_rr / (4.0f * RiRj);
-            float expTerm = expf(expArg);
-            float f_gb2 = r2_rr + RiRj * expTerm;
-            float f_gb = sqrtf(f_gb2);
+            real RiRj = bornR_rec * R_j;
+            real expArg = -r2_rr / (4.0f * RiRj);
+            real expTerm = exp(expArg);
+            real f_gb2 = r2_rr + RiRj * expTerm;
+            real f_gb = sqrt(f_gb2);
 
-            float dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2_rr / (4.0f * RiRj));
+            real dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2_rr / (4.0f * RiRj));
             dEdR_rec += -prefactor * q_rec * q_j / (f_gb * f_gb) * dFgbDRi;
         }
 
         // OBC chain rule: dR_born/dHCT
-        float hctTotal_rec = receptorSelfHCT[recIdx] + ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx];
-        float psi_rec = 0.5f * R_rec_off * hctTotal_rec;
-        float psi2_rec = psi_rec * psi_rec;
+        real hctTotal_rec = receptorSelfHCT[recIdx] + ligandToReceptorHCT[groupIdx * numReceptorAtoms + recIdx];
+        real psi_rec = 0.5f * R_rec_off * hctTotal_rec;
+        real psi2_rec = psi_rec * psi_rec;
 
-        float tanhArg_rec = OBC_ALPHA * psi_rec - OBC_BETA * psi2_rec + OBC_GAMMA * psi2_rec * psi_rec;
-        float tanhVal_rec = tanhf(tanhArg_rec);
-        float sech2_rec = 1.0f - tanhVal_rec * tanhVal_rec;
-        float dTanhArgDPsi_rec = OBC_ALPHA - 2.0f * OBC_BETA * psi_rec + 3.0f * OBC_GAMMA * psi2_rec;
+        real tanhArg_rec = OBC_ALPHA * psi_rec - OBC_BETA * psi2_rec + OBC_GAMMA * psi2_rec * psi_rec;
+        real tanhVal_rec = tanh(tanhArg_rec);
+        real sech2_rec = 1.0f - tanhVal_rec * tanhVal_rec;
+        real dTanhArgDPsi_rec = OBC_ALPHA - 2.0f * OBC_BETA * psi_rec + 3.0f * OBC_GAMMA * psi2_rec;
 
         // obcChain = R_off * (dTanhArg/dPsi) * sech² / R
-        float obcChain_rec = R_rec_off * dTanhArgDPsi_rec * sech2_rec / R_rec;
+        real obcChain_rec = R_rec_off * dTanhArgDPsi_rec * sech2_rec / R_rec;
 
         // bornForces = dE/dR_born * R_born² * obcChain
-        float bornForces_rec = dEdR_rec * bornR_rec * bornR_rec * obcChain_rec;
+        real bornForces_rec = dEdR_rec * bornR_rec * bornR_rec * obcChain_rec;
 
         // HCT gradient: OpenMM simplified formula
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float S_lig2 = S_lig * S_lig;
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
+        real l_ij2 = l_ij * l_ij;
+        real u_ij2 = u_ij * u_ij;
+        real S_lig2 = S_lig * S_lig;
+        real r_inv = 1.0f / r;
+        real r2_inv = r_inv * r_inv;
 
-        float t3 = 0.125f * (1.0f + S_lig2 * r2_inv) * (l_ij2 - u_ij2)
-                 + 0.25f * logf(u_ij / l_ij) * r2_inv;
+        real t3 = 0.125f * (1.0f + S_lig2 * r2_inv) * (l_ij2 - u_ij2)
+                 + 0.25f * log(u_ij / l_ij) * r2_inv;
 
-        float de = bornForces_rec * t3 * r_inv;
+        real de = bornForces_rec * t3 * r_inv;
 
         // Force on ligand (direction from receptor to ligand is -dx,-dy,-dz)
         // OpenMM convention: delta = pos_rec - pos_lig, force_lig += de * delta
@@ -3689,17 +3689,17 @@ extern "C" __global__ void computeReceptorDesolvationForces(
 extern "C" __global__ void accumulateCrossTermReceptorDeDR(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ ligandCharges,
-    const float* __restrict__ ligandBornRadii,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,    // [K * N_rec]
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ ligandCharges,
+    const real* __restrict__ ligandBornRadii,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,    // [K * N_rec]
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
-    float prefactor,
-    float* __restrict__ receptorDeDR                // [K * N_rec] output (+=)
+    real prefactor,
+    real* __restrict__ receptorDeDR                // [K * N_rec] output (+=)
 ) {
     int totalWork = numGroups * numReceptorAtoms;
     const float MIN_R2 = 0.01f;
@@ -3715,36 +3715,36 @@ extern "C" __global__ void accumulateCrossTermReceptorDeDR(
         int ge = groupStart[groupIdx + 1];
         int groupSize = ge - gs;
 
-        float3 recPos = receptorPositions[recIdx];
-        float qRec = receptorCharges[recIdx];
-        float R_rec_born = receptorBornRadii[globalIdx];
+        real4 recPos = receptorPositions[recIdx];
+        real qRec = receptorCharges[recIdx];
+        real R_rec_born = receptorBornRadii[globalIdx];
 
-        float dEdR_rec_accum = 0.0f;
+        real dEdR_rec_accum = 0.0f;
 
         for (int li = 0; li < groupSize; li++) {
             int ligGlobal = gs + li;
             int particleIdx = particleIndices[ligGlobal];
             int templateIdx = li % templateNumAtoms;
             real4 p = posq[particleIdx];
-            float qLig = ligandCharges[templateIdx];
-            float R_lig_born = ligandBornRadii[ligGlobal];
+            real qLig = ligandCharges[templateIdx];
+            real R_lig_born = ligandBornRadii[ligGlobal];
 
-            float dx = p.x - recPos.x;
-            float dy = p.y - recPos.y;
-            float dz = p.z - recPos.z;
-            float r2 = dx * dx + dy * dy + dz * dz;
+            real dx = p.x - recPos.x;
+            real dy = p.y - recPos.y;
+            real dz = p.z - recPos.z;
+            real r2 = dx * dx + dy * dy + dz * dz;
             if (r2 < MIN_R2) continue;
 
-            float RiRj = R_lig_born * R_rec_born;
-            float D = r2 / (4.0f * RiRj);
-            float expTerm = expf(-D);
-            float f_gb2 = r2 + RiRj * expTerm;
-            float invFgb2 = 1.0f / f_gb2;
-            float f_gb = sqrtf(f_gb2);
+            real RiRj = R_lig_born * R_rec_born;
+            real D = r2 / (4.0f * RiRj);
+            real expTerm = exp(-D);
+            real f_gb2 = r2 + RiRj * expTerm;
+            real invFgb2 = 1.0f / f_gb2;
+            real f_gb = sqrt(f_gb2);
 
             // dE_cross/dR_born_rec = -prefactor * q_lig * q_rec * invFgb² * dFgbDRrec
             // dFgbDRrec = R_lig_born * exp(-D) * (1+D) / (2 f_gb)
-            float dFgbDRrec = (R_lig_born * expTerm / (2.0f * f_gb)) * (1.0f + D);
+            real dFgbDRrec = (R_lig_born * expTerm / (2.0f * f_gb)) * (1.0f + D);
             dEdR_rec_accum += -prefactor * qLig * qRec * invFgb2 * dFgbDRrec;
         }
 
@@ -3754,14 +3754,14 @@ extern "C" __global__ void accumulateCrossTermReceptorDeDR(
 
 
 extern "C" __global__ void precomputeReceptorBornForces(
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorSelfHCT,
-    const float* __restrict__ ligandToReceptorHCT,
-    const float* __restrict__ receptorBornRadii,
-    const float* __restrict__ receptorDeDR,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorSelfHCT,
+    const real* __restrict__ ligandToReceptorHCT,
+    const real* __restrict__ receptorBornRadii,
+    const real* __restrict__ receptorDeDR,
     int numReceptorAtoms,
     int numGroups,
-    float* __restrict__ bornForcesRec,
+    real* __restrict__ bornForcesRec,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -3781,21 +3781,21 @@ extern "C" __global__ void precomputeReceptorBornForces(
             continue;
         }
 
-        float R_rec = receptorRadii[recIdx];
-        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
-        float bornR_rec = receptorBornRadii[gOffset];
-        float dEdR_rec = receptorDeDR[gOffset];
+        real R_rec = receptorRadii[recIdx];
+        real R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        real bornR_rec = receptorBornRadii[gOffset];
+        real dEdR_rec = receptorDeDR[gOffset];
 
-        float hctTotal = receptorSelfHCT[recIdx] + ligandToReceptorHCT[gOffset];
-        float psi = 0.5f * R_rec_off * hctTotal;
-        float psi2 = psi * psi;
+        real hctTotal = receptorSelfHCT[recIdx] + ligandToReceptorHCT[gOffset];
+        real psi = 0.5f * R_rec_off * hctTotal;
+        real psi2 = psi * psi;
 
-        float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
-        float tanhVal = tanhf(tanhArg);
-        float sech2 = 1.0f - tanhVal * tanhVal;
-        float dTanhArgDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+        real tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+        real tanhVal = tanh(tanhArg);
+        real sech2 = 1.0f - tanhVal * tanhVal;
+        real dTanhArgDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
 
-        float obcChain = R_rec_off * dTanhArgDPsi * sech2 / R_rec;
+        real obcChain = R_rec_off * dTanhArgDPsi * sech2 / R_rec;
         bornForcesRec[gOffset] = dEdR_rec * bornR_rec * bornR_rec * obcChain;
     }
 }
@@ -3818,23 +3818,23 @@ extern "C" __global__ void precomputeReceptorBornForces(
 extern "C" __global__ void computeFusedReceptorForces(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float* __restrict__ ligandCharges,
-    const float* __restrict__ ligandBornRadii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,    // [K * N_rec]
-    const float* __restrict__ bornForcesRec,        // [K * N_rec] precomputed
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real* __restrict__ ligandCharges,
+    const real* __restrict__ ligandBornRadii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,    // [K * N_rec]
+    const real* __restrict__ bornForcesRec,        // [K * N_rec] precomputed
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
-    float prefactor,
+    real prefactor,
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
@@ -3864,109 +3864,109 @@ extern "C" __global__ void computeFusedReceptorForces(
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
     real4 pos_lig = posq[particleIdx_lig];
-    float R_lig = ligandRadii[templateIdx_lig];
-    float R_lig_off = R_lig - DIELECTRIC_OFFSET;
-    float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
-    float q_lig = ligandCharges[templateIdx_lig];
-    float bornR_lig = ligandBornRadii[idx];
+    real R_lig = ligandRadii[templateIdx_lig];
+    real R_lig_off = R_lig - DIELECTRIC_OFFSET;
+    real S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
+    real q_lig = ligandCharges[templateIdx_lig];
+    real bornR_lig = ligandBornRadii[idx];
 
-    float3 force_lig = make_float3(0.0f, 0.0f, 0.0f);
+    real4 force_lig = make_real4(0.0f, 0.0f, 0.0f, 0);
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
     const float MIN_R2 = 0.01f;
 
     // ===== PASS 1: Desolvation forces + dE_cross/dR_born_lig =====
-    float dEdR_lig = 0.0f;
+    real dEdR_lig = 0.0f;
 
     for (int recIdx = 0; recIdx < numReceptorAtoms; recIdx++) {
-        float3 pos_rec = receptorPositions[recIdx];
-        float dx = pos_rec.x - pos_lig.x;
-        float dy = pos_rec.y - pos_lig.y;
-        float dz = pos_rec.z - pos_lig.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real4 pos_rec = receptorPositions[recIdx];
+        real dx = pos_rec.x - pos_lig.x;
+        real dy = pos_rec.y - pos_lig.y;
+        real dz = pos_rec.z - pos_lig.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
         if (r2 < MIN_R2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
 
-        float R_rec_off = receptorRadii[recIdx] - DIELECTRIC_OFFSET;
+        real R_rec_off = receptorRadii[recIdx] - DIELECTRIC_OFFSET;
 
         // --- Desolvation force: ligand screens receptor ---
-        float r_plus_Slig = r + S_lig;
+        real r_plus_Slig = r + S_lig;
         if (R_rec_off < r_plus_Slig) {
-            float r_minus_Slig = fabsf(r - S_lig);
-            float l = (R_rec_off > r_minus_Slig) ? (1.0f/R_rec_off) : (1.0f/r_minus_Slig);
-            float u = 1.0f / r_plus_Slig;
-            float l2 = l*l, u2 = u*u;
-            float r2_inv = invR * invR;
+            real r_minus_Slig = fabs(r - S_lig);
+            real l = (R_rec_off > r_minus_Slig) ? (1.0f/R_rec_off) : (1.0f/r_minus_Slig);
+            real u = 1.0f / r_plus_Slig;
+            real l2 = l*l, u2 = u*u;
+            real r2_inv = invR * invR;
 
-            float t3 = 0.125f * (1.0f + S_lig*S_lig*r2_inv) * (l2 - u2)
-                     + 0.25f * logf(u/l) * r2_inv;
+            real t3 = 0.125f * (1.0f + S_lig*S_lig*r2_inv) * (l2 - u2)
+                     + 0.25f * log(u/l) * r2_inv;
 
-            float de = bornForcesRec[groupIdx * numReceptorAtoms + recIdx] * t3 * invR * scale;
+            real de = bornForcesRec[groupIdx * numReceptorAtoms + recIdx] * t3 * invR * scale;
             force_lig.x -= de * dx;
             force_lig.y -= de * dy;
             force_lig.z -= de * dz;
         }
 
         // --- Cross-term: dE_cross/dR_born_lig accumulation ---
-        float R_rec_born = receptorBornRadii[groupIdx * numReceptorAtoms + recIdx];
-        float q_rec = receptorCharges[recIdx];
-        float RiRj = bornR_lig * R_rec_born;
-        float expArg = -r2 / (4.0f * RiRj);
-        float expTerm = expf(expArg);
-        float f_gb2 = r2 + RiRj * expTerm;
-        float f_gb = sqrtf(f_gb2);
-        float dFgbDRlig = (R_rec_born * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+        real R_rec_born = receptorBornRadii[groupIdx * numReceptorAtoms + recIdx];
+        real q_rec = receptorCharges[recIdx];
+        real RiRj = bornR_lig * R_rec_born;
+        real expArg = -r2 / (4.0f * RiRj);
+        real expTerm = exp(expArg);
+        real f_gb2 = r2 + RiRj * expTerm;
+        real f_gb = sqrt(f_gb2);
+        real dFgbDRlig = (R_rec_born * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
         dEdR_lig += -prefactor * q_lig * q_rec / (f_gb * f_gb) * dFgbDRlig;
     }
 
     // ===== Between passes: compute bornForces_lig =====
-    float hctTotal_lig = hctReceptor[idx] + hctLigand[idx];
-    float psi = 0.5f * R_lig_off * hctTotal_lig;
-    float psi2 = psi * psi;
-    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
-    float tanhVal = tanhf(tanhArg);
-    float sech2 = 1.0f - tanhVal * tanhVal;
-    float dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
-    float obcChain = R_lig_off * dTanhDPsi * sech2 / R_lig;
-    float bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain * scale;
+    real hctTotal_lig = hctReceptor[idx] + hctLigand[idx];
+    real psi = 0.5f * R_lig_off * hctTotal_lig;
+    real psi2 = psi * psi;
+    real tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+    real tanhVal = tanh(tanhArg);
+    real sech2 = 1.0f - tanhVal * tanhVal;
+    real dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    real obcChain = R_lig_off * dTanhDPsi * sech2 / R_lig;
+    real bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain * scale;
 
     // ===== PASS 2: Cross-term chain rule forces =====
 
     // Part A: receptor→ligand HCT gradient (receptor screens this ligand)
     for (int recIdx = 0; recIdx < numReceptorAtoms; recIdx++) {
-        float3 pos_rec = receptorPositions[recIdx];
-        float R_rec = receptorRadii[recIdx];
-        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
-        float S_rec = R_rec_off * receptorScaleFactors[recIdx];
+        real4 pos_rec = receptorPositions[recIdx];
+        real R_rec = receptorRadii[recIdx];
+        real R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        real S_rec = R_rec_off * receptorScaleFactors[recIdx];
 
-        float dx = pos_lig.x - pos_rec.x;
-        float dy = pos_lig.y - pos_rec.y;
-        float dz = pos_lig.z - pos_rec.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_lig.x - pos_rec.x;
+        real dy = pos_lig.y - pos_rec.y;
+        real dz = pos_lig.z - pos_rec.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float r_plus_Srec = r + S_rec;
+        real r_plus_Srec = r + S_rec;
         if (R_lig_off >= r_plus_Srec) continue;
 
-        float r_minus_Srec = fabsf(r - S_rec);
-        float l = (R_lig_off > r_minus_Srec) ? (1.0f/R_lig_off) : (1.0f/r_minus_Srec);
-        float u = 1.0f / r_plus_Srec;
-        float l2 = l*l, u2 = u*u;
-        float r2_inv = invR * invR;
+        real r_minus_Srec = fabs(r - S_rec);
+        real l = (R_lig_off > r_minus_Srec) ? (1.0f/R_lig_off) : (1.0f/r_minus_Srec);
+        real u = 1.0f / r_plus_Srec;
+        real l2 = l*l, u2 = u*u;
+        real r2_inv = invR * invR;
 
-        float t3 = 0.125f * (1.0f + S_rec*S_rec*r2_inv) * (l2 - u2)
-                 + 0.25f * logf(u/l) * r2_inv;
+        real t3 = 0.125f * (1.0f + S_rec*S_rec*r2_inv) * (l2 - u2)
+                 + 0.25f * log(u/l) * r2_inv;
 
-        float de = bornForces_lig * t3 * invR;
+        real de = bornForces_lig * t3 * invR;
         force_lig.x += de * dx;
         force_lig.y += de * dy;
         force_lig.z += de * dz;
@@ -3981,33 +3981,33 @@ extern "C" __global__ void computeFusedReceptorForces(
         int particleIdx_j = particleIndices[j];
 
         real4 pos_j = posq[particleIdx_j];
-        float R_j = ligandRadii[templateIdx_j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * ligandScaleFactors[templateIdx_j];
+        real R_j = ligandRadii[templateIdx_j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * ligandScaleFactors[templateIdx_j];
 
-        float dx = pos_lig.x - pos_j.x;
-        float dy = pos_lig.y - pos_j.y;
-        float dz = pos_lig.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_lig.x - pos_j.x;
+        real dy = pos_lig.y - pos_j.y;
+        real dz = pos_lig.z - pos_j.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_lig_off >= r_plus_Sj) continue;
 
-        float r_minus_Sj = fabsf(r - S_j);
-        float l = (R_lig_off > r_minus_Sj) ? (1.0f/R_lig_off) : (1.0f/r_minus_Sj);
-        float u = 1.0f / r_plus_Sj;
-        float l2 = l*l, u2 = u*u;
-        float r2_inv = invR * invR;
+        real r_minus_Sj = fabs(r - S_j);
+        real l = (R_lig_off > r_minus_Sj) ? (1.0f/R_lig_off) : (1.0f/r_minus_Sj);
+        real u = 1.0f / r_plus_Sj;
+        real l2 = l*l, u2 = u*u;
+        real r2_inv = invR * invR;
 
-        float t3 = 0.125f * (1.0f + S_j*S_j*r2_inv) * (l2 - u2)
-                 + 0.25f * logf(u/l) * r2_inv;
+        real t3 = 0.125f * (1.0f + S_j*S_j*r2_inv) * (l2 - u2)
+                 + 0.25f * log(u/l) * r2_inv;
 
-        float de = bornForces_lig * t3 * invR;
+        real de = bornForces_lig * t3 * invR;
         force_lig.x += de * dx;
         force_lig.y += de * dy;
         force_lig.z += de * dz;
@@ -4031,11 +4031,11 @@ extern "C" __global__ void computeFusedReceptorForces(
 extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ bornForcesRec,  // Pre-computed: dE/dR * R²_born * obcChain
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ bornForcesRec,  // Pre-computed: dE/dR * R²_born * obcChain
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
@@ -4072,48 +4072,48 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
     real4 pos_lig = posq[particleIdx_lig];
-    float R_lig = ligandRadii[templateIdx_lig];
-    float R_lig_off = R_lig - DIELECTRIC_OFFSET;
-    float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
+    real R_lig = ligandRadii[templateIdx_lig];
+    real R_lig_off = R_lig - DIELECTRIC_OFFSET;
+    real S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
 
-    float3 force_lig = make_float3(0.0f, 0.0f, 0.0f);
+    real4 force_lig = make_real4(0.0f, 0.0f, 0.0f, 0);
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
     // Desolvation force: each ligand atom loops over receptor atoms
     for (int recIdx = 0; recIdx < numReceptorAtoms; recIdx++) {
-        float3 pos_rec = receptorPositions[recIdx];
-        float R_rec = receptorRadii[recIdx];
-        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        real4 pos_rec = receptorPositions[recIdx];
+        real R_rec = receptorRadii[recIdx];
+        real R_rec_off = R_rec - DIELECTRIC_OFFSET;
 
-        float dx = pos_rec.x - pos_lig.x;
-        float dy = pos_rec.y - pos_lig.y;
-        float dz = pos_rec.z - pos_lig.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_rec.x - pos_lig.x;
+        real dy = pos_rec.y - pos_lig.y;
+        real dz = pos_rec.z - pos_lig.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float r_plus_Slig = r + S_lig;
+        real r_plus_Slig = r + S_lig;
         if (R_rec_off >= r_plus_Slig) continue;
 
-        float r_minus_Slig = fabsf(r - S_lig);
-        float l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
-        float u_ij = 1.0f / r_plus_Slig;
+        real r_minus_Slig = fabs(r - S_lig);
+        real l_ij = (R_rec_off > r_minus_Slig) ? (1.0f / R_rec_off) : (1.0f / r_minus_Slig);
+        real u_ij = 1.0f / r_plus_Slig;
 
-        float bf = bornForcesRec[groupIdx * numReceptorAtoms + recIdx];
+        real bf = bornForcesRec[groupIdx * numReceptorAtoms + recIdx];
 
-        float l2 = l_ij * l_ij;
-        float u2 = u_ij * u_ij;
-        float r2_inv = invR * invR;
+        real l2 = l_ij * l_ij;
+        real u2 = u_ij * u_ij;
+        real r2_inv = invR * invR;
 
-        float t3 = 0.125f * (1.0f + S_lig * S_lig * r2_inv) * (l2 - u2)
-                 + 0.25f * logf(u_ij / l_ij) * r2_inv;
+        real t3 = 0.125f * (1.0f + S_lig * S_lig * r2_inv) * (l2 - u2)
+                 + 0.25f * log(u_ij / l_ij) * r2_inv;
 
-        float de = bf * t3 * invR * scale;
+        real de = bf * t3 * invR * scale;
 
         force_lig.x -= de * dx;
         force_lig.y -= de * dy;
@@ -4133,24 +4133,24 @@ extern "C" __global__ void computeReceptorDesolvationForcesOptimized(
 extern "C" __global__ void computeCrossTermChainRuleForces(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float* __restrict__ ligandCharges,
-    const float* __restrict__ ligandBornRadii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorSelfHCT,
-    const float* __restrict__ ligandToReceptorHCT,
-    const float* __restrict__ receptorBornRadii,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real* __restrict__ ligandCharges,
+    const real* __restrict__ ligandBornRadii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorSelfHCT,
+    const real* __restrict__ ligandToReceptorHCT,
+    const real* __restrict__ receptorBornRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
-    float prefactor,
+    real prefactor,
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
@@ -4184,54 +4184,54 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
     int templateIdx_lig = atomInGroup % templateNumAtoms;
 
     real4 pos_lig = posq[particleIdx_lig];
-    float R_lig = ligandRadii[templateIdx_lig];
-    float R_lig_off = R_lig - DIELECTRIC_OFFSET;
-    float S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
-    float q_lig = ligandCharges[templateIdx_lig];
-    float bornR_lig = ligandBornRadii[idx];
+    real R_lig = ligandRadii[templateIdx_lig];
+    real R_lig_off = R_lig - DIELECTRIC_OFFSET;
+    real S_lig = R_lig_off * ligandScaleFactors[templateIdx_lig];
+    real q_lig = ligandCharges[templateIdx_lig];
+    real bornR_lig = ligandBornRadii[idx];
 
-    float3 force_lig = make_float3(0.0f, 0.0f, 0.0f);
+    real4 force_lig = make_real4(0.0f, 0.0f, 0.0f, 0);
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
     // Part 1: dE_cross/dR_born_lig → chain through ligand HCT
     // Accumulate dE_cross/dR_born_lig from all receptor atoms (not pruned)
     const float MIN_CROSS_R2_CHAIN = 0.01f;  // match cross-term distance floor
-    float dEdR_lig = 0.0f;
+    real dEdR_lig = 0.0f;
     for (int j = 0; j < numReceptorAtoms; j++) {
-        float3 pos_rec = receptorPositions[j];
-        float q_rec = receptorCharges[j];
-        float R_rec = receptorBornRadii[groupIdx * numReceptorAtoms + j];
+        real4 pos_rec = receptorPositions[j];
+        real q_rec = receptorCharges[j];
+        real R_rec = receptorBornRadii[groupIdx * numReceptorAtoms + j];
 
-        float dx = pos_rec.x - pos_lig.x;
-        float dy = pos_rec.y - pos_lig.y;
-        float dz = pos_rec.z - pos_lig.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_rec.x - pos_lig.x;
+        real dy = pos_rec.y - pos_lig.y;
+        real dz = pos_rec.z - pos_lig.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
         if (r2 < MIN_CROSS_R2_CHAIN) continue;
 
-        float RiRj = bornR_lig * R_rec;
-        float expArg = -r2 / (4.0f * RiRj);
-        float expTerm = expf(expArg);
-        float f_gb2 = r2 + RiRj * expTerm;
-        float f_gb = sqrtf(f_gb2);
+        real RiRj = bornR_lig * R_rec;
+        real expArg = -r2 / (4.0f * RiRj);
+        real expTerm = exp(expArg);
+        real f_gb2 = r2 + RiRj * expTerm;
+        real f_gb = sqrt(f_gb2);
 
         // dE/dR_born_lig from this pair
-        float dFgbDRlig = (R_rec * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+        real dFgbDRlig = (R_rec * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
         dEdR_lig += -prefactor * q_lig * q_rec / (f_gb * f_gb) * dFgbDRlig;
     }
 
     // OBC chain rule for ligand
-    float hctTotal_lig = hctReceptor[idx] + hctLigand[idx];
-    float psi_lig = 0.5f * R_lig_off * hctTotal_lig;
-    float psi2_lig = psi_lig * psi_lig;
+    real hctTotal_lig = hctReceptor[idx] + hctLigand[idx];
+    real psi_lig = 0.5f * R_lig_off * hctTotal_lig;
+    real psi2_lig = psi_lig * psi_lig;
 
-    float tanhArg_lig = OBC_ALPHA * psi_lig - OBC_BETA * psi2_lig + OBC_GAMMA * psi2_lig * psi_lig;
-    float tanhVal_lig = tanhf(tanhArg_lig);
-    float sech2_lig = 1.0f - tanhVal_lig * tanhVal_lig;
-    float dTanhArgDPsi_lig = OBC_ALPHA - 2.0f * OBC_BETA * psi_lig + 3.0f * OBC_GAMMA * psi2_lig;
+    real tanhArg_lig = OBC_ALPHA * psi_lig - OBC_BETA * psi2_lig + OBC_GAMMA * psi2_lig * psi_lig;
+    real tanhVal_lig = tanh(tanhArg_lig);
+    real sech2_lig = 1.0f - tanhVal_lig * tanhVal_lig;
+    real dTanhArgDPsi_lig = OBC_ALPHA - 2.0f * OBC_BETA * psi_lig + 3.0f * OBC_GAMMA * psi2_lig;
 
-    float obcChain_lig = R_lig_off * dTanhArgDPsi_lig * sech2_lig / R_lig;
-    float bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain_lig * scale;
+    real obcChain_lig = R_lig_off * dTanhArgDPsi_lig * sech2_lig / R_lig;
+    real bornForces_lig = dEdR_lig * bornR_lig * bornR_lig * obcChain_lig * scale;
 
     // Chain through ligand-ligand HCT (other ligand atoms screening this one)
     int groupSize = groupEndIdx - groupStartIdx;
@@ -4243,38 +4243,38 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
         int particleIdx_j = particleIndices[j];
 
         real4 pos_j = posq[particleIdx_j];
-        float R_j = ligandRadii[templateIdx_j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * ligandScaleFactors[templateIdx_j];
+        real R_j = ligandRadii[templateIdx_j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * ligandScaleFactors[templateIdx_j];
 
-        float dx = pos_lig.x - pos_j.x;
-        float dy = pos_lig.y - pos_j.y;
-        float dz = pos_lig.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_lig.x - pos_j.x;
+        real dy = pos_lig.y - pos_j.y;
+        real dz = pos_lig.z - pos_j.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_lig_off >= r_plus_Sj) continue;
 
-        float r_minus_Sj = fabsf(r - S_j);
-        float l_ij = (R_lig_off > r_minus_Sj) ? (1.0f / R_lig_off) : (1.0f / r_minus_Sj);
-        float u_ij = 1.0f / r_plus_Sj;
+        real r_minus_Sj = fabs(r - S_j);
+        real l_ij = (R_lig_off > r_minus_Sj) ? (1.0f / R_lig_off) : (1.0f / r_minus_Sj);
+        real u_ij = 1.0f / r_plus_Sj;
 
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float S_j2 = S_j * S_j;
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
+        real l_ij2 = l_ij * l_ij;
+        real u_ij2 = u_ij * u_ij;
+        real S_j2 = S_j * S_j;
+        real r_inv = 1.0f / r;
+        real r2_inv = r_inv * r_inv;
 
-        float t3 = 0.125f * (1.0f + S_j2 * r2_inv) * (l_ij2 - u_ij2)
-                 + 0.25f * logf(u_ij / l_ij) * r2_inv;
+        real t3 = 0.125f * (1.0f + S_j2 * r2_inv) * (l_ij2 - u_ij2)
+                 + 0.25f * log(u_ij / l_ij) * r2_inv;
 
-        float de = bornForces_lig * t3 * r_inv;
+        real de = bornForces_lig * t3 * r_inv;
 
         force_lig.x += de * dx;
         force_lig.y += de * dy;
@@ -4287,39 +4287,39 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
 
     // Chain through receptor→ligand HCT (receptor screening this ligand, not pruned)
     for (int j = 0; j < numReceptorAtoms; j++) {
-        float3 pos_rec = receptorPositions[j];
-        float R_rec = receptorRadii[j];
-        float R_rec_off = R_rec - DIELECTRIC_OFFSET;
-        float S_rec = R_rec_off * receptorScaleFactors[j];
+        real4 pos_rec = receptorPositions[j];
+        real R_rec = receptorRadii[j];
+        real R_rec_off = R_rec - DIELECTRIC_OFFSET;
+        real S_rec = R_rec_off * receptorScaleFactors[j];
 
-        float dx = pos_lig.x - pos_rec.x;
-        float dy = pos_lig.y - pos_rec.y;
-        float dz = pos_lig.z - pos_rec.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real dx = pos_lig.x - pos_rec.x;
+        real dy = pos_lig.y - pos_rec.y;
+        real dz = pos_lig.z - pos_rec.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float r_plus_Srec = r + S_rec;
+        real r_plus_Srec = r + S_rec;
         if (R_lig_off >= r_plus_Srec) continue;
 
-        float r_minus_Srec = fabsf(r - S_rec);
-        float l_ij = (R_lig_off > r_minus_Srec) ? (1.0f / R_lig_off) : (1.0f / r_minus_Srec);
-        float u_ij = 1.0f / r_plus_Srec;
+        real r_minus_Srec = fabs(r - S_rec);
+        real l_ij = (R_lig_off > r_minus_Srec) ? (1.0f / R_lig_off) : (1.0f / r_minus_Srec);
+        real u_ij = 1.0f / r_plus_Srec;
 
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float S_rec2 = S_rec * S_rec;
-        float r_inv = 1.0f / r;
-        float r2_inv = r_inv * r_inv;
+        real l_ij2 = l_ij * l_ij;
+        real u_ij2 = u_ij * u_ij;
+        real S_rec2 = S_rec * S_rec;
+        real r_inv = 1.0f / r;
+        real r2_inv = r_inv * r_inv;
 
-        float t3 = 0.125f * (1.0f + S_rec2 * r2_inv) * (l_ij2 - u_ij2)
-                 + 0.25f * logf(u_ij / l_ij) * r2_inv;
+        real t3 = 0.125f * (1.0f + S_rec2 * r2_inv) * (l_ij2 - u_ij2)
+                 + 0.25f * log(u_ij / l_ij) * r2_inv;
 
-        float de = bornForces_lig * t3 * r_inv;
+        real de = bornForces_lig * t3 * r_inv;
 
         force_lig.x += de * dx;
         force_lig.y += de * dy;
@@ -4342,8 +4342,8 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
  * applies scaling, and adds to groupEnergies/groupDesolvations/groupUnscaledEnergies.
  */
 extern "C" __global__ void accumulateDesolvationOnGPU(
-    const float* __restrict__ receptorEnergy,
-    float referenceEnergy,
+    const real* __restrict__ receptorEnergy,
+    real referenceEnergy,
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
@@ -4353,7 +4353,7 @@ extern "C" __global__ void accumulateDesolvationOnGPU(
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    float desolvation = receptorEnergy[0] - referenceEnergy;
+    real desolvation = receptorEnergy[0] - referenceEnergy;
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     groupReceptorDesolvations[groupIdx] = desolvation * scale;
@@ -4368,7 +4368,7 @@ extern "C" __global__ void accumulateDesolvationOnGPU(
  * For locality cutoff: receptorEnergy[0] already contains the delta.
  */
 extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
-    const float* __restrict__ receptorEnergyDelta,
+    const real* __restrict__ receptorEnergyDelta,
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
@@ -4378,7 +4378,7 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    float desolvation = receptorEnergyDelta[0];
+    real desolvation = receptorEnergyDelta[0];
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     groupReceptorDesolvations[groupIdx] = desolvation * scale;
@@ -4393,7 +4393,7 @@ extern "C" __global__ void accumulateDesolvationDeltaOnGPU(
  * Single-thread kernel, handles all groups.
  */
 extern "C" __global__ void accumulateCrossTermOnGPU(
-    const float* __restrict__ crossTermEnergies,
+    const mixed* __restrict__ crossTermEnergies,
     int numGroups,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
@@ -4425,10 +4425,10 @@ extern "C" __global__ void accumulateCrossTermOnGPU(
 extern "C" __global__ void computeReceptorHCTPerAtom(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
@@ -4461,34 +4461,34 @@ extern "C" __global__ void computeReceptorHCTPerAtom(
 
         int particleIdx = particleIndices[ligIdx];
         real4 pos = posq[particleIdx];
-        float R_i = radii[templateIdx];
-        float R_i_off = R_i - DIELECTRIC_OFFSET;
+        real R_i = radii[templateIdx];
+        real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-        float3 pos_rec = receptorPositions[recIdx];
-        float dx = pos.x - pos_rec.x;
-        float dy = pos.y - pos_rec.y;
-        float dz = pos.z - pos_rec.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-        float r = sqrtf(r2);
+        real4 pos_rec = receptorPositions[recIdx];
+        real dx = pos.x - pos_rec.x;
+        real dy = pos.y - pos_rec.y;
+        real dz = pos.z - pos_rec.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
+        real r = sqrt(r2);
 
-        float term = 0.0f;
+        real term = 0.0f;
         if (r > 1e-6f) {
-            float R_j = receptorRadii[recIdx];
-            float R_j_off = R_j - DIELECTRIC_OFFSET;
-            float S_j = R_j_off * receptorScaleFactors[recIdx];
+            real R_j = receptorRadii[recIdx];
+            real R_j_off = R_j - DIELECTRIC_OFFSET;
+            real S_j = R_j_off * receptorScaleFactors[recIdx];
 
-            float r_plus_Sj = r + S_j;
+            real r_plus_Sj = r + S_j;
             if (R_i_off < r_plus_Sj) {
-                float r_minus_Sj = fabsf(r - S_j);
-                float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-                float u_ij = 1.0f / r_plus_Sj;
-                float l_ij2 = l_ij * l_ij;
-                float u_ij2 = u_ij * u_ij;
-                float r_inv = 1.0f / r;
+                real r_minus_Sj = fabs(r - S_j);
+                real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+                real u_ij = 1.0f / r_plus_Sj;
+                real l_ij2 = l_ij * l_ij;
+                real u_ij2 = u_ij * u_ij;
+                real r_inv = 1.0f / r;
 
                 term = l_ij - u_ij +
                        0.25f * r * (u_ij2 - l_ij2) +
-                       0.5f * r_inv * logf(u_ij / l_ij) +
+                       0.5f * r_inv * log(u_ij / l_ij) +
                        0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
                 if (R_i_off < (S_j - r)) {
@@ -4509,10 +4509,10 @@ extern "C" __global__ void computeReceptorHCTPerAtom(
 extern "C" __global__ void reconstructReceptorHCT(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     const float* __restrict__ hctPerAtomBaseline,
     const int* __restrict__ isActiveRecAtom,
     int numReceptorAtoms,
@@ -4521,7 +4521,7 @@ extern "C" __global__ void reconstructReceptorHCT(
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor
+    real* __restrict__ hctReceptor
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -4542,10 +4542,10 @@ extern "C" __global__ void reconstructReceptorHCT(
 
     int particleIdx = particleIndices[idx];
     real4 pos = posq[particleIdx];
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
-    float hct = 0.0f;
+    real hct = 0.0f;
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
 
@@ -4555,34 +4555,34 @@ extern "C" __global__ void reconstructReceptorHCT(
             hct += hctPerAtomBaseline[idx * numReceptorAtoms + j];
         } else {
             // Active: compute fresh
-            float3 pos_rec = receptorPositions[j];
-            float dx = pos.x - pos_rec.x;
-            float dy = pos.y - pos_rec.y;
-            float dz = pos.z - pos_rec.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real4 pos_rec = receptorPositions[j];
+            real dx = pos.x - pos_rec.x;
+            real dy = pos.y - pos_rec.y;
+            real dz = pos.z - pos_rec.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
             if (useCutoff && r2 > cutoff2) continue;
 
-            float r = sqrtf(r2);
+            real r = sqrt(r2);
             if (r < 1e-6f) continue;
 
-            float R_j = receptorRadii[j];
-            float R_j_off = R_j - DIELECTRIC_OFFSET;
-            float S_j = R_j_off * receptorScaleFactors[j];
+            real R_j = receptorRadii[j];
+            real R_j_off = R_j - DIELECTRIC_OFFSET;
+            real S_j = R_j_off * receptorScaleFactors[j];
 
-            float r_plus_Sj = r + S_j;
+            real r_plus_Sj = r + S_j;
             if (R_i_off >= r_plus_Sj) continue;
 
-            float r_minus_Sj = fabsf(r - S_j);
-            float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-            float u_ij = 1.0f / r_plus_Sj;
-            float l_ij2 = l_ij * l_ij;
-            float u_ij2 = u_ij * u_ij;
-            float r_inv = 1.0f / r;
+            real r_minus_Sj = fabs(r - S_j);
+            real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+            real u_ij = 1.0f / r_plus_Sj;
+            real l_ij2 = l_ij * l_ij;
+            real u_ij2 = u_ij * u_ij;
+            real r_inv = 1.0f / r;
 
-            float term = l_ij - u_ij +
+            real term = l_ij - u_ij +
                          0.25f * r * (u_ij2 - l_ij2) +
-                         0.5f * r_inv * logf(u_ij / l_ij) +
+                         0.5f * r_inv * log(u_ij / l_ij) +
                          0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
             if (R_i_off < (S_j - r)) {
@@ -4610,7 +4610,7 @@ extern "C" __global__ void computeBaselineHCTSum(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
 
-    float sum = 0.0f;
+    real sum = 0.0f;
     const float* row = hctPerAtomBaseline + idx * numReceptorAtoms;
     for (int j = 0; j < numReceptorAtoms; j++) {
         sum += row[j];
@@ -4633,10 +4633,10 @@ extern "C" __global__ void computeBaselineHCTSum(
 extern "C" __global__ void reconstructReceptorHCTFast(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real* __restrict__ radii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     const float* __restrict__ hctPerAtomBaseline,
     const float* __restrict__ baselineSum,
     const int* __restrict__ isActiveRecAtom,
@@ -4646,7 +4646,7 @@ extern "C" __global__ void reconstructReceptorHCTFast(
     int totalParticles,
     int templateNumAtoms,
     float cutoffDistance,
-    float* __restrict__ hctReceptor
+    real* __restrict__ hctReceptor
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -4668,11 +4668,11 @@ extern "C" __global__ void reconstructReceptorHCTFast(
 
     int particleIdx = particleIndices[idx];
     real4 pos = posq[particleIdx];
-    float R_i = radii[templateIdx];
-    float R_i_off = R_i - DIELECTRIC_OFFSET;
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - DIELECTRIC_OFFSET;
 
     // Start with precomputed baseline sum (all receptor contributions at reference position)
-    float hct = baselineSum[idx];
+    real hct = baselineSum[idx];
 
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
@@ -4685,35 +4685,35 @@ extern "C" __global__ void reconstructReceptorHCTFast(
         hct -= myBaseline[j];
 
         // Add fresh computation
-        float3 pos_rec = receptorPositions[j];
-        float dx = pos.x - pos_rec.x;
-        float dy = pos.y - pos_rec.y;
-        float dz = pos.z - pos_rec.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
+        real4 pos_rec = receptorPositions[j];
+        real dx = pos.x - pos_rec.x;
+        real dy = pos.y - pos_rec.y;
+        real dz = pos.z - pos_rec.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
 
         if (useCutoff && r2 > cutoff2) continue;
 
-        float invR = rsqrtf(r2);
-        float r = r2 * invR;
+        real invR = rsqrt(r2);
+        real r = r2 * invR;
         if (r < 1e-6f) continue;
 
-        float R_j = receptorRadii[j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * receptorScaleFactors[j];
+        real R_j = receptorRadii[j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * receptorScaleFactors[j];
 
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_i_off >= r_plus_Sj) continue;
 
-        float r_minus_Sj = fabsf(r - S_j);
-        float l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
-        float u_ij = 1.0f / r_plus_Sj;
-        float l_ij2 = l_ij * l_ij;
-        float u_ij2 = u_ij * u_ij;
-        float r_inv = 1.0f / r;
+        real r_minus_Sj = fabs(r - S_j);
+        real l_ij = (R_i_off > r_minus_Sj) ? (1.0f / R_i_off) : (1.0f / r_minus_Sj);
+        real u_ij = 1.0f / r_plus_Sj;
+        real l_ij2 = l_ij * l_ij;
+        real u_ij2 = u_ij * u_ij;
+        real r_inv = 1.0f / r;
 
-        float term = l_ij - u_ij +
+        real term = l_ij - u_ij +
                      0.25f * r * (u_ij2 - l_ij2) +
-                     0.5f * r_inv * logf(u_ij / l_ij) +
+                     0.5f * r_inv * log(u_ij / l_ij) +
                      0.25f * S_j * S_j * r_inv * (l_ij2 - u_ij2);
 
         if (R_i_off < (S_j - r)) {
@@ -4747,7 +4747,7 @@ extern "C" __global__ void reconstructReceptorHCTFast(
 extern "C" __global__ void computeActiveReceptorAtoms(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float3* __restrict__ receptorPositions,
+    const real4* __restrict__ receptorPositions,
     int numReceptorAtoms,
     const int* __restrict__ groupStart,
     int numGroups,
@@ -4767,9 +4767,9 @@ extern "C" __global__ void computeActiveReceptorAtoms(
         // Scale cutoff: low-alpha groups use smaller cutoff,
         // falling back to cached HCT baseline for more atoms
         float scale = globalScalingFactor * groupScalingFactors[g];
-        float effectiveCutoff2 = baseCutoff2 * sqrtf(fmaxf(scale, 0.0f));
+        float effectiveCutoff2 = baseCutoff2 * sqrt(fmaxf(scale, 0.0f));
 
-        float3 pos_rec = receptorPositions[j];
+        real4 pos_rec = receptorPositions[j];
         int active = 0;
 
         int gs = groupStart[g];
@@ -4777,10 +4777,10 @@ extern "C" __global__ void computeActiveReceptorAtoms(
         for (int k = gs; k < ge && !active; k++) {
             int particleIdx = particleIndices[k];
             real4 pos_lig = posq[particleIdx];
-            float dx = pos_rec.x - pos_lig.x;
-            float dy = pos_rec.y - pos_lig.y;
-            float dz = pos_rec.z - pos_lig.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real dx = pos_rec.x - pos_lig.x;
+            real dy = pos_rec.y - pos_lig.y;
+            real dz = pos_rec.z - pos_lig.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
             if (r2 < effectiveCutoff2) {
                 active = 1;
             }
@@ -4797,14 +4797,14 @@ extern "C" __global__ void computeActiveReceptorAtoms(
  * Born radii: receptorBornRadii[groupIdx * numReceptorAtoms + i]
  */
 extern "C" __global__ void computeReceptorEnergyDelta(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadiiRef,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadiiRef,
+    const real* __restrict__ receptorBornRadii,
     const int* __restrict__ isActiveRecAtom,
     int numReceptorAtoms,
     int numGroups,
-    float prefactor,
+    real prefactor,
     float* __restrict__ energyDelta,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
@@ -4822,16 +4822,16 @@ extern "C" __global__ void computeReceptorEnergyDelta(
         if (scale < 0.05f) continue;
 
         const int* activeMask = isActiveRecAtom + groupIdx * numReceptorAtoms;
-        const float* bornRadiiG = receptorBornRadii + groupIdx * numReceptorAtoms;
+        const real* bornRadiiG = receptorBornRadii + groupIdx * numReceptorAtoms;
 
         if (!activeMask[a]) continue;
 
-        float3 pos_a = receptorPositions[a];
-        float q_a = receptorCharges[a];
-        float R_a_new = bornRadiiG[a];
-        float R_a_ref = receptorBornRadiiRef[a];
+        real4 pos_a = receptorPositions[a];
+        real q_a = receptorCharges[a];
+        real R_a_new = bornRadiiG[a];
+        real R_a_ref = receptorBornRadiiRef[a];
 
-        float delta = 0.0f;
+        real delta = 0.0f;
 
         // Self-term delta
         delta += 0.5f * prefactor * q_a * q_a * (1.0f / R_a_new - 1.0f / R_a_ref);
@@ -4841,25 +4841,25 @@ extern "C" __global__ void computeReceptorEnergyDelta(
             if (j == a) continue;
             if (activeMask[j] && j < a) continue;
 
-            float3 pos_j = receptorPositions[j];
-            float q_j = receptorCharges[j];
+            real4 pos_j = receptorPositions[j];
+            real q_j = receptorCharges[j];
 
-            float dx = pos_a.x - pos_j.x;
-            float dy = pos_a.y - pos_j.y;
-            float dz = pos_a.z - pos_j.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real dx = pos_a.x - pos_j.x;
+            real dy = pos_a.y - pos_j.y;
+            real dz = pos_a.z - pos_j.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
-            float R_j_new = bornRadiiG[j];
-            float D_new = R_a_new * R_j_new;
-            float exp_new = expf(-r2 / (4.0f * D_new));
-            float f_new = sqrtf(r2 + D_new * exp_new);
-            float E_new = prefactor * q_a * q_j / f_new;
+            real R_j_new = bornRadiiG[j];
+            real D_new = R_a_new * R_j_new;
+            real exp_new = exp(-r2 / (4.0f * D_new));
+            real f_new = sqrt(r2 + D_new * exp_new);
+            real E_new = prefactor * q_a * q_j / f_new;
 
-            float R_j_ref = receptorBornRadiiRef[j];
-            float D_ref = R_a_ref * R_j_ref;
-            float exp_ref = expf(-r2 / (4.0f * D_ref));
-            float f_ref = sqrtf(r2 + D_ref * exp_ref);
-            float E_ref = prefactor * q_a * q_j / f_ref;
+            real R_j_ref = receptorBornRadiiRef[j];
+            real D_ref = R_a_ref * R_j_ref;
+            real exp_ref = exp(-r2 / (4.0f * D_ref));
+            real f_ref = sqrt(r2 + D_ref * exp_ref);
+            real E_ref = prefactor * q_a * q_j / f_ref;
 
             delta += E_new - E_ref;
         }
@@ -4870,40 +4870,40 @@ extern "C" __global__ void computeReceptorEnergyDelta(
 
 // Legacy single-group shared-memory reduction version (kept for non-locality path)
 extern "C" __global__ void computeReceptorEnergyDeltaLegacy(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadiiRef,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadiiRef,
+    const real* __restrict__ receptorBornRadii,
     const int* __restrict__ isActiveRecAtom,
     int numReceptorAtoms,
     int groupIdx,
-    float prefactor,
+    real prefactor,
     float* __restrict__ energyDelta
 ) {
-    extern __shared__ float sdata[];
+    extern __shared__ real sdata[];
     int tid = threadIdx.x;
     int a = blockIdx.x * blockDim.x + threadIdx.x;
     const int* activeMask = isActiveRecAtom + groupIdx * numReceptorAtoms;
-    const float* bornRadiiG = receptorBornRadii + groupIdx * numReceptorAtoms;
+    const real* bornRadiiG = receptorBornRadii + groupIdx * numReceptorAtoms;
 
-    float delta = 0.0f;
+    real delta = 0.0f;
     if (a < numReceptorAtoms && activeMask[a]) {
-        float3 pos_a = receptorPositions[a];
-        float q_a = receptorCharges[a];
-        float R_a_new = bornRadiiG[a];
-        float R_a_ref = receptorBornRadiiRef[a];
+        real4 pos_a = receptorPositions[a];
+        real q_a = receptorCharges[a];
+        real R_a_new = bornRadiiG[a];
+        real R_a_ref = receptorBornRadiiRef[a];
         delta += 0.5f * prefactor * q_a * q_a * (1.0f / R_a_new - 1.0f / R_a_ref);
         for (int j = 0; j < numReceptorAtoms; j++) {
             if (j == a) continue;
             if (activeMask[j] && j < a) continue;
-            float3 pos_j = receptorPositions[j];
-            float q_j = receptorCharges[j];
-            float dx = pos_a.x - pos_j.x; float dy = pos_a.y - pos_j.y; float dz = pos_a.z - pos_j.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
-            float R_j_new = bornRadiiG[j]; float D_new = R_a_new * R_j_new;
-            float exp_new = expf(-r2 / (4.0f * D_new)); float f_new = sqrtf(r2 + D_new * exp_new);
-            float R_j_ref = receptorBornRadiiRef[j]; float D_ref = R_a_ref * R_j_ref;
-            float exp_ref = expf(-r2 / (4.0f * D_ref)); float f_ref = sqrtf(r2 + D_ref * exp_ref);
+            real4 pos_j = receptorPositions[j];
+            real q_j = receptorCharges[j];
+            real dx = pos_a.x - pos_j.x; real dy = pos_a.y - pos_j.y; real dz = pos_a.z - pos_j.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
+            real R_j_new = bornRadiiG[j]; real D_new = R_a_new * R_j_new;
+            real exp_new = exp(-r2 / (4.0f * D_new)); real f_new = sqrt(r2 + D_new * exp_new);
+            real R_j_ref = receptorBornRadiiRef[j]; real D_ref = R_a_ref * R_j_ref;
+            real exp_ref = exp(-r2 / (4.0f * D_ref)); real f_ref = sqrt(r2 + D_ref * exp_ref);
             delta += prefactor * q_a * q_j * (1.0f/f_new - 1.0f/f_ref);
         }
     }
@@ -4929,14 +4929,14 @@ extern "C" __global__ void computeReceptorEnergyDeltaLegacy(
  * Born radii: receptorBornRadii[groupIdx * numReceptorAtoms + i]
  */
 extern "C" __global__ void computeReceptorDeDRActive(
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,
     const int* __restrict__ isActiveRecAtom,
     int numReceptorAtoms,
     int numGroups,
-    float prefactor,
-    float* __restrict__ receptorDeDR
+    real prefactor,
+    real* __restrict__ receptorDeDR
 ) {
     int totalWork = numGroups * numReceptorAtoms;
     for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -4951,33 +4951,33 @@ extern "C" __global__ void computeReceptorDeDRActive(
             continue;
         }
 
-        const float* bornRadiiG = receptorBornRadii + groupIdx * numReceptorAtoms;
+        const real* bornRadiiG = receptorBornRadii + groupIdx * numReceptorAtoms;
 
-        float3 pos_i = receptorPositions[i];
-        float q_i = receptorCharges[i];
-        float R_i = bornRadiiG[i];
+        real4 pos_i = receptorPositions[i];
+        real q_i = receptorCharges[i];
+        real R_i = bornRadiiG[i];
 
-        float dEdR = -0.5f * prefactor * q_i * q_i / (R_i * R_i);
+        real dEdR = -0.5f * prefactor * q_i * q_i / (R_i * R_i);
 
         for (int j = 0; j < numReceptorAtoms; j++) {
             if (j == i) continue;
 
-            float3 pos_j = receptorPositions[j];
-            float q_j = receptorCharges[j];
-            float R_j = bornRadiiG[j];
+            real4 pos_j = receptorPositions[j];
+            real q_j = receptorCharges[j];
+            real R_j = bornRadiiG[j];
 
-            float dx = pos_j.x - pos_i.x;
-            float dy = pos_j.y - pos_i.y;
-            float dz = pos_j.z - pos_i.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real dx = pos_j.x - pos_i.x;
+            real dy = pos_j.y - pos_i.y;
+            real dz = pos_j.z - pos_i.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
-            float RiRj = R_i * R_j;
-            float expArg = -r2 / (4.0f * RiRj);
-            float expTerm = expf(expArg);
-            float f_gb2 = r2 + RiRj * expTerm;
-            float f_gb = sqrtf(f_gb2);
+            real RiRj = R_i * R_j;
+            real expArg = -r2 / (4.0f * RiRj);
+            real expTerm = exp(expArg);
+            real f_gb2 = r2 + RiRj * expTerm;
+            real f_gb = sqrt(f_gb2);
 
-            float dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+            real dFgbDRi = (R_j * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
             dEdR += -prefactor * q_i * q_j / (f_gb * f_gb) * dFgbDRi;
         }
 
@@ -5006,42 +5006,42 @@ extern "C" __global__ void computeReceptorDeDRActive(
 extern "C" __global__ void computePairwiseGBForceTiled(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float* __restrict__ ligandCharges,
-    const float* __restrict__ ligandBornRadii,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
-    const float* __restrict__ receptorCharges,
-    const float* __restrict__ receptorBornRadii,      // [K * N_rec]
-    const float* __restrict__ bornForcesRec,          // [K * N_rec] precomputed
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real* __restrict__ ligandCharges,
+    const real* __restrict__ ligandBornRadii,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
+    const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorBornRadii,      // [K * N_rec]
+    const real* __restrict__ bornForcesRec,          // [K * N_rec] precomputed
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
     int templateNumAtoms,
-    float prefactor,
+    real prefactor,
     float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
-    float* __restrict__ crossTermEnergies,            // [numGroups]
+    mixed* __restrict__ crossTermEnergies,            // [numGroups]
     unsigned long long* __restrict__ dEdR_crossTerm,  // [totalParticles] fixed-point
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
     int numRecBlocks,
     const float4* __restrict__ recBlockBounds,        // [numRecBlocks] (cx, cy, cz, radius)
     float localityCutoff,                             // tile-skip cutoff (-1 = no skip)
-    float* __restrict__ crossTermBlockCache           // [numGroups * numRecBlocks] or NULL
+    real* __restrict__ crossTermBlockCache           // [numGroups * numRecBlocks] or NULL
 ) {
     // Max ligand atoms in shared memory
     const int MAX_LIG = 64;
 
     // Shared memory: ligand data for this warp's group
-    __shared__ float3 sLigPos[MAX_LIG * 8];        // 8 warps per block
-    __shared__ float sLigCharge[MAX_LIG * 8];
-    __shared__ float sLigBornR[MAX_LIG * 8];
-    __shared__ float sLigR_off[MAX_LIG * 8];
-    __shared__ float sLigS[MAX_LIG * 8];
+    __shared__ real4 sLigPos[MAX_LIG * 8];        // 8 warps per block
+    __shared__ real sLigCharge[MAX_LIG * 8];
+    __shared__ real sLigBornR[MAX_LIG * 8];
+    __shared__ real sLigR_off[MAX_LIG * 8];
+    __shared__ real sLigS[MAX_LIG * 8];
 
     const int tgx = threadIdx.x & (TILE_SIZE - 1);
     const int warpInBlock = threadIdx.x / TILE_SIZE;
@@ -5074,10 +5074,10 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             int particleIdx = particleIndices[ligGlobal];
             int templateIdx = i % templateNumAtoms;
             real4 p = posq[particleIdx];
-            sLigPos[sBase + i] = make_float3(p.x, p.y, p.z);
+            sLigPos[sBase + i] = make_real4(p.x, p.y, p.z, 0);
             sLigCharge[sBase + i] = ligandCharges[templateIdx];
             sLigBornR[sBase + i] = ligandBornRadii[ligGlobal];
-            float R = ligandRadii[templateIdx];
+            real R = ligandRadii[templateIdx];
             sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
             sLigS[sBase + i] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
         }
@@ -5090,9 +5090,9 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             float threshold2 = threshold * threshold;
             bool anyClose = false;
             for (int i = 0; i < nLig && !anyClose; i++) {
-                float dx = sLigPos[sBase + i].x - bounds.x;
-                float dy = sLigPos[sBase + i].y - bounds.y;
-                float dz = sLigPos[sBase + i].z - bounds.z;
+                real dx = sLigPos[sBase + i].x - bounds.x;
+                real dy = sLigPos[sBase + i].y - bounds.y;
+                real dz = sLigPos[sBase + i].z - bounds.z;
                 if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
             }
             if (!anyClose) continue;  // skip this tile entirely
@@ -5102,9 +5102,9 @@ extern "C" __global__ void computePairwiseGBForceTiled(
         int recIdx = recBlock * TILE_SIZE + tgx;
         bool validRec = (recIdx < numReceptorAtoms);
 
-        float3 recPos = make_float3(0, 0, 0);
-        float recR = 0.1f, recR_off = 0.1f, recS = 0.1f;
-        float recQ = 0.0f, recBornR = 1.0f, recBF = 0.0f;
+        real4 recPos = make_real4(0, 0, 0, 0);
+        real recR = 0.1f, recR_off = 0.1f, recS = 0.1f;
+        real recQ = 0.0f, recBornR = 1.0f, recBF = 0.0f;
 
         if (validRec) {
             recPos = receptorPositions[recIdx];
@@ -5117,64 +5117,64 @@ extern "C" __global__ void computePairwiseGBForceTiled(
         }
 
         // Accumulate per-receptor-atom contributions
-        float3 recForceOnLig = make_float3(0, 0, 0);
-        float crossEnergy = 0.0f;
+        real4 recForceOnLig = make_real4(0, 0, 0, 0);
+        real crossEnergy = 0.0f;
 
         // Iterate over all ligand atoms from shared memory
         for (int li = 0; li < nLig; li++) {
-            float3 lPos = sLigPos[sBase + li];
-            float lQ = sLigCharge[sBase + li];
-            float lBornR = sLigBornR[sBase + li];
-            float lR_off = sLigR_off[sBase + li];
-            float lS = sLigS[sBase + li];
+            real4 lPos = sLigPos[sBase + li];
+            real lQ = sLigCharge[sBase + li];
+            real lBornR = sLigBornR[sBase + li];
+            real lR_off = sLigR_off[sBase + li];
+            real lS = sLigS[sBase + li];
 
-            float dx = recPos.x - lPos.x;
-            float dy = recPos.y - lPos.y;
-            float dz = recPos.z - lPos.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real dx = recPos.x - lPos.x;
+            real dy = recPos.y - lPos.y;
+            real dz = recPos.z - lPos.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
             if (useCutoff && r2 > cutoff2) continue;
             if (r2 < MIN_R2) continue;
 
-            float invR = rsqrtf(r2);
-            float r = r2 * invR;
+            real invR = rsqrt(r2);
+            real r = r2 * invR;
 
             // === Cross-term Still equation: energy + direct force ===
-            float RiRj = lBornR * recBornR;
-            float expArg = -r2 / (4.0f * RiRj);
-            float expTerm = expf(expArg);
-            float f_gb2 = r2 + RiRj * expTerm;
-            float f_gb = sqrtf(f_gb2);
-            float invFgb = 1.0f / f_gb;
+            real RiRj = lBornR * recBornR;
+            real expArg = -r2 / (4.0f * RiRj);
+            real expTerm = exp(expArg);
+            real f_gb2 = r2 + RiRj * expTerm;
+            real f_gb = sqrt(f_gb2);
+            real invFgb = 1.0f / f_gb;
 
-            float pairEnergy = prefactor * lQ * recQ * invFgb;
+            real pairEnergy = prefactor * lQ * recQ * invFgb;
             crossEnergy += pairEnergy;
 
             // Direct force on ligand
-            float dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
-            float dEdR_direct = -prefactor * lQ * recQ * invFgb * invFgb * dFgbDr * scale;
+            real dFgbDr = (r * invFgb) * (1.0f - 0.25f * expTerm);
+            real dEdR_direct = -prefactor * lQ * recQ * invFgb * invFgb * dFgbDr * scale;
             // Force direction: rec → lig = (dx, dy, dz), force on lig
-            float fx = dEdR_direct * dx * invR;
-            float fy = dEdR_direct * dy * invR;
-            float fz = dEdR_direct * dz * invR;
+            real fx = dEdR_direct * dx * invR;
+            real fy = dEdR_direct * dy * invR;
+            real fz = dEdR_direct * dz * invR;
 
             // === dE_cross/dR_born_lig accumulation ===
-            float dFgbDRlig = (recBornR * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-            float dEdR_lig = -prefactor * lQ * recQ * invFgb * invFgb * dFgbDRlig;
+            real dFgbDRlig = (recBornR * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+            real dEdR_lig = -prefactor * lQ * recQ * invFgb * invFgb * dFgbDRlig;
 
             // === Desolvation chain rule: ligand screens receptor ===
-            float r_plus_Slig = r + lS;
+            real r_plus_Slig = r + lS;
             if (recR_off < r_plus_Slig) {
-                float r_minus_Slig = fabsf(r - lS);
-                float l = (recR_off > r_minus_Slig) ? (1.0f/recR_off) : (1.0f/r_minus_Slig);
-                float u = 1.0f / r_plus_Slig;
-                float l2 = l*l, u2 = u*u;
-                float r2_inv = invR * invR;
+                real r_minus_Slig = fabs(r - lS);
+                real l = (recR_off > r_minus_Slig) ? (1.0f/recR_off) : (1.0f/r_minus_Slig);
+                real u = 1.0f / r_plus_Slig;
+                real l2 = l*l, u2 = u*u;
+                real r2_inv = invR * invR;
 
-                float t3 = 0.125f * (1.0f + lS*lS*r2_inv) * (l2 - u2)
-                         + 0.25f * logf(u/l) * r2_inv;
+                real t3 = 0.125f * (1.0f + lS*lS*r2_inv) * (l2 - u2)
+                         + 0.25f * log(u/l) * r2_inv;
 
-                float de_desolv = recBF * t3 * invR * scale;
+                real de_desolv = recBF * t3 * invR * scale;
                 fx -= de_desolv * dx;
                 fy -= de_desolv * dy;
                 fz -= de_desolv * dz;
@@ -5199,7 +5199,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
         // Cache per-tile cross-term energy (warp reduction) for tile-skip reconstruction
         if (crossTermBlockCache != NULL) {
             // Warp-reduce crossEnergy * scale across 32 threads
-            float tileEnergy = crossEnergy * scale;
+            real tileEnergy = crossEnergy * scale;
             for (int offset = TILE_SIZE/2; offset > 0; offset >>= 1)
                 tileEnergy += __shfl_down_sync(0xFFFFFFFF, tileEnergy, offset);
             if (tgx == 0)
@@ -5216,7 +5216,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
  * and adds cached energy if the tile was distant.
  */
 extern "C" __global__ void addDistantCrossTermFromCache(
-    const float* __restrict__ crossTermBlockCache,  // [numGroups * numRecBlocks]
+    const real* __restrict__ crossTermBlockCache,  // [numGroups * numRecBlocks]
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
     const float4* __restrict__ recBlockBounds,
@@ -5226,7 +5226,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     int numRecBlocks,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ crossTermEnergies            // [numGroups] — add to existing
+    mixed* __restrict__ crossTermEnergies            // [numGroups] — add to existing
 ) {
     int tileIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int totalTiles = numGroups * numRecBlocks;
@@ -5248,14 +5248,14 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     for (int li = gs; li < ge && !anyClose; li++) {
         int particleIdx = particleIndices[li];
         real4 p = posq[particleIdx];
-        float dx = p.x - bounds.x;
-        float dy = p.y - bounds.y;
-        float dz = p.z - bounds.z;
+        real dx = p.x - bounds.x;
+        real dy = p.y - bounds.y;
+        real dz = p.z - bounds.z;
         if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
     }
 
     if (!anyClose) {
-        float cached = crossTermBlockCache[groupIdx * numRecBlocks + b];
+        real cached = crossTermBlockCache[groupIdx * numRecBlocks + b];
         if (cached != 0.0f) {
             atomicAdd(&crossTermEnergies[groupIdx], cached);
         }
@@ -5268,18 +5268,18 @@ extern "C" __global__ void addDistantCrossTermFromCache(
  */
 extern "C" __global__ void reduceLigandBornForce(
     const unsigned long long* __restrict__ dEdR_crossTerm,  // fixed-point
-    const float* __restrict__ dE_dR_other,  // float, self-GB + intra-lig + SA (pre-scaled)
-    const float* __restrict__ ligandBornRadii,
-    const float* __restrict__ hctReceptor,
-    const float* __restrict__ hctLigand,
-    const float* __restrict__ ligandRadii,
+    const real* __restrict__ dE_dR_other,  // self-GB + intra-lig + SA (pre-scaled)
+    const real* __restrict__ ligandBornRadii,
+    const real* __restrict__ hctReceptor,
+    const real* __restrict__ hctLigand,
+    const real* __restrict__ ligandRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int totalParticles,
     int templateNumAtoms,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    float* __restrict__ bornForceLig   // output [totalParticles]
+    real* __restrict__ bornForceLig   // output [totalParticles]
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -5306,21 +5306,21 @@ extern "C" __global__ void reduceLigandBornForce(
     //   dE_dR_other:    self-GB + intra-ligand + SA, already scaled by the
     //     accumulateIsolatedBornRadiiDerivatives / SA kernels.
     // Convert to float, apply scale to the cross-term half, then sum.
-    float dEdR_cross = (float)((long long)dEdR_crossTerm[idx] / (double)0x100000000);
-    float dEdR_lig = dEdR_cross * scale + dE_dR_other[idx];
+    real dEdR_cross = (real)((long long)dEdR_crossTerm[idx] / (double)0x100000000);
+    real dEdR_lig = dEdR_cross * scale + dE_dR_other[idx];
 
     // OBC chain rule
-    float R = ligandRadii[templateIdx];
-    float R_off = R - DIELECTRIC_OFFSET;
-    float bornR = ligandBornRadii[idx];
-    float hctTotal = hctReceptor[idx] + hctLigand[idx];
-    float psi = 0.5f * R_off * hctTotal;
-    float psi2 = psi * psi;
-    float tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
-    float tanhVal = tanhf(tanhArg);
-    float sech2 = 1.0f - tanhVal * tanhVal;
-    float dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
-    float obcChain = R_off * dTanhDPsi * sech2 / R;
+    real R = ligandRadii[templateIdx];
+    real R_off = R - DIELECTRIC_OFFSET;
+    real bornR = ligandBornRadii[idx];
+    real hctTotal = hctReceptor[idx] + hctLigand[idx];
+    real psi = 0.5f * R_off * hctTotal;
+    real psi2 = psi * psi;
+    real tanhArg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+    real tanhVal = tanh(tanhArg);
+    real sech2 = 1.0f - tanhVal * tanhVal;
+    real dTanhDPsi = OBC_ALPHA - 2.0f * OBC_BETA * psi + 3.0f * OBC_GAMMA * psi2;
+    real obcChain = R_off * dTanhDPsi * sech2 / R;
 
     // dEdR_lig is already scaled (cross-term by the * scale above, self-GB/SA
     // by the respective accumulate kernels). Do not multiply by scale again.
@@ -5339,12 +5339,12 @@ extern "C" __global__ void reduceLigandBornForce(
 extern "C" __global__ void computePairwiseChainRuleTiled(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
-    const float* __restrict__ bornForceLig,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
+    const real* __restrict__ bornForceLig,
     const int* __restrict__ groupStart,
     int numGroups,
     int numReceptorAtoms,
@@ -5360,9 +5360,9 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
 ) {
     const int MAX_LIG = 64;
 
-    __shared__ float3 sLigPos[MAX_LIG * 8];
-    __shared__ float sLigR_off[MAX_LIG * 8];
-    __shared__ float sLigBF[MAX_LIG * 8];  // bornForceLig per ligand
+    __shared__ real4 sLigPos[MAX_LIG * 8];
+    __shared__ real sLigR_off[MAX_LIG * 8];
+    __shared__ real sLigBF[MAX_LIG * 8];  // bornForceLig per ligand
 
     const int tgx = threadIdx.x & (TILE_SIZE - 1);
     const int warpInBlock = threadIdx.x / TILE_SIZE;
@@ -5395,8 +5395,8 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
             int particleIdx = particleIndices[ligGlobal];
             int templateIdx = i % templateNumAtoms;
             real4 p = posq[particleIdx];
-            sLigPos[sBase + i] = make_float3(p.x, p.y, p.z);
-            float R = ligandRadii[templateIdx];
+            sLigPos[sBase + i] = make_real4(p.x, p.y, p.z, 0);
+            real R = ligandRadii[templateIdx];
             sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
             sLigBF[sBase + i] = bornForceLig[ligGlobal];
         }
@@ -5409,9 +5409,9 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
             float threshold2 = threshold * threshold;
             bool anyClose = false;
             for (int i = 0; i < nLig && !anyClose; i++) {
-                float dx = sLigPos[sBase + i].x - bounds.x;
-                float dy = sLigPos[sBase + i].y - bounds.y;
-                float dz = sLigPos[sBase + i].z - bounds.z;
+                real dx = sLigPos[sBase + i].x - bounds.x;
+                real dy = sLigPos[sBase + i].y - bounds.y;
+                real dz = sLigPos[sBase + i].z - bounds.z;
                 if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
             }
             if (!anyClose) continue;
@@ -5420,45 +5420,45 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
         // Load receptor atom
         int recIdx = recBlock * TILE_SIZE + tgx;
         bool validRec = (recIdx < numReceptorAtoms);
-        float3 recPos = make_float3(0, 0, 0);
-        float recR_off = 0.1f, recS = 0.1f;
+        real4 recPos = make_real4(0, 0, 0, 0);
+        real recR_off = 0.1f, recS = 0.1f;
         if (validRec) {
             recPos = receptorPositions[recIdx];
-            float R = receptorRadii[recIdx];
+            real R = receptorRadii[recIdx];
             recR_off = R - DIELECTRIC_OFFSET;
             recS = recR_off * receptorScaleFactors[recIdx];
         }
 
         // Iterate ligand atoms: receptor screens ligand → force on ligand
         for (int li = 0; li < nLig; li++) {
-            float3 lPos = sLigPos[sBase + li];
-            float lR_off = sLigR_off[sBase + li];
-            float lBF = sLigBF[sBase + li];
+            real4 lPos = sLigPos[sBase + li];
+            real lR_off = sLigR_off[sBase + li];
+            real lBF = sLigBF[sBase + li];
 
-            float dx = lPos.x - recPos.x;
-            float dy = lPos.y - recPos.y;
-            float dz = lPos.z - recPos.z;
-            float r2 = dx*dx + dy*dy + dz*dz;
+            real dx = lPos.x - recPos.x;
+            real dy = lPos.y - recPos.y;
+            real dz = lPos.z - recPos.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
             if (useCutoff && r2 > cutoff2) continue;
 
-            float invR = rsqrtf(r2);
-            float r = r2 * invR;
+            real invR = rsqrt(r2);
+            real r = r2 * invR;
             if (r < 1e-6f) continue;
 
-            float r_plus_Srec = r + recS;
+            real r_plus_Srec = r + recS;
             if (!validRec || lR_off >= r_plus_Srec) continue;
 
-            float r_minus_Srec = fabsf(r - recS);
-            float l = (lR_off > r_minus_Srec) ? (1.0f/lR_off) : (1.0f/r_minus_Srec);
-            float u = 1.0f / r_plus_Srec;
-            float l2 = l*l, u2 = u*u;
-            float r2_inv = invR * invR;
+            real r_minus_Srec = fabs(r - recS);
+            real l = (lR_off > r_minus_Srec) ? (1.0f/lR_off) : (1.0f/r_minus_Srec);
+            real u = 1.0f / r_plus_Srec;
+            real l2 = l*l, u2 = u*u;
+            real r2_inv = invR * invR;
 
-            float t3 = 0.125f * (1.0f + recS*recS*r2_inv) * (l2 - u2)
-                     + 0.25f * logf(u/l) * r2_inv;
+            real t3 = 0.125f * (1.0f + recS*recS*r2_inv) * (l2 - u2)
+                     + 0.25f * log(u/l) * r2_inv;
 
-            float de = lBF * t3 * invR;
+            real de = lBF * t3 * invR;
 
             int ligGlobal = gs + li;
             int ligParticle = particleIndices[ligGlobal];
@@ -5491,11 +5491,11 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
 extern "C" __global__ void computeCrossTermFromGrid(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ charges,
+    const real* __restrict__ charges,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
-    float prefactor,
+    real prefactor,
     const float* __restrict__ crossTermGrid,
     int totalGridPoints,
     float originX, float originY, float originZ,
@@ -5537,7 +5537,7 @@ extern "C" __global__ void computeCrossTermFromGrid(
 
     int particleIdx = particleIndices[idx];
     real4 pos = posq[particleIdx];
-    float q_i = charges[binIdx];
+    real q_i = charges[binIdx];
 
     // --- Trilinear interpolation + analytic gradient on G[binIdx] ---
     int nx = gridCounts[0];
@@ -5545,9 +5545,9 @@ extern "C" __global__ void computeCrossTermFromGrid(
     int nz = gridCounts[2];
     int nyz = ny * nz;
 
-    float fx = (pos.x - originX) / gridSpacing;
-    float fy = (pos.y - originY) / gridSpacing;
-    float fz = (pos.z - originZ) / gridSpacing;
+    real fx = (pos.x - originX) / gridSpacing;
+    real fy = (pos.y - originY) / gridSpacing;
+    real fz = (pos.z - originZ) / gridSpacing;
 
     // If the atom is outside the grid, skip (silent no-op; the grid
     // extent should cover the binding site margin). Caller must ensure
@@ -5563,62 +5563,62 @@ extern "C" __global__ void computeCrossTermFromGrid(
     int ix = (int)fx;
     int iy = (int)fy;
     int iz = (int)fz;
-    float tx = fx - (float)ix;
-    float ty = fy - (float)iy;
-    float tz = fz - (float)iz;
+    real tx = fx - (real)ix;
+    real ty = fy - (real)iy;
+    real tz = fz - (real)iz;
 
     // 8 cube corners: G(ix+a, iy+b, iz+c), a,b,c in {0,1}
     int base = ix * nyz + iy * nz + iz;
-    float c000 = G[base];
-    float c001 = G[base + 1];
-    float c010 = G[base + nz];
-    float c011 = G[base + nz + 1];
-    float c100 = G[base + nyz];
-    float c101 = G[base + nyz + 1];
-    float c110 = G[base + nyz + nz];
-    float c111 = G[base + nyz + nz + 1];
+    real c000 = G[base];
+    real c001 = G[base + 1];
+    real c010 = G[base + nz];
+    real c011 = G[base + nz + 1];
+    real c100 = G[base + nyz];
+    real c101 = G[base + nyz + 1];
+    real c110 = G[base + nyz + nz];
+    real c111 = G[base + nyz + nz + 1];
 
     // Interpolated value: trilinear blend
-    float w000 = (1.0f - tx) * (1.0f - ty) * (1.0f - tz);
-    float w001 = (1.0f - tx) * (1.0f - ty) * tz;
-    float w010 = (1.0f - tx) * ty         * (1.0f - tz);
-    float w011 = (1.0f - tx) * ty         * tz;
-    float w100 = tx          * (1.0f - ty) * (1.0f - tz);
-    float w101 = tx          * (1.0f - ty) * tz;
-    float w110 = tx          * ty         * (1.0f - tz);
-    float w111 = tx          * ty         * tz;
+    real w000 = (1.0f - tx) * (1.0f - ty) * (1.0f - tz);
+    real w001 = (1.0f - tx) * (1.0f - ty) * tz;
+    real w010 = (1.0f - tx) * ty         * (1.0f - tz);
+    real w011 = (1.0f - tx) * ty         * tz;
+    real w100 = tx          * (1.0f - ty) * (1.0f - tz);
+    real w101 = tx          * (1.0f - ty) * tz;
+    real w110 = tx          * ty         * (1.0f - tz);
+    real w111 = tx          * ty         * tz;
 
-    float Gval = w000 * c000 + w001 * c001 + w010 * c010 + w011 * c011
+    real Gval = w000 * c000 + w001 * c001 + w010 * c010 + w011 * c011
                + w100 * c100 + w101 * c101 + w110 * c110 + w111 * c111;
 
     // Analytic gradient of trilinear interpolant (dG/dfx, etc. are in
     // units of grid cells, convert to /nm by dividing by gridSpacing).
-    float dG_dfx = (1.0f - ty) * (1.0f - tz) * (c100 - c000)
+    real dG_dfx = (1.0f - ty) * (1.0f - tz) * (c100 - c000)
                  + (1.0f - ty) * tz         * (c101 - c001)
                  + ty         * (1.0f - tz) * (c110 - c010)
                  + ty         * tz         * (c111 - c011);
-    float dG_dfy = (1.0f - tx) * (1.0f - tz) * (c010 - c000)
+    real dG_dfy = (1.0f - tx) * (1.0f - tz) * (c010 - c000)
                  + (1.0f - tx) * tz         * (c011 - c001)
                  + tx         * (1.0f - tz) * (c110 - c100)
                  + tx         * tz         * (c111 - c101);
-    float dG_dfz = (1.0f - tx) * (1.0f - ty) * (c001 - c000)
+    real dG_dfz = (1.0f - tx) * (1.0f - ty) * (c001 - c000)
                  + (1.0f - tx) * ty         * (c011 - c010)
                  + tx         * (1.0f - ty) * (c101 - c100)
                  + tx         * ty         * (c111 - c110);
     float invSpacing = 1.0f / gridSpacing;
-    float dG_dx = dG_dfx * invSpacing;
-    float dG_dy = dG_dfy * invSpacing;
-    float dG_dz = dG_dfz * invSpacing;
+    real dG_dx = dG_dfx * invSpacing;
+    real dG_dy = dG_dfy * invSpacing;
+    real dG_dz = dG_dfz * invSpacing;
 
     // Energy contribution (unscaled vs scaled handled like the rest of
     // the group energy accumulators in this file).
-    float e_i = prefactor * q_i * Gval;
+    real e_i = prefactor * q_i * Gval;
 
 
     // Force = -dE/dr = -prefactor * q_i * grad G, scaled alchemically
-    float fxx = -prefactor * q_i * dG_dx * scale;
-    float fyy = -prefactor * q_i * dG_dy * scale;
-    float fzz = -prefactor * q_i * dG_dz * scale;
+    real fxx = -prefactor * q_i * dG_dx * scale;
+    real fyy = -prefactor * q_i * dG_dy * scale;
+    real fzz = -prefactor * q_i * dG_dz * scale;
 
     atomicAdd(&forceBuffer[particleIdx],
               static_cast<unsigned long long>(
@@ -5669,17 +5669,17 @@ extern "C" __global__ void computeCrossTermFromGrid(
 extern "C" __global__ void computeHCTJacobianPairwise(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float* __restrict__ scaleFactors,
+    const real* __restrict__ radii,
+    const real* __restrict__ scaleFactors,
     const int* __restrict__ exclusionAtoms,
     const int* __restrict__ exclusionStart,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
     // Receptor (fixed) — pairwise replacement for the grid HCT field
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     int totalParticles,
     float* __restrict__ jacobian
@@ -5707,8 +5707,8 @@ extern "C" __global__ void computeHCTJacobianPairwise(
     int particleIdx_k = particleIndices[idx];
     int templateIdx_k = atomInGroup % templateNumAtoms;
     real4 pos_k = posq[particleIdx_k];
-    float R_k = radii[templateIdx_k];
-    float R_k_off = R_k - DIELECTRIC_OFFSET;
+    real R_k = radii[templateIdx_k];
+    real R_k_off = R_k - DIELECTRIC_OFFSET;
 
     // Self-term accumulators in double precision. The self entries
     // J[idx, 3*idx+α] receive numReceptorAtoms + numLigandPairs
@@ -5722,32 +5722,32 @@ extern "C" __global__ void computeHCTJacobianPairwise(
     // --- Receptor pairwise sum (only J[k, 3k+α] gets contributions; receptor
     //     atoms are fixed so off-diagonal blocks are zero) ---
     for (int rj = 0; rj < numReceptorAtoms; rj++) {
-        float3 pj = receptorPositions[rj];
-        float dx = pos_k.x - pj.x;
-        float dy = pos_k.y - pj.y;
-        float dz = pos_k.z - pj.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-        float r = sqrtf(r2);
+        real4 pj = receptorPositions[rj];
+        real dx = pos_k.x - pj.x;
+        real dy = pos_k.y - pj.y;
+        real dz = pos_k.z - pj.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
+        real r = sqrt(r2);
         if (r < 1e-6f) continue;
 
-        float R_rj = receptorRadii[rj];
-        float R_rj_off = R_rj - DIELECTRIC_OFFSET;
-        float S_rj = R_rj_off * receptorScaleFactors[rj];
+        real R_rj = receptorRadii[rj];
+        real R_rj_off = R_rj - DIELECTRIC_OFFSET;
+        real S_rj = R_rj_off * receptorScaleFactors[rj];
         if (R_k_off >= r + S_rj) continue;
 
         // Same t3 formula as gbsaGridForce.cu:2126-2137 — validated against
         // HCTChainRule.cuh's case2 closed form.
-        float r_minus_S = fabsf(r - S_rj);
-        float l_val = (R_k_off > r_minus_S) ? (1.0f / R_k_off) : (1.0f / r_minus_S);
-        float u_val = 1.0f / (r + S_rj);
-        float l2 = l_val * l_val;
-        float u2 = u_val * u_val;
-        float invr2 = 1.0f / r2;
-        float t3 = 0.125f * (1.0f + S_rj * S_rj * invr2) * (l2 - u2)
-                  + 0.25f * logf(u_val / l_val) * invr2;
-        float dI_dr = -2.0f * t3;
+        real r_minus_S = fabs(r - S_rj);
+        real l_val = (R_k_off > r_minus_S) ? (1.0f / R_k_off) : (1.0f / r_minus_S);
+        real u_val = 1.0f / (r + S_rj);
+        real l2 = l_val * l_val;
+        real u2 = u_val * u_val;
+        real invr2 = 1.0f / r2;
+        real t3 = 0.125f * (1.0f + S_rj * S_rj * invr2) * (l2 - u2)
+                  + 0.25f * log(u_val / l_val) * invr2;
+        real dI_dr = -2.0f * t3;
 
-        float invr = 1.0f / r;
+        real invr = 1.0f / r;
         jx_self += (double)dI_dr * (double)dx * (double)invr;
         jy_self += (double)dI_dr * (double)dy * (double)invr;
         jz_self += (double)dI_dr * (double)dz * (double)invr;
@@ -5770,32 +5770,32 @@ extern "C" __global__ void computeHCTJacobianPairwise(
 
         int particleIdx_j = particleIndices[j];
         real4 pos_j = posq[particleIdx_j];
-        float R_j = radii[templateIdx_j];
-        float R_j_off = R_j - DIELECTRIC_OFFSET;
-        float S_j = R_j_off * scaleFactors[templateIdx_j];
+        real R_j = radii[templateIdx_j];
+        real R_j_off = R_j - DIELECTRIC_OFFSET;
+        real S_j = R_j_off * scaleFactors[templateIdx_j];
 
-        float dx = pos_k.x - pos_j.x;
-        float dy = pos_k.y - pos_j.y;
-        float dz = pos_k.z - pos_j.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-        float r = sqrtf(r2);
+        real dx = pos_k.x - pos_j.x;
+        real dy = pos_k.y - pos_j.y;
+        real dz = pos_k.z - pos_j.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
+        real r = sqrt(r2);
         if (r < 1e-6f) continue;
 
-        float r_plus_Sj = r + S_j;
+        real r_plus_Sj = r + S_j;
         if (R_k_off >= r_plus_Sj) continue;
 
-        float r_minus_Sj = fabsf(r - S_j);
-        float l_val = (R_k_off > r_minus_Sj) ? (1.0f / R_k_off) : (1.0f / r_minus_Sj);
-        float u_val = 1.0f / r_plus_Sj;
-        float l2 = l_val * l_val;
-        float u2 = u_val * u_val;
-        float S2 = S_j * S_j;
-        float invr2 = 1.0f / r2;
-        float t3 = 0.125f * (1.0f + S2 * invr2) * (l2 - u2)
-                  + 0.25f * logf(u_val / l_val) * invr2;
-        float dI_dr = -2.0f * t3;
+        real r_minus_Sj = fabs(r - S_j);
+        real l_val = (R_k_off > r_minus_Sj) ? (1.0f / R_k_off) : (1.0f / r_minus_Sj);
+        real u_val = 1.0f / r_plus_Sj;
+        real l2 = l_val * l_val;
+        real u2 = u_val * u_val;
+        real S2 = S_j * S_j;
+        real invr2 = 1.0f / r2;
+        real t3 = 0.125f * (1.0f + S2 * invr2) * (l2 - u2)
+                  + 0.25f * log(u_val / l_val) * invr2;
+        real dI_dr = -2.0f * t3;
 
-        float invr = 1.0f / r;
+        real invr = 1.0f / r;
         // Self contribution (accumulate)
         jx_self += (double)dI_dr * (double)dx * (double)invr;
         jy_self += (double)dI_dr * (double)dy * (double)invr;
@@ -5817,13 +5817,13 @@ extern "C" __global__ void computeHCTJacobianPairwise(
 extern "C" __global__ void computeReceptorPairwiseHessian(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
+    const real* __restrict__ radii,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     int totalParticles,
     float* __restrict__ hessianOut       // [N * 6]: xx, yy, zz, xy, xz, yz
@@ -5845,8 +5845,8 @@ extern "C" __global__ void computeReceptorPairwiseHessian(
     int templateIdx = atomInGroup % templateNumAtoms;
     int particleIdx = particleIndices[idx];
     real4 pk = posq[particleIdx];
-    float R_k = radii[templateIdx];
-    float R_k_off = R_k - DIELECTRIC_OFFSET;
+    real R_k = radii[templateIdx];
+    real R_k_off = R_k - DIELECTRIC_OFFSET;
 
     // Double-precision accumulators: each receives one term per
     // receptor atom (up to N_rec contributions) and the d²I/dx² terms
@@ -5856,30 +5856,30 @@ extern "C" __global__ void computeReceptorPairwiseHessian(
     double Hxy = 0.0, Hxz = 0.0, Hyz = 0.0;
 
     for (int rj = 0; rj < numReceptorAtoms; rj++) {
-        float3 pj = receptorPositions[rj];
-        float dx = pk.x - pj.x;
-        float dy = pk.y - pj.y;
-        float dz = pk.z - pj.z;
-        float r2 = dx*dx + dy*dy + dz*dz;
-        float r = sqrtf(r2);
+        real4 pj = receptorPositions[rj];
+        real dx = pk.x - pj.x;
+        real dy = pk.y - pj.y;
+        real dz = pk.z - pj.z;
+        real r2 = dx*dx + dy*dy + dz*dz;
+        real r = sqrt(r2);
         if (r < 1e-6f) continue;
 
-        float R_rj = receptorRadii[rj];
-        float R_rj_off = R_rj - DIELECTRIC_OFFSET;
-        float S_rj = R_rj_off * receptorScaleFactors[rj];
+        real R_rj = receptorRadii[rj];
+        real R_rj_off = R_rj - DIELECTRIC_OFFSET;
+        real S_rj = R_rj_off * receptorScaleFactors[rj];
         if (R_k_off >= r + S_rj) continue;
 
         // Get I[0..6]; we use I[1] = dI/dr and I[2] = d²I/dr².
         // computeHCT_rDerivs handles both case1 (R_probe > |r-S|) and case2.
         float deriv[7];
         computeHCT_rDerivs(r, S_rj, R_k_off, deriv);
-        float dI_dr  = deriv[1];
-        float d2I_dr2 = deriv[2];
+        real dI_dr  = deriv[1];
+        real d2I_dr2 = deriv[2];
 
-        float invr = 1.0f / r;
-        float rhx = dx * invr;
-        float rhy = dy * invr;
-        float rhz = dz * invr;
+        real invr = 1.0f / r;
+        real rhx = dx * invr;
+        real rhy = dy * invr;
+        real rhz = dz * invr;
 
         // Chain rule on r(x): ∂r/∂x_α = r̂_α; ∂²r/∂x_α dx_β = (δ_αβ - r̂_α r̂_β)/r.
         //   d²I/dx_α dx_β = (∂I/∂r) (δ_αβ - r̂_α r̂_β)/r + (∂²I/∂r²) r̂_α r̂_β

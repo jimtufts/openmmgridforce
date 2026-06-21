@@ -46,12 +46,13 @@ private:
     OpenMM::CudaArray fixedPointEnergyBuffer; // [1] unsigned long long - fixed-point energy accumulator
     OpenMM::CudaArray groupScalingFactorsBuffer;  // [numGroups] float
 
-    // Site parameters (passed as kernel args)
-    float centerX, centerY, centerZ;
-    float maxRadius;
-    float forceConstantVal;
+    // Site geometry (passed as kernel args in double; positions/COM use the
+    // context real type, so the restraint honors the selected precision).
+    double centerX, centerY, centerZ;
+    double maxRadius;
+    double forceConstantVal;
     float globalScalingFactor;
-    float totalMass;
+    double totalMass;
 
     // Host-side caches
     mutable std::vector<double> groupEnergiesHost;

@@ -49,7 +49,7 @@ private:
     // GB parameters
     IsolatedGBSAForce::GBMethod gbMethod;
     IsolatedGBSAForce::ReceptorMode receptorMode;
-    float prefactor;  // -138.935456 * (1/solute - 1/solvent)
+    double prefactor;  // -138.935456 * (1/solute - 1/solvent)
     bool includeSurfaceArea;
     float surfaceTension;
     float cutoffDistance;  // -1.0 for no cutoff

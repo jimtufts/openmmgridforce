@@ -27,12 +27,12 @@ extern "C" __global__ void computeIsolatedSiteRestraint(
     mixed* __restrict__ groupEnergies,
     const float* __restrict__ groupScalingFactors,
     const float globalScalingFactor,
-    const float centerX,
-    const float centerY,
-    const float centerZ,
-    const float maxRadius,
-    const float forceConstant,
-    const float totalMass,
+    const double centerX,
+    const double centerY,
+    const double centerZ,
+    const double maxRadius,
+    const double forceConstant,
+    const double totalMass,
     const int numAtoms,
     const int numGroups,
     const int paddedNumAtoms,
@@ -55,42 +55,36 @@ extern "C" __global__ void computeIsolatedSiteRestraint(
         real4 pos = posq[particleIdx];
         float mass = atomMasses[atomIdx];
 
-        // Mass-weighted position contribution
-        float wx = mass * (float)pos.x;
-        float wy = mass * (float)pos.y;
-        float wz = mass * (float)pos.z;
-
-        // Compute COM: sum mass-weighted positions over all atoms in group.
-        // Since we're in a grid-stride loop, different threads may handle
-        // different groups. We need a serial loop per group for COM.
-        // For small numAtoms this is efficient.
-        float comX = 0, comY = 0, comZ = 0;
+        // Compute the mass-weighted COM over all atoms in the group. Accumulate
+        // in real precision so double-precision positions are not truncated to
+        // single precision (the restraint then honors the context precision).
+        real comX = 0, comY = 0, comZ = 0;
         for (int a = 0; a < numAtoms; a++) {
             int p = groupParticleIndices[groupIdx * numAtoms + a];
             real4 apos = posq[p];
-            float am = atomMasses[a];
-            comX += am * (float)apos.x;
-            comY += am * (float)apos.y;
-            comZ += am * (float)apos.z;
+            real am = atomMasses[a];
+            comX += am * apos.x;
+            comY += am * apos.y;
+            comZ += am * apos.z;
         }
-        float invTotalMass = 1.0f / totalMass;
+        real invTotalMass = 1.0f / totalMass;
         comX *= invTotalMass;
         comY *= invTotalMass;
         comZ *= invTotalMass;
 
         // Distance from site center
-        float dx = comX - centerX;
-        float dy = comY - centerY;
-        float dz = comZ - centerZ;
-        float r = sqrtf(dx * dx + dy * dy + dz * dz);
+        real dx = comX - centerX;
+        real dy = comY - centerY;
+        real dz = comZ - centerZ;
+        real r = sqrt(dx * dx + dy * dy + dz * dz);
 
         // Flat-bottom: only restrain outside maxRadius
-        float deltaR = r - maxRadius;
+        real deltaR = r - maxRadius;
         if (deltaR <= 0.0f) continue;
 
         // Energy (only first atom in group accumulates to avoid double-counting)
         if (atomIdx == 0) {
-            float energy = 0.5f * forceConstant * deltaR * deltaR * scale;
+            real energy = 0.5f * forceConstant * deltaR * deltaR * scale;
             if (includeEnergy) {
                 atomicAdd(&groupEnergies[groupIdx], energy);
                 atomicAdd(fixedPointEnergy, static_cast<unsigned long long>((long long)((double)energy * 0x100000000)));
@@ -99,12 +93,12 @@ extern "C" __global__ void computeIsolatedSiteRestraint(
 
         // Force on this atom: F_i = -dE/dr * (COM - center) / r * m_i / M
         if (r > 1.0e-12f) {
-            float dEdR = forceConstant * deltaR * scale;
-            float prefactor = -dEdR / (r * totalMass);
-            float w = prefactor * mass;
-            real fx = (real)(w * dx);
-            real fy = (real)(w * dy);
-            real fz = (real)(w * dz);
+            real dEdR = forceConstant * deltaR * scale;
+            real prefactor = -dEdR / (r * totalMass);
+            real w = prefactor * mass;
+            real fx = w * dx;
+            real fy = w * dy;
+            real fz = w * dz;
 
             // Fixed-point force accumulation (matches OpenMM convention)
             atomicAdd(&forceBuffers[particleIdx],

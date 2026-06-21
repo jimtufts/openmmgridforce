@@ -45,20 +45,20 @@ void CudaCalcIsolatedSiteForceKernel::initialize(
     // Site parameters
     double cx, cy, cz;
     force.getSiteCenter(cx, cy, cz);
-    centerX = (float)cx;
-    centerY = (float)cy;
-    centerZ = (float)cz;
-    maxRadius = (float)force.getMaxRadius();
-    forceConstantVal = (float)force.getForceConstant();
+    centerX = cx;
+    centerY = cy;
+    centerZ = cz;
+    maxRadius = force.getMaxRadius();
+    forceConstantVal = force.getForceConstant();
     globalScalingFactor = (float)force.getGlobalScalingFactor();
 
     // Atom masses
     const vector<double>& massesD = force.getAtomMasses();
     vector<float> massesF(numAtoms);
-    totalMass = 0.0f;
+    totalMass = 0.0;
     for (int i = 0; i < numAtoms; i++) {
         massesF[i] = (float)massesD[i];
-        totalMass += massesF[i];
+        totalMass += massesD[i];
     }
     atomMasses.initialize<float>(cu, numAtoms, "isolatedSite_masses");
     atomMasses.upload(massesF);
@@ -158,11 +158,11 @@ void CudaCalcIsolatedSiteForceKernel::copyParametersToContext(
 
     double cx, cy, cz;
     force.getSiteCenter(cx, cy, cz);
-    centerX = (float)cx;
-    centerY = (float)cy;
-    centerZ = (float)cz;
-    maxRadius = (float)force.getMaxRadius();
-    forceConstantVal = (float)force.getForceConstant();
+    centerX = cx;
+    centerY = cy;
+    centerZ = cz;
+    maxRadius = force.getMaxRadius();
+    forceConstantVal = force.getForceConstant();
     globalScalingFactor = (float)force.getGlobalScalingFactor();
 
     // Update scaling factors
