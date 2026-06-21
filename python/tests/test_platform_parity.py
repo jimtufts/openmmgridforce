@@ -51,8 +51,12 @@ TOL = {
 # as GAP rather than failing the run; remove the entry when the gap is closed.
 # Keys: (case, label, kind).
 OPEN_GAPS = {
-    # No known gaps currently. Add (case, label, kind) tuples here when one is
-    # identified, so it is tracked explicitly rather than silently passing.
+    # CUDA's isolated-GBSA Hessian omits the PAIRWISE receptor-desolvation and
+    # cross-term second derivatives, so its PAIRWISE Hessian disagrees with the
+    # (JAX-validated) Reference. Tracked pending the CUDA port of those terms.
+    ('IsolatedGBSAForce[PAIRWISE] Hessian', 'CUDA/single', 'hessian'),
+    ('IsolatedGBSAForce[PAIRWISE] Hessian', 'CUDA/mixed', 'hessian'),
+    ('IsolatedGBSAForce[PAIRWISE] Hessian', 'CUDA/double', 'hessian'),
 }
 
 _failures = []
@@ -427,11 +431,11 @@ def gbsa_section(specs):
                 f.setReceptorPositions(rec_pos.flatten().tolist())
             f.addParticleGroup("lig", list(range(n_lig)))
             system.addForce(f)
-            return system
+            return system, f
 
         case = f"IsolatedGBSAForce[{mname}]"
         print(f"\n=== {case} ===")
-        results = eval_all(build, lig_pos, specs)
+        results = eval_all(lambda: build()[0], lig_pos, specs)
         # PAIRWISE forces are judged against the OpenMM anchor below, not the
         # Reference (whose PAIRWISE forces are a known gap); compare energy only
         # cross-platform here to avoid attributing the Reference gap to CUDA.
@@ -451,6 +455,23 @@ def gbsa_section(specs):
         anchored = {k: v for k, v in results.items() if not isinstance(v[0], str)}
         anchored[REFERENCE] = (Eo, Fo)
         compare(case + " vs OpenMM", anchored, specs)
+
+        # Analytical Hessian parity (group 0). The Reference Hessian is
+        # validated against JAX autodiff of the IsolatedGBSA energy to <1e-6
+        # for both NONE and PAIRWISE; here we check cross-platform agreement.
+        print("  -- analytical Hessian (group 0) --")
+        hess = {}
+        for spec in specs:
+            try:
+                system, force = build()  # keep the typed force for computeHessian
+                ctx, _ = _context(system, spec)
+                ctx.setPositions(lig_pos)
+                ctx.getState(getEnergy=True)  # execute() before computeHessian()
+                hess[spec[0]] = np.array(force.computeHessian(ctx))
+                del ctx
+            except Exception as e:
+                hess[spec[0]] = ('EXC', repr(e))
+        _compare_hessian(case + " Hessian", hess, specs)
 
 
 # --------------------------------------------------------- GBSAGridForce

@@ -100,6 +100,20 @@ private:
                            std::vector<double>& dE_dR) const;
     double computeSurfaceAreaEnergy(const std::vector<double>& bornRadii,
                                     std::vector<double>& dE_dR) const;
+
+    // Adds the PAIRWISE-only receptor-desolvation and receptor-ligand
+    // cross-term second-derivative contributions into the per-group ligand
+    // Hessian block Hloc (local 3N x 3N, unscaled).
+    void addPairwiseHessianContributions(
+            int groupIndex,
+            const std::vector<OpenMM::Vec3>& posData,
+            const std::vector<double>& born,        // ligand full Born radii
+            const std::vector<double>& hctReceptor,
+            const std::vector<double>& hctLigand,
+            const std::vector<double>& hctTotal,
+            const std::vector<double>& dRdPsi,      // ligand dR/dPsi
+            const std::vector<double>& J,           // ligand Jacobian [N x 3N]
+            std::vector<double>& Hloc) const;
 };
 
 }  // namespace GridForcePlugin
