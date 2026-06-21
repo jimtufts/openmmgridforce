@@ -867,6 +867,11 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
             // Distance floor prevents singularity when ligand overlaps receptor
             static constexpr double MIN_CROSS_R2 = 0.01;  // 0.1 nm = 1 Angstrom
             double crossTermEnergy = 0.0;
+            // Cross-term dependence on the two Born radii (both vary with ligand
+            // position through the HCT sums). Accumulated here and applied via
+            // the HCT chain rule below; the explicit r-dependence is inline.
+            vector<double> dCross_dRi(numAtoms, 0.0);
+            vector<double> dCross_dRrecj(numReceptorAtoms, 0.0);
             for (int i = 0; i < numAtoms; i++) {
                 int pi = particles[i];
                 for (int j = 0; j < numReceptorAtoms; j++) {
@@ -897,6 +902,13 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
                         forceData[pi][0] -= dE_dr * dx * invR;
                         forceData[pi][1] -= dE_dr * dy * invR;
                         forceData[pi][2] -= dE_dr * dz * invR;
+
+                        // Born-radius derivatives of the cross term (unscaled;
+                        // scale is applied where these feed the chain rule).
+                        double dEcross = -prefactor * charges[i] * receptorCharges[j] / f_gb2;
+                        double dfdR_common = exp_alpha * (1.0 + alpha_val) / (2.0 * f_gb);
+                        dCross_dRi[i]    += dEcross * recBornRadiiWithLig[j] * dfdR_common;
+                        dCross_dRrecj[j] += dEcross * bornRadiiFull[i]       * dfdR_common;
                     }
                 }
             }
@@ -937,6 +949,13 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
                         recDeDR[a] += -prefactor * qq / f_gb2 * df_dRa;
                     }
                 }
+
+                // Fold the cross-term's receptor-Born dependence into the
+                // receptor energy derivative so it propagates through the same
+                // ligand->receptor HCT chain rule below.
+                for (int a = 0; a < numReceptorAtoms; a++)
+                    if (isActiveRecAtom[a])
+                        recDeDR[a] += dCross_dRrecj[a];
 
                 // Compute receptor dR_born/dHCT (only for active atoms)
                 vector<double> recDRdHCT(numReceptorAtoms, 0.0);
@@ -987,6 +1006,81 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
                         forceData[pi][0] -= forceMag * dx * invR;
                         forceData[pi][1] -= forceMag * dy * invR;
                         forceData[pi][2] -= forceMag * dz * invR;
+                    }
+                }
+
+                // Cross-term dependence on the ligand Born radii: propagate
+                // dE_cross/dR_lig through the ligand and receptor HCT sums, the
+                // same chain rule Step 6 uses for the ligand-ligand GB energy.
+                vector<double> crossDRdHCT(numAtoms, 0.0);
+                for (int i = 0; i < numAtoms; i++) {
+                    double R_off = radii[i] - DIELECTRIC_OFFSET;
+                    if (R_off <= 0.0) continue;
+                    if (gbMethod == IsolatedGBSAForce::HCT) {
+                        crossDRdHCT[i] = 0.5 * R_off * bornRadiiFull[i] * bornRadiiFull[i];
+                    } else {
+                        double psi = 0.5 * R_off * hctTotal[i];
+                        double tanh_arg = OBC_ALPHA * psi - OBC_BETA * psi * psi
+                                          + OBC_GAMMA * psi * psi * psi;
+                        double tanh_val = tanh(tanh_arg);
+                        double sech2 = 1.0 - tanh_val * tanh_val;
+                        double dtanh_dpsi = sech2 * (OBC_ALPHA - 2.0 * OBC_BETA * psi
+                                                      + 3.0 * OBC_GAMMA * psi * psi);
+                        crossDRdHCT[i] = bornRadiiFull[i] * bornRadiiFull[i]
+                                         * dtanh_dpsi * 0.5 * R_off / radii[i];
+                    }
+                }
+
+                vector<double> crossChainFactor(numAtoms);
+                for (int i = 0; i < numAtoms; i++)
+                    crossChainFactor[i] = scale * dCross_dRi[i] * crossDRdHCT[i];
+
+                // Through ligand-ligand HCT
+                for (int i = 0; i < numAtoms; i++) {
+                    int pi = particles[i];
+                    double R_i_off = radii[i] - DIELECTRIC_OFFSET;
+                    for (int j = 0; j < numAtoms; j++) {
+                        if (i == j) continue;
+                        int pj = particles[j];
+                        double dx = posData[pi][0] - posData[pj][0];
+                        double dy = posData[pi][1] - posData[pj][1];
+                        double dz = posData[pi][2] - posData[pj][2];
+                        double r = sqrt(dx * dx + dy * dy + dz * dz);
+                        if (r < 1e-10) continue;
+                        if (cutoffDistance > 0.0 && r > cutoffDistance) continue;
+                        double R_j_off = radii[j] - DIELECTRIC_OFFSET;
+                        double dHCT_dr = computeHCTTermDerivative(r, R_i_off, R_j_off,
+                                                                   scaleFactors[j]);
+                        double forceMag = -crossChainFactor[i] * dHCT_dr;
+                        double invR = 1.0 / r;
+                        forceData[pi][0] += forceMag * dx * invR;
+                        forceData[pi][1] += forceMag * dy * invR;
+                        forceData[pi][2] += forceMag * dz * invR;
+                        forceData[pj][0] -= forceMag * dx * invR;
+                        forceData[pj][1] -= forceMag * dy * invR;
+                        forceData[pj][2] -= forceMag * dz * invR;
+                    }
+                }
+
+                // Through receptor->ligand HCT (receptor fixed; force on ligand)
+                for (int i = 0; i < numAtoms; i++) {
+                    int pi = particles[i];
+                    double R_i_off = radii[i] - DIELECTRIC_OFFSET;
+                    for (int j = 0; j < numReceptorAtoms; j++) {
+                        double dx = posData[pi][0] - receptorPositions[j * 3];
+                        double dy = posData[pi][1] - receptorPositions[j * 3 + 1];
+                        double dz = posData[pi][2] - receptorPositions[j * 3 + 2];
+                        double r = sqrt(dx * dx + dy * dy + dz * dz);
+                        if (r < 1e-10) continue;
+                        if (cutoffDistance > 0.0 && r > cutoffDistance) continue;
+                        double R_j_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+                        double dHCT_dr = computeHCTTermDerivative(r, R_i_off, R_j_off,
+                                                                   receptorScaleFactors[j]);
+                        double forceMag = -crossChainFactor[i] * dHCT_dr;
+                        double invR = 1.0 / r;
+                        forceData[pi][0] += forceMag * dx * invR;
+                        forceData[pi][1] += forceMag * dy * invR;
+                        forceData[pi][2] += forceMag * dz * invR;
                     }
                 }
             }

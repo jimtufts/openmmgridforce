@@ -51,11 +51,8 @@ TOL = {
 # as GAP rather than failing the run; remove the entry when the gap is closed.
 # Keys: (case, label, kind).
 OPEN_GAPS = {
-    # Reference/CPU isolated-GBSA PAIRWISE omits one cross-term chain-rule
-    # contribution (dependence of ligand-screened receptor Born radii on ligand
-    # positions). Energy is exact; only the ligand forces drift. CUDA is correct,
-    # so the gap shows up against the OpenMM force anchor (CPU mirrors Reference).
-    ('IsolatedGBSAForce[PAIRWISE] vs OpenMM', 'CPU', 'force'),
+    # No known gaps currently. Add (case, label, kind) tuples here when one is
+    # identified, so it is tracked explicitly rather than silently passing.
 }
 
 _failures = []
