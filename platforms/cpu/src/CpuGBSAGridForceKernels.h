@@ -23,6 +23,9 @@ protected:
                    std::vector<OpenMM::Vec3>& posData,
                    std::vector<OpenMM::Vec3>& forceData,
                    bool includeForces, bool includeEnergy) override;
+
+    void parallelFor(OpenMM::ContextImpl& context, int count,
+                     const std::function<void(int)>& body) override;
 };
 
 }  // namespace GridForcePlugin

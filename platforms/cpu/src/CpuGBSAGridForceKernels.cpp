@@ -31,4 +31,17 @@ void CpuCalcGBSAGridForceKernel::runGroups(
     pool.waitForThreads();
 }
 
+void CpuCalcGBSAGridForceKernel::parallelFor(
+        ContextImpl& context, int count, const std::function<void(int)>& body) {
+
+    CpuPlatform::PlatformData& data = CpuPlatform::getPlatformData(context);
+    ThreadPool& pool = data.threads;
+
+    pool.execute([&](ThreadPool& p, int threadIndex) {
+        for (int i = threadIndex; i < count; i += p.getNumThreads())
+            body(i);
+    });
+    pool.waitForThreads();
+}
+
 }  // namespace GridForcePlugin

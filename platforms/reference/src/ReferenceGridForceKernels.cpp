@@ -1357,6 +1357,11 @@ inline void applyRuntimeCapChain(double cap, double& v,
 
 }  // namespace
 
+void ReferenceCalcGridForceKernel::parallelFor(int count, const std::function<void(int)>& body) {
+    for (int i = 0; i < count; i++)
+        body(i);
+}
+
 void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<Vec3>& posData) {
     const int nyz = g_counts[1] * g_counts[2];
     const int natom_lig = (int)g_scaling_factors.size();
@@ -1367,7 +1372,7 @@ void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<
     const double effMin[3] = {g_effectiveMinX, g_effectiveMinY, g_effectiveMinZ};
     const double effMax[3] = {g_effectiveMaxX, g_effectiveMaxY, g_effectiveMaxZ};
 
-    for (int ia = 0; ia < natom_lig; ++ia) {
+    parallelFor(natom_lig, [&](int ia) {
         int particle_idx = (g_ligand_atoms.empty()) ? ia : g_ligand_atoms[ia];
 
         Vec3 pi_orig = posData[particle_idx];
@@ -1394,7 +1399,7 @@ void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<
         }
 
         if (!is_inside || effectiveScaling == 0.0)
-            continue;  // leave the block at zero (matches CUDA)
+            return;  // leave the block at zero (matches CUDA)
 
         int ix = (int)(pi[0] / g_spacing[0]);
         int iy = (int)(pi[1] / g_spacing[1]);
@@ -1596,7 +1601,7 @@ void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<
         g_hessianBlocks[off + 3] = H.xy;
         g_hessianBlocks[off + 4] = H.xz;
         g_hessianBlocks[off + 5] = H.yz;
-    }
+    });
 }
 
 void ReferenceCalcGridForceKernel::computeHessian() {

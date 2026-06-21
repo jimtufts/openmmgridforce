@@ -644,6 +644,10 @@ inline GridStillPair gridStillPair(double r2, double Ra, double Rb) {
 
 }  // namespace
 
+void ReferenceCalcGBSAGridForceKernel::parallelFor(ContextImpl& context, int count, const std::function<void(int)>& body) {
+    for (int i = 0; i < count; i++) body(i);
+}
+
 void ReferenceCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
     vector<Vec3>& posData = refExtractPositions(context);
 
@@ -655,9 +659,9 @@ void ReferenceCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
 
     const int hmap[3][3] = {{0, 3, 4}, {3, 1, 5}, {4, 5, 2}};  // (a,b)->block index
 
-    for (int g = 0; g < numParticleGroups; g++) {
+    parallelFor(context, numParticleGroups, [&](int g) {
         double scale = globalScalingFactor * groupScalingFactors[g];
-        if (scale == 0.0) continue;
+        if (scale == 0.0) return;
         const vector<int>& particles = groupParticleIndices[g];
         int N = numAtoms;
         int n3 = 3 * N;
@@ -1000,7 +1004,7 @@ void ReferenceCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
                 fullHessian_[(size_t)slotRow*dim3N + slotCol] = scale * Hloc[(size_t)r*n3 + c];
             }
         }
-    }
+    });
 
     // Extract per-atom diagonal blocks [dxx, dyy, dzz, dxy, dxz, dyz].
     for (int i = 0; i < totalParticles; i++) {

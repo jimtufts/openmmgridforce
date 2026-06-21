@@ -37,6 +37,7 @@
 #include "GridForceKernels.h"
 #include "openmm/Platform.h"
 #include "openmm/Vec3.h"
+#include <functional>
 #include <vector>
 #include <map>
 
@@ -139,6 +140,11 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
      * Output is 6 components per ligand atom: [xx, yy, zz, xy, xz, yz].
      */
     void computeHessianForPositions(const std::vector<OpenMM::Vec3>& posData);
+
+    // Run body(i) for i in [0, count). Serial here; the CPU platform overrides
+    // to distribute the iterations across the thread pool. Uses g_lastContext
+    // for the pool, so it is only valid inside the Hessian path.
+    virtual void parallelFor(int count, const std::function<void(int)>& body);
 
     // Cached pointer to the last context passed to execute(); positions are read
     // from it inside computeHessian()/computeThirdDerivatives().

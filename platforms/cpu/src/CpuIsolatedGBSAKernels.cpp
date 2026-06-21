@@ -32,4 +32,20 @@ void CpuCalcIsolatedGBSAForceKernel::runGroups(
     pool.waitForThreads();
 }
 
+void CpuCalcIsolatedGBSAForceKernel::parallelFor(
+        ContextImpl& context, int count, const std::function<void(int)>& body) {
+
+    CpuPlatform::PlatformData& data = CpuPlatform::getPlatformData(context);
+    ThreadPool& pool = data.threads;
+
+    // Each index writes only its own disjoint region of the output, so the
+    // strided indices never conflict.
+    pool.execute([&](ThreadPool& p, int threadIndex) {
+        int nThreads = p.getNumThreads();
+        for (int i = threadIndex; i < count; i += nThreads)
+            body(i);
+    });
+    pool.waitForThreads();
+}
+
 }  // namespace GridForcePlugin

@@ -38,4 +38,17 @@ void CpuCalcGridForceKernel::runAtoms(
     pool.waitForThreads();
 }
 
+void CpuCalcGridForceKernel::parallelFor(int count, const std::function<void(int)>& body) {
+    // Distribute the iterations across worker threads. Used by the Hessian path,
+    // where each iteration writes only its own atom's disjoint result slots.
+    ContextImpl& ctx = *g_lastContext;
+    ThreadPool& pool = CpuPlatform::getPlatformData(ctx).threads;
+    pool.execute([&](ThreadPool& p, int threadIndex) {
+        int nThreads = p.getNumThreads();
+        for (int i = threadIndex; i < count; i += nThreads)
+            body(i);
+    });
+    pool.waitForThreads();
+}
+
 }  // namespace GridForcePlugin

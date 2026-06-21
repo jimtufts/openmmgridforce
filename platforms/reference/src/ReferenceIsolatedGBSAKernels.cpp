@@ -1188,6 +1188,10 @@ inline StillPair stillPair(double r2, double Ra, double Rb) {
 
 }  // namespace
 
+void ReferenceCalcIsolatedGBSAForceKernel::parallelFor(ContextImpl& context, int count, const std::function<void(int)>& body) {
+    for (int i = 0; i < count; i++) body(i);
+}
+
 vector<double> ReferenceCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& context) {
     vector<Vec3>& posData = refExtractPositions(context);
 
@@ -1204,9 +1208,9 @@ vector<double> ReferenceCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl&
 
     // Each group is isolated -> block diagonal in the global (3*totalParticles)
     // matrix. We compute the per-group block in local indexing then scatter.
-    for (int g = 0; g < numParticleGroups; g++) {
+    parallelFor(context, numParticleGroups, [&](int g) {
         double scale = globalScalingFactor * groupScalingFactors[g];
-        if (scale == 0.0) continue;
+        if (scale == 0.0) return;
         const vector<int>& particles = groupParticleIndices[g];
         int N = numAtoms;
         int n3 = 3 * N;
@@ -1579,7 +1583,7 @@ vector<double> ReferenceCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl&
                 H[(size_t)grow*dim3N + gcol] = scale * Hloc[(size_t)r*n3 + c];
             }
         }
-    }
+    });
 
     return H;
 }

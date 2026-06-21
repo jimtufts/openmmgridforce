@@ -16,6 +16,7 @@
 #include <vector>
 #include <memory>
 #include <set>
+#include <functional>
 
 namespace GridForcePlugin {
 
@@ -55,6 +56,11 @@ protected:
                            std::vector<OpenMM::Vec3>& posData,
                            std::vector<OpenMM::Vec3>& forceData,
                            bool includeForces, bool includeEnergy);
+
+    // Apply body(i) for i in [0, count). Serial here; the CPU platform overrides
+    // to distribute the iterations across the platform thread pool.
+    virtual void parallelFor(OpenMM::ContextImpl& context, int count,
+                             const std::function<void(int)>& body);
 
     // Configuration
     int numAtoms;

@@ -15,6 +15,7 @@
 #include "openmm/Platform.h"
 #include <vector>
 #include <memory>
+#include <functional>
 
 namespace GridForcePlugin {
 
@@ -59,6 +60,10 @@ protected:
                            std::vector<OpenMM::Vec3>& posData,
                            std::vector<OpenMM::Vec3>& forceData,
                            bool includeForces, bool includeEnergy);
+
+    // Run an index range. Serial here; the CPU platform overrides to parallelize.
+    virtual void parallelFor(OpenMM::ContextImpl& context, int count,
+                             const std::function<void(int)>& body);
 
     // Configuration
     int numAtoms;
