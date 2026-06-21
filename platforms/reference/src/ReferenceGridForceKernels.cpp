@@ -66,6 +66,12 @@ inline double bspline_deriv1(double t) { return (3.0 * t * t - 4.0 * t) / 2.0; }
 inline double bspline_deriv2(double t) { return (-3.0 * t * t + 2.0 * t + 1.0) / 2.0; }
 inline double bspline_deriv3(double t) { return t * t / 2.0; }
 
+// Second derivatives of cubic B-spline basis functions (match CUDA InterpolationBasis.cuh)
+inline double bspline_deriv2_0(double t) { return 1.0 - t; }
+inline double bspline_deriv2_1(double t) { return 3.0 * t - 2.0; }
+inline double bspline_deriv2_2(double t) { return -3.0 * t + 1.0; }
+inline double bspline_deriv2_3(double t) { return t; }
+
 // Cubic Hermite basis functions for tricubic interpolation
 // These interpolate exactly through points while maintaining C1 continuity
 // h00, h01 are for function values; h10, h11 are for derivatives
@@ -728,6 +734,7 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                                              bool includeForces,
                                              bool includeEnergy) {
 
+    g_lastContext = &context;
     vector<Vec3> &posData = extractPositions(context);
     vector<Vec3> &forceData = extractForces(context);
 
@@ -1234,6 +1241,510 @@ vector<int> ReferenceCalcGridForceKernel::getParticleOutOfBoundsFlags() {
     // Reference platform does not support per-atom out-of-bounds tracking yet
     return vector<int>();
 }
+
+// ============================================================================
+// Per-atom Hessian (block-diagonal 3x3) implementation
+// ============================================================================
+//
+// GridForce is a per-atom external potential, so the Hessian is block-diagonal:
+// one symmetric 3x3 block per atom. Each block is d2E/dx_a dx_b for that atom,
+// where E = effectiveScaling * cap(invPower(interp(pos))). The math mirrors the
+// CUDA gridHessian.cu kernel and extends the Reference force path in execute():
+// the same interpolant value and gradient are computed, plus the interpolant
+// second derivative, then chained through the inv_power and runtime-cap
+// transforms and multiplied by the effective scaling factor.
+//
+// Output layout matches CUDA getHessianBlocks(): 6 doubles per atom in order
+// [xx, yy, zz, xy, xz, yz]. Out-of-bounds atoms get a zero block (the out-of-
+// bounds restraint is a global quadratic that this per-atom grid Hessian does
+// not include, matching the CUDA kernel which leaves the block at zero).
+
+namespace {
+
+// Symmetric 3x3 block stored as [xx, yy, zz, xy, xz, yz].
+struct Block3 {
+    double xx = 0.0, yy = 0.0, zz = 0.0, xy = 0.0, xz = 0.0, yz = 0.0;
+};
+
+// Apply the inv_power transform W = V^n (Reference semantics, n = g_inv_power > 0)
+// to the value, gradient (gx,gy,gz) and Hessian block, all in physical units.
+//   W'  = n * V^(n-1)
+//   W'' = n*(n-1) * V^(n-2)
+//   dW/dx           = W' * dV/dx
+//   d2W/dx_a dx_b   = W'' * dV/dx_a dV/dx_b + W' * d2V/dx_a dx_b
+inline void applyInvPowerChain(double invPower, double& v,
+                               double& gx, double& gy, double& gz,
+                               Block3& H) {
+    double base = v;
+    double w1 = invPower * std::pow(base, invPower - 1.0);
+    double w2 = invPower * (invPower - 1.0) * std::pow(base, invPower - 2.0);
+
+    H.xx = w2 * gx * gx + w1 * H.xx;
+    H.yy = w2 * gy * gy + w1 * H.yy;
+    H.zz = w2 * gz * gz + w1 * H.zz;
+    H.xy = w2 * gx * gy + w1 * H.xy;
+    H.xz = w2 * gx * gz + w1 * H.xz;
+    H.yz = w2 * gy * gz + w1 * H.yz;
+
+    gx *= w1;
+    gy *= w1;
+    gz *= w1;
+    v = std::pow(base, invPower);
+}
+
+// Apply the runtime tanh cap Y = C * tanh(W/C) to value, gradient and Hessian.
+//   Y'  = sech2(W/C)
+//   Y'' = -(2/C) * sech2(W/C) * tanh(W/C)
+//   d2Y/dx_a dx_b = Y' * d2W/dx_a dx_b + Y'' * dW/dx_a dW/dx_b
+inline void applyRuntimeCapChain(double cap, double& v,
+                                 double& gx, double& gy, double& gz,
+                                 Block3& H) {
+    double t = std::tanh(v / cap);
+    double sech2 = 1.0 - t * t;
+    double y1 = sech2;
+    double y2 = -2.0 * t * sech2 / cap;
+
+    H.xx = y1 * H.xx + y2 * gx * gx;
+    H.yy = y1 * H.yy + y2 * gy * gy;
+    H.zz = y1 * H.zz + y2 * gz * gz;
+    H.xy = y1 * H.xy + y2 * gx * gy;
+    H.xz = y1 * H.xz + y2 * gx * gz;
+    H.yz = y1 * H.yz + y2 * gy * gz;
+
+    gx *= y1;
+    gy *= y1;
+    gz *= y1;
+    v = cap * t;
+}
+
+}  // namespace
+
+void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<Vec3>& posData) {
+    const int nyz = g_counts[1] * g_counts[2];
+    const int natom_lig = (int)g_scaling_factors.size();
+    const int nx = g_counts[0], ny = g_counts[1], nz = g_counts[2];
+
+    g_hessianBlocks.assign(6 * natom_lig, 0.0);
+
+    const double effMin[3] = {g_effectiveMinX, g_effectiveMinY, g_effectiveMinZ};
+    const double effMax[3] = {g_effectiveMaxX, g_effectiveMaxY, g_effectiveMaxZ};
+
+    for (int ia = 0; ia < natom_lig; ++ia) {
+        int particle_idx = (g_ligand_atoms.empty()) ? ia : g_ligand_atoms[ia];
+
+        Vec3 pi_orig = posData[particle_idx];
+        Vec3 pi(pi_orig[0] - g_origin_x, pi_orig[1] - g_origin_y, pi_orig[2] - g_origin_z);
+
+        bool is_inside = true;
+        for (int k = 0; k < 3; ++k) {
+            if (!(pi[k] >= effMin[k] && pi[k] <= effMax[k]))
+                is_inside = false;
+        }
+
+        double groupScaling = 1.0;
+        int groupIdx = -1;
+        auto it = g_atomToGroup.find(particle_idx);
+        if (it != g_atomToGroup.end()) {
+            groupIdx = it->second;
+            groupScaling = g_groupScalingFactors[groupIdx];
+        }
+        double effectiveScaling = g_globalScalingFactor * groupScaling * g_scaling_factors[ia];
+
+        double effectiveCap = g_runtimeCap;
+        if (groupIdx >= 0 && groupIdx < (int)g_groupRuntimeCaps.size() && g_groupRuntimeCaps[groupIdx] > 0.0) {
+            effectiveCap = g_groupRuntimeCaps[groupIdx];
+        }
+
+        if (!is_inside || effectiveScaling == 0.0)
+            continue;  // leave the block at zero (matches CUDA)
+
+        int ix = (int)(pi[0] / g_spacing[0]);
+        int iy = (int)(pi[1] / g_spacing[1]);
+        int iz = (int)(pi[2] / g_spacing[2]);
+        double fx = (pi[0] / g_spacing[0]) - ix;
+        double fy = (pi[1] / g_spacing[1]) - iy;
+        double fz = (pi[2] / g_spacing[2]) - iz;
+
+        double interpolated = 0.0;
+        double gx = 0.0, gy = 0.0, gz = 0.0;     // physical gradient dV/dx
+        Block3 H;                                 // physical Hessian d2V/dx dx
+
+        if (g_interpolationMethod == 1) {
+            // CUBIC B-SPLINE (4x4x4 stencil)
+            double bx[4] = {bspline_basis0(fx), bspline_basis1(fx), bspline_basis2(fx), bspline_basis3(fx)};
+            double by[4] = {bspline_basis0(fy), bspline_basis1(fy), bspline_basis2(fy), bspline_basis3(fy)};
+            double bz[4] = {bspline_basis0(fz), bspline_basis1(fz), bspline_basis2(fz), bspline_basis3(fz)};
+            double dbx[4] = {bspline_deriv0(fx), bspline_deriv1(fx), bspline_deriv2(fx), bspline_deriv3(fx)};
+            double dby[4] = {bspline_deriv0(fy), bspline_deriv1(fy), bspline_deriv2(fy), bspline_deriv3(fy)};
+            double dbz[4] = {bspline_deriv0(fz), bspline_deriv1(fz), bspline_deriv2(fz), bspline_deriv3(fz)};
+            double d2bx[4] = {bspline_deriv2_0(fx), bspline_deriv2_1(fx), bspline_deriv2_2(fx), bspline_deriv2_3(fx)};
+            double d2by[4] = {bspline_deriv2_0(fy), bspline_deriv2_1(fy), bspline_deriv2_2(fy), bspline_deriv2_3(fy)};
+            double d2bz[4] = {bspline_deriv2_0(fz), bspline_deriv2_1(fz), bspline_deriv2_2(fz), bspline_deriv2_3(fz)};
+
+            for (int i = 0; i < 4; i++) {
+                int ggx = std::min(std::max(ix - 1 + i, 0), nx - 1);
+                for (int j = 0; j < 4; j++) {
+                    int ggy = std::min(std::max(iy - 1 + j, 0), ny - 1);
+                    for (int k = 0; k < 4; k++) {
+                        int ggz = std::min(std::max(iz - 1 + k, 0), nz - 1);
+                        double val = g_vals[ggx * nyz + ggy * nz + ggz];
+                        interpolated += bx[i] * by[j] * bz[k] * val;
+                        gx += dbx[i] * by[j] * bz[k] * val;
+                        gy += bx[i] * dby[j] * bz[k] * val;
+                        gz += bx[i] * by[j] * dbz[k] * val;
+                        H.xx += d2bx[i] * by[j] * bz[k] * val;
+                        H.yy += bx[i] * d2by[j] * bz[k] * val;
+                        H.zz += bx[i] * by[j] * d2bz[k] * val;
+                        H.xy += dbx[i] * dby[j] * bz[k] * val;
+                        H.xz += dbx[i] * by[j] * dbz[k] * val;
+                        H.yz += bx[i] * dby[j] * dbz[k] * val;
+                    }
+                }
+            }
+            // unit-cell -> physical (grid values stored directly: divide by spacing)
+            gx /= g_spacing[0]; gy /= g_spacing[1]; gz /= g_spacing[2];
+            H.xx /= g_spacing[0] * g_spacing[0];
+            H.yy /= g_spacing[1] * g_spacing[1];
+            H.zz /= g_spacing[2] * g_spacing[2];
+            H.xy /= g_spacing[0] * g_spacing[1];
+            H.xz /= g_spacing[0] * g_spacing[2];
+            H.yz /= g_spacing[1] * g_spacing[2];
+
+        } else if (g_interpolationMethod == 2) {
+            // TRICUBIC HERMITE is unsupported for the Hessian (mirrors CUDA, whose
+            // computeGridHessian handles only methods 1, 3, 4). The Reference
+            // tricubic force path is a non-tensor-product Hermite construction with
+            // finite-difference corner slopes whose reported gradient already drops
+            // cross-stage terms, so it has no self-consistent analytic Hessian and
+            // no trusted reference to validate against.
+            throw OpenMMException("GridForce: Hessian not supported for tricubic Hermite (method 2)");
+
+        } else if (g_interpolationMethod == 3) {
+            // TRIQUINTIC HERMITE. Mirrors the execute() assembly: build the 216
+            // polynomial coefficients, evaluate value/gradient/Hessian in unit-cell
+            // coords, then convert to physical units. Note the Reference stores
+            // corner derivatives divided by spacing^n, so (matching the force path)
+            // the unit-cell gradient is MULTIPLIED by spacing and the Hessian by
+            // spacing^2 -- this yields the same physical-unit values as CUDA.
+            if (g_derivatives.empty()) {
+                throw OpenMMException("GridForce: Triquintic Hessian (method=3) requires precomputed derivatives.");
+            }
+            int totalPoints = nx * ny * nz;
+            int x0 = ix, y0 = iy, z0 = iz, x1 = ix + 1, y1 = iy + 1, z1 = iz + 1;
+            int corners[8][3] = {
+                {x0, y0, z0}, {x1, y0, z0}, {x0, y1, z0}, {x1, y1, z0},
+                {x0, y0, z1}, {x1, y0, z1}, {x0, y1, z1}, {x1, y1, z1}
+            };
+            std::vector<double> X(216);
+            for (int d = 0; d < 27; d++) {
+                for (int c = 0; c < 8; c++) {
+                    int point_idx = corners[c][0] * nyz + corners[c][1] * nz + corners[c][2];
+                    X[d * 8 + c] = g_derivatives[d * totalPoints + point_idx];
+                }
+            }
+            std::vector<double> a(216, 0.0);
+            const double scale = 0.125;
+            for (int i = 0; i < 216; i++) {
+                for (int j = 0; j < 216; j++)
+                    a[i] += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
+                a[i] *= scale;
+            }
+            double sx[6], sy[6], sz[6];
+            sx[0] = sy[0] = sz[0] = 1.0;
+            for (int p = 1; p < 6; p++) {
+                sx[p] = sx[p-1] * fx;
+                sy[p] = sy[p-1] * fy;
+                sz[p] = sz[p-1] * fz;
+            }
+            double value = 0.0, dvx = 0.0, dvy = 0.0, dvz = 0.0;
+            double hxx = 0.0, hyy = 0.0, hzz = 0.0, hxy = 0.0, hxz = 0.0, hyz = 0.0;
+            for (int k = 0; k < 6; k++) {
+                for (int j = 0; j < 6; j++) {
+                    for (int i = 0; i < 6; i++) {
+                        double c = a[i + 6*j + 36*k];
+                        value += c * sx[i] * sy[j] * sz[k];
+                        if (i > 0) dvx += c * i * sx[i-1] * sy[j] * sz[k];
+                        if (j > 0) dvy += c * j * sx[i] * sy[j-1] * sz[k];
+                        if (k > 0) dvz += c * k * sx[i] * sy[j] * sz[k-1];
+                        if (i > 1) hxx += c * i * (i-1) * sx[i-2] * sy[j] * sz[k];
+                        if (j > 1) hyy += c * j * (j-1) * sx[i] * sy[j-2] * sz[k];
+                        if (k > 1) hzz += c * k * (k-1) * sx[i] * sy[j] * sz[k-2];
+                        if (i > 0 && j > 0) hxy += c * i * j * sx[i-1] * sy[j-1] * sz[k];
+                        if (i > 0 && k > 0) hxz += c * i * k * sx[i-1] * sy[j] * sz[k-1];
+                        if (j > 0 && k > 0) hyz += c * j * k * sx[i] * sy[j-1] * sz[k-1];
+                    }
+                }
+            }
+            interpolated = value;
+            // unit-cell -> physical (matches force-path convention: MULTIPLY by spacing)
+            gx = dvx * g_spacing[0];
+            gy = dvy * g_spacing[1];
+            gz = dvz * g_spacing[2];
+            H.xx = hxx * g_spacing[0] * g_spacing[0];
+            H.yy = hyy * g_spacing[1] * g_spacing[1];
+            H.zz = hzz * g_spacing[2] * g_spacing[2];
+            H.xy = hxy * g_spacing[0] * g_spacing[1];
+            H.xz = hxz * g_spacing[0] * g_spacing[2];
+            H.yz = hyz * g_spacing[1] * g_spacing[2];
+
+        } else {
+            // TRILINEAR. The interpolant is multilinear, so all pure second
+            // derivatives vanish; only the three mixed terms are nonzero within
+            // the cell. Build from the 8 corner values directly.
+            int im = ix * nyz + iy * nz + iz;
+            int imp = im + nz;
+            int ip = im + nyz;
+            int ipp = ip + nz;
+            double vmmm = g_vals[im],   vmmp = g_vals[im + 1];
+            double vmpm = g_vals[imp],  vmpp = g_vals[imp + 1];
+            double vpmm = g_vals[ip],   vpmp = g_vals[ip + 1];
+            double vppm = g_vals[ipp],  vppp = g_vals[ipp + 1];
+            double ax = 1.0 - fx, ay = 1.0 - fy, az = 1.0 - fz;
+
+            double vmm = az * vmmm + fz * vmmp;
+            double vmp = az * vmpm + fz * vmpp;
+            double vpm = az * vpmm + fz * vpmp;
+            double vpp = az * vppm + fz * vppp;
+            double vm = ay * vmm + fy * vmp;
+            double vp = ay * vpm + fy * vpp;
+            interpolated = ax * vm + fx * vp;
+
+            // fractional gradient (matches execute())
+            double gfx = -vm + vp;
+            double gfy = (-vmm + vmp) * ax + (-vpm + vpp) * fx;
+            double gfz = ((-vmmm + vmmp) * ay + (-vmpm + vmpp) * fy) * ax +
+                         ((-vpmm + vpmp) * ay + (-vppm + vppp) * fy) * fx;
+
+            // fractional second derivatives (pure terms are zero)
+            // d2/dfx dfy : derivative of gfx w.r.t. fy = -(dvm/dfy) + (dvp/dfy)
+            double dvm_dfy = -vmm + vmp;     // d vm / dfy
+            double dvp_dfy = -vpm + vpp;     // d vp / dfy
+            double hfxy = -dvm_dfy + dvp_dfy;
+            // d2/dfx dfz : derivative of gfx w.r.t fz
+            double dvm_dfz = ay * (-vmmm + vmmp) + fy * (-vmpm + vmpp);
+            double dvp_dfz = ay * (-vpmm + vpmp) + fy * (-vppm + vppp);
+            double hfxz = -dvm_dfz + dvp_dfz;
+            // d2/dfy dfz : derivative of gfy w.r.t fz
+            double dvmm_dfz = -vmmm + vmmp;
+            double dvmp_dfz = -vmpm + vmpp;
+            double dvpm_dfz = -vpmm + vpmp;
+            double dvpp_dfz = -vppm + vppp;
+            double hfyz = (-dvmm_dfz + dvmp_dfz) * ax + (-dvpm_dfz + dvpp_dfz) * fx;
+
+            gx = gfx / g_spacing[0];
+            gy = gfy / g_spacing[1];
+            gz = gfz / g_spacing[2];
+            H.xx = 0.0; H.yy = 0.0; H.zz = 0.0;
+            H.xy = hfxy / (g_spacing[0] * g_spacing[1]);
+            H.xz = hfxz / (g_spacing[0] * g_spacing[2]);
+            H.yz = hfyz / (g_spacing[1] * g_spacing[2]);
+        }
+
+        // Chain rule: inv_power transform W = V^n, then runtime tanh cap.
+        // Both act on the physical-unit scalar field and its derivatives.
+        if (g_inv_power > 0.0)
+            applyInvPowerChain(g_inv_power, interpolated, gx, gy, gz, H);
+        if (effectiveCap > 0.0)
+            applyRuntimeCapChain(effectiveCap, interpolated, gx, gy, gz, H);
+
+        // Multiply by the effective per-atom scaling factor.
+        H.xx *= effectiveScaling; H.yy *= effectiveScaling; H.zz *= effectiveScaling;
+        H.xy *= effectiveScaling; H.xz *= effectiveScaling; H.yz *= effectiveScaling;
+
+        int off = ia * 6;
+        g_hessianBlocks[off + 0] = H.xx;
+        g_hessianBlocks[off + 1] = H.yy;
+        g_hessianBlocks[off + 2] = H.zz;
+        g_hessianBlocks[off + 3] = H.xy;
+        g_hessianBlocks[off + 4] = H.xz;
+        g_hessianBlocks[off + 5] = H.yz;
+    }
+}
+
+void ReferenceCalcGridForceKernel::computeHessian() {
+    // Supported: trilinear (0), cubic B-spline (1), triquintic Hermite (3).
+    // Tricubic Hermite (2) is unsupported (mirrors CUDA computeGridHessian).
+    if (g_interpolationMethod == 2) {
+        throw OpenMMException("GridForce: Hessian not supported for tricubic Hermite (method 2)");
+    }
+    if (g_interpolationMethod != 0 && g_interpolationMethod != 1 && g_interpolationMethod != 3) {
+        throw OpenMMException("GridForce: unsupported interpolation method for Hessian");
+    }
+    if (g_lastContext == nullptr)
+        throw OpenMMException("GridForce: execute() must run before computeHessian()");
+    computeHessianForPositions(extractPositions(*g_lastContext));
+}
+
+vector<double> ReferenceCalcGridForceKernel::getHessianBlocks() {
+    return g_hessianBlocks;
+}
+
+void ReferenceCalcGridForceKernel::computeThirdDerivatives() {
+    // CUDA supports third derivatives only for quintic B-spline (method 4), which
+    // the Reference platform does not implement. Match CUDA's contract: error for
+    // unsupported methods.
+    throw OpenMMException("Third derivative computation only supported for quintic B-spline (method 4) interpolation");
+}
+
+vector<double> ReferenceCalcGridForceKernel::getThirdDerivativeBlocks() {
+    return g_thirdDerivBlocks;
+}
+
+namespace {
+
+// Analytical eigenvalues of a 3x3 symmetric matrix (Cardano), sorted ascending.
+// Mirrors gridHessianAnalysis.cu eigenvalues_3x3_symmetric.
+void eigenvalues3x3(double dxx, double dyy, double dzz,
+                    double dxy, double dxz, double dyz, double lambda[3]) {
+    double trace = dxx + dyy + dzz;
+    double q = trace / 3.0;
+    double a00 = dxx - q, a11 = dyy - q, a22 = dzz - q;
+    double p2 = (a00*a00 + a11*a11 + a22*a22 + 2.0*(dxy*dxy + dxz*dxz + dyz*dyz)) / 6.0;
+    double p = std::sqrt(p2);
+    if (p < 1e-10) {
+        lambda[0] = lambda[1] = lambda[2] = q;
+        return;
+    }
+    double inv_p = 1.0 / p;
+    double b00 = a00 * inv_p, b11 = a11 * inv_p, b22 = a22 * inv_p;
+    double b01 = dxy * inv_p, b02 = dxz * inv_p, b12 = dyz * inv_p;
+    double detB = b00 * (b11*b22 - b12*b12)
+                - b01 * (b01*b22 - b12*b02)
+                + b02 * (b01*b12 - b11*b02);
+    double r = detB * 0.5;
+    r = std::min(1.0, std::max(-1.0, r));
+    double phi = std::acos(r) / 3.0;
+    const double twoPi3 = 2.0 * 3.14159265358979323846 / 3.0;
+    double eig0 = 2.0 * p * std::cos(phi);
+    double eig1 = 2.0 * p * std::cos(phi - twoPi3);
+    double eig2 = 2.0 * p * std::cos(phi + twoPi3);
+    lambda[0] = eig2 + q;  // smallest
+    lambda[1] = eig1 + q;  // middle
+    lambda[2] = eig0 + q;  // largest
+}
+
+// Eigenvector for an eigenvalue via row cross products (matches CUDA).
+void eigenvectorFor(double dxx, double dyy, double dzz,
+                    double dxy, double dxz, double dyz,
+                    double lambda, double v[3]) {
+    double a00 = dxx - lambda, a11 = dyy - lambda, a22 = dzz - lambda;
+    double v0 = dxy * dyz - a11 * dxz;
+    double v1 = dxz * dxy - a00 * dyz;
+    double v2 = a00 * a11 - dxy * dxy;
+    double norm = std::sqrt(v0*v0 + v1*v1 + v2*v2);
+    if (norm < 1e-10) {
+        v0 = dxy * a22 - dyz * dxz;
+        v1 = dxz * dxz - a00 * a22;
+        v2 = a00 * dyz - dxz * dxy;
+        norm = std::sqrt(v0*v0 + v1*v1 + v2*v2);
+    }
+    if (norm < 1e-10) {
+        v0 = a11 * a22 - dyz * dyz;
+        v1 = dyz * dxz - dxy * a22;
+        v2 = dxy * dyz - a11 * dxz;
+        norm = std::sqrt(v0*v0 + v1*v1 + v2*v2);
+    }
+    if (norm < 1e-10) {
+        v[0] = 1.0; v[1] = 0.0; v[2] = 0.0;
+        return;
+    }
+    double inv = 1.0 / norm;
+    v[0] = v0 * inv; v[1] = v1 * inv; v[2] = v2 * inv;
+}
+
+}  // namespace
+
+void ReferenceCalcGridForceKernel::analyzeHessian(float temperature) {
+    if (g_interpolationMethod != 1 && g_interpolationMethod != 3) {
+        throw OpenMMException("Hessian analysis only supported for bspline (method 1) and triquintic (method 3) interpolation");
+    }
+    if (g_hessianBlocks.empty()) {
+        // Compute on demand from the last context, matching the GPU contract where
+        // computeHessian() must precede analyzeHessian().
+        if (g_lastContext == nullptr)
+            throw OpenMMException("Must call computeHessian() before analyzeHessian()");
+        computeHessianForPositions(extractPositions(*g_lastContext));
+    }
+
+    int numAtoms = (int)g_hessianBlocks.size() / 6;
+    const double kB = 0.008314462618;  // kJ/(mol·K)
+    const double kT = kB * (double)temperature;
+    const double M_PI_D = 3.14159265358979323846;
+
+    g_eigenvalues.assign(3 * numAtoms, 0.0);
+    g_eigenvectors.assign(9 * numAtoms, 0.0);
+    g_meanCurvature.assign(numAtoms, 0.0);
+    g_totalCurvature.assign(numAtoms, 0.0);
+    g_gaussianCurvature.assign(numAtoms, 0.0);
+    g_fracAnisotropy.assign(numAtoms, 0.0);
+    g_entropy.assign(numAtoms, 0.0);
+    g_minEigenvalue.assign(numAtoms, 0.0);
+    g_numNegative.assign(numAtoms, 0);
+    g_totalEntropy = 0.0;
+
+    for (int i = 0; i < numAtoms; i++) {
+        double dxx = g_hessianBlocks[6*i + 0];
+        double dyy = g_hessianBlocks[6*i + 1];
+        double dzz = g_hessianBlocks[6*i + 2];
+        double dxy = g_hessianBlocks[6*i + 3];
+        double dxz = g_hessianBlocks[6*i + 4];
+        double dyz = g_hessianBlocks[6*i + 5];
+
+        double lambda[3];
+        eigenvalues3x3(dxx, dyy, dzz, dxy, dxz, dyz, lambda);
+        g_eigenvalues[3*i + 0] = lambda[0];
+        g_eigenvalues[3*i + 1] = lambda[1];
+        g_eigenvalues[3*i + 2] = lambda[2];
+
+        for (int e = 0; e < 3; e++) {
+            double v[3];
+            eigenvectorFor(dxx, dyy, dzz, dxy, dxz, dyz, lambda[e], v);
+            g_eigenvectors[9*i + 3*e + 0] = v[0];
+            g_eigenvectors[9*i + 3*e + 1] = v[1];
+            g_eigenvectors[9*i + 3*e + 2] = v[2];
+        }
+
+        double mean = (lambda[0] + lambda[1] + lambda[2]) / 3.0;
+        double total = lambda[0] + lambda[1] + lambda[2];
+        double gauss = lambda[0] * lambda[1] * lambda[2];
+        g_meanCurvature[i] = mean;
+        g_totalCurvature[i] = total;
+        g_gaussianCurvature[i] = gauss;
+        g_minEigenvalue[i] = lambda[0];
+        g_numNegative[i] = (lambda[0] < 0.0) + (lambda[1] < 0.0) + (lambda[2] < 0.0);
+
+        double diff0 = lambda[0] - mean, diff1 = lambda[1] - mean, diff2 = lambda[2] - mean;
+        double num = diff0*diff0 + diff1*diff1 + diff2*diff2;
+        double den = lambda[0]*lambda[0] + lambda[1]*lambda[1] + lambda[2]*lambda[2];
+        double fa = 0.0;
+        if (den > 1e-20)
+            fa = std::sqrt(num / (2.0 * den));
+        g_fracAnisotropy[i] = fa;
+
+        if (lambda[0] > 1e-10 && lambda[1] > 1e-10 && lambda[2] > 1e-10) {
+            double two_pi_kT = 2.0 * M_PI_D * kT;
+            double S = 0.0;
+            S += 0.5 * (1.0 + std::log(two_pi_kT / lambda[0]));
+            S += 0.5 * (1.0 + std::log(two_pi_kT / lambda[1]));
+            S += 0.5 * (1.0 + std::log(two_pi_kT / lambda[2]));
+            g_entropy[i] = S;
+            g_totalEntropy += S;
+        } else {
+            g_entropy[i] = std::nan("");
+        }
+    }
+}
+
+vector<double> ReferenceCalcGridForceKernel::getEigenvalues() { return g_eigenvalues; }
+vector<double> ReferenceCalcGridForceKernel::getEigenvectors() { return g_eigenvectors; }
+vector<double> ReferenceCalcGridForceKernel::getMeanCurvature() { return g_meanCurvature; }
+vector<double> ReferenceCalcGridForceKernel::getTotalCurvature() { return g_totalCurvature; }
+vector<double> ReferenceCalcGridForceKernel::getGaussianCurvature() { return g_gaussianCurvature; }
+vector<double> ReferenceCalcGridForceKernel::getFracAnisotropy() { return g_fracAnisotropy; }
+vector<double> ReferenceCalcGridForceKernel::getEntropy() { return g_entropy; }
+vector<double> ReferenceCalcGridForceKernel::getMinEigenvalue() { return g_minEigenvalue; }
+vector<int> ReferenceCalcGridForceKernel::getNumNegative() { return g_numNegative; }
+double ReferenceCalcGridForceKernel::getTotalEntropy() { return g_totalEntropy; }
 
 // ============================================================================
 // ReferenceCalcBondedHessianKernel implementation

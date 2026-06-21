@@ -202,6 +202,112 @@ def grid_section(specs):
         print(f"\n=== {case} ===")
         compare(case, eval_all(build, inpcrd.positions, specs), specs)
 
+    _grid_hessian_check(specs)
+
+
+def _grid_hessian_check(specs):
+    """Per-atom GridForce Hessian (block-diagonal 3x3) on an in-bounds quadratic
+    grid with off-diagonal curvature. Cubic B-spline reproduces quadratics
+    exactly, so the analytic answer is known (guards against a degenerate
+    all-zero pass). The ligand grid above is unsuitable here: those atoms land in
+    the out-of-bounds restraint region where the interpolant curvature is zero."""
+    print("\n=== GridForce Hessian (in-bounds quadratic grid) ===")
+    origin = (-0.5, -0.5, -0.5)
+    sp = 0.05
+    nx = ny = nz = 20
+    grid = []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                x, y, z = origin[0] + i*sp, origin[1] + j*sp, origin[2] + k*sp
+                grid.append(x*x + 2*y*y + 3*z*z + 0.5*x*y + 0.3*x*z + 0.1*y*z)
+    expected = np.array([2.0, 4.0, 6.0, 0.5, 0.3, 0.1])  # [xx,yy,zz,xy,xz,yz]
+    apos = [[0.07, -0.04, 0.02]]
+
+    def build():
+        s = mm.System()
+        s.addParticle(12.0)
+        f = gfp.GridForce()
+        f.setInterpolationMethod(gfp.INTERP_TRICUBIC_BSPLINE)
+        f.setGridOrigin(*origin)
+        f.addGridSpacing(sp, sp, sp)
+        f.addGridCounts(nx, ny, nz)
+        f.setGridValues(grid)
+        f.addScalingFactor(1.0)
+        s.addForce(f)
+        return s, f
+
+    hess = {}
+    for spec in specs:
+        s, force = build()
+        try:
+            ctx, _ = _context(s, spec)
+            ctx.setPositions(apos)
+            ctx.getState(getEnergy=True)
+            force.computeHessian(ctx)
+            hess[spec[0]] = np.array(force.getHessianBlocks(ctx))
+            del ctx
+        except Exception as e:
+            hess[spec[0]] = ('EXC', repr(e))
+    # Known-answer check on Reference (a quadratic's bspline Hessian is exact).
+    ref = hess.get(REFERENCE)
+    if ref is None or isinstance(ref, tuple) or ref.shape != expected.shape:
+        print(f"    FAIL Reference    known-answer unavailable ({ref})  [GridForce Hessian vs analytic]")
+        _failures.append(("GridForce Hessian vs analytic", REFERENCE, 'hessian', str(ref)))
+    else:
+        d = float(np.max(np.abs(ref - expected)))
+        ok = d < 1e-4
+        print(f"    {'OK' if ok else 'FAIL':4s} Reference    analytic abs={d:.3e} (expect [2,4,6,.5,.3,.1])  [GridForce Hessian]")
+        if not ok:
+            _failures.append(("GridForce Hessian vs analytic", REFERENCE, 'hessian', f"abs={d:.3e}"))
+    _compare_hessian("GridForce Hessian", hess, specs)
+
+    # Eigen-analysis (eigenvalues / curvature / entropy). The Hessian above is the
+    # constant matrix [[2,.5,.3],[.5,4,.1],[.3,.1,6]], whose eigenvalues are known.
+    print("\n=== GridForce Hessian eigen-analysis (in-bounds quadratic grid) ===")
+    H = np.array([[2.0, 0.5, 0.3], [0.5, 4.0, 0.1], [0.3, 0.1, 6.0]])
+    eig_expected = np.sort(np.linalg.eigvalsh(H))
+    eigs = {}
+    for spec in specs:
+        s, force = build()
+        try:
+            ctx, _ = _context(s, spec)
+            ctx.setPositions(apos)
+            ctx.getState(getEnergy=True)
+            force.computeHessian(ctx)
+            a = force.analyzeHessian(ctx, 300.0)
+            eigs[spec[0]] = (np.sort(np.array(list(a.eigenvalues))),
+                             list(a.numNegative)[0], a.totalEntropy)
+            del ctx
+        except Exception as e:
+            eigs[spec[0]] = ('EXC', repr(e))
+    def _eig_exc(v):
+        return v is None or (isinstance(v, tuple) and isinstance(v[0], str))
+    refa = eigs.get(REFERENCE)
+    if _eig_exc(refa):
+        print(f"    FAIL Reference    eigen-analysis unavailable ({refa})  [GridForce eigen]")
+        _failures.append(("GridForce eigen", REFERENCE, 'eigen', str(refa)))
+    else:
+        de = float(np.max(np.abs(refa[0] - eig_expected)))
+        ok = de < 1e-4 and refa[1] == 0
+        print(f"    {'OK' if ok else 'FAIL':4s} Reference    eig abs={de:.3e} numNeg={refa[1]} "
+              f"(expect {[round(float(v),4) for v in eig_expected]}, 0)  [GridForce eigen]")
+        if not ok:
+            _failures.append(("GridForce eigen", REFERENCE, 'eigen', f"abs={de:.3e} numNeg={refa[1]}"))
+    for spec in specs:
+        name = spec[0]
+        if name == REFERENCE:
+            continue
+        cur = eigs.get(name)
+        if _eig_exc(cur) or _eig_exc(refa):
+            continue
+        dd = float(np.max(np.abs(cur[0] - refa[0])))
+        tol = TOL[spec[3]]['abs_h']
+        ok = dd < tol
+        print(f"    {'OK' if ok else 'FAIL':4s} {name:12s} eig abs={dd:.3e} (tol abs<{tol:g}) vs Reference  [GridForce eigen]")
+        if not ok:
+            _failures.append(("GridForce eigen", name, 'eigen', f"abs={dd:.3e}"))
+
 
 # ----------------------------------------------------- IsolatedNonbondedForce
 def nb_section(specs):

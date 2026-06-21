@@ -42,6 +42,7 @@
 
 namespace OpenMM {
     class NonbondedForce;
+    class ContextImpl;
 }
 
 namespace GridForcePlugin {
@@ -90,7 +91,49 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     std::vector<double> getParticleGroupAtomRawEnergies();
     std::vector<int> getParticleOutOfBoundsFlags();
 
+    // ---- Per-atom Hessian (block-diagonal 3x3 per atom) ----
+    void computeHessian() override;
+    std::vector<double> getHessianBlocks() override;
+    void computeThirdDerivatives() override;
+    std::vector<double> getThirdDerivativeBlocks() override;
+    void analyzeHessian(float temperature) override;
+    std::vector<double> getEigenvalues() override;
+    std::vector<double> getEigenvectors() override;
+    std::vector<double> getMeanCurvature() override;
+    std::vector<double> getTotalCurvature() override;
+    std::vector<double> getGaussianCurvature() override;
+    std::vector<double> getFracAnisotropy() override;
+    std::vector<double> getEntropy() override;
+    std::vector<double> getMinEigenvalue() override;
+    std::vector<int> getNumNegative() override;
+    double getTotalEntropy() override;
+
    private:
+    /**
+     * Compute the per-atom 3x3 interpolant Hessian blocks for the current
+     * positions. Shared by computeHessian() (and used to seed analyzeHessian()).
+     * Output is 6 components per ligand atom: [xx, yy, zz, xy, xz, yz].
+     */
+    void computeHessianForPositions(const std::vector<OpenMM::Vec3>& posData);
+
+    // Cached pointer to the last context passed to execute(); positions are read
+    // from it inside computeHessian()/computeThirdDerivatives().
+    OpenMM::ContextImpl* g_lastContext = nullptr;
+
+    // Hessian / analysis result storage (mutable cache, downloaded on demand).
+    std::vector<double> g_hessianBlocks;       // 6 per atom
+    std::vector<double> g_thirdDerivBlocks;    // 10 per atom
+    std::vector<double> g_eigenvalues;         // 3 per atom
+    std::vector<double> g_eigenvectors;        // 9 per atom
+    std::vector<double> g_meanCurvature;
+    std::vector<double> g_totalCurvature;
+    std::vector<double> g_gaussianCurvature;
+    std::vector<double> g_fracAnisotropy;
+    std::vector<double> g_entropy;
+    std::vector<double> g_minEigenvalue;
+    std::vector<int> g_numNegative;
+    double g_totalEntropy = 0.0;
+
     /**
      * Generate grid from receptor atoms and NonbondedForce/IsolatedNonbondedForce parameters.
      *
