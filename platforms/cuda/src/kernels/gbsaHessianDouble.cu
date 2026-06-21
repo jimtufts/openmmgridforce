@@ -10,9 +10,9 @@
 // a ~1% relative floor on near-cancelled Hessian elements. These
 // variants do every step in double and store doubles between kernels.
 //
-// All upstream-shared buffers (bornRadii, hct*, dE_dR, radii, charges,
-// scaleFactors, posq, receptor*) stay float — the force path owns them.
-// Float values are cast to double on read.
+// Upstream-shared scalar/position buffers (dE_dR, radii, charges,
+// scaleFactors, posq, receptor*) are bound at context precision (real),
+// matching the host uploads. Their values are cast to double on read.
 //
 // Constants OBC_ALPHA / OBC_BETA / OBC_GAMMA / DIELECTRIC_OFFSET are
 // #defined in gbsaGridForce.cu; the file-encoder bundles all .cu files
@@ -122,13 +122,13 @@ extern "C" __global__ void convertTiledHCTToDouble(
 extern "C" __global__ void computeHctReceptorPairwiseDouble(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
+    const real* __restrict__ ligandRadii,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     int totalParticles,
     double* __restrict__ hctReceptorOut
@@ -161,7 +161,7 @@ extern "C" __global__ void computeHctReceptorPairwiseDouble(
 
     double hct = 0.0;
     for (int rj = 0; rj < numReceptorAtoms; rj++) {
-        float3 pj = receptorPositions[rj];
+        real4 pj = receptorPositions[rj];
         double dx = pk_x - (double)pj.x;
         double dy = pk_y - (double)pj.y;
         double dz = pk_z - (double)pj.z;
@@ -195,8 +195,8 @@ extern "C" __global__ void computeHctReceptorPairwiseDouble(
 extern "C" __global__ void computeHctLigandPairwiseDouble(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ ligandRadii,
-    const float* __restrict__ ligandScaleFactors,
+    const real* __restrict__ ligandRadii,
+    const real* __restrict__ ligandScaleFactors,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
@@ -269,7 +269,7 @@ extern "C" __global__ void computeHctLigandPairwiseDouble(
 // Both upstream HCT inputs come from the double pair-loop kernels
 // (computeHctReceptorPairwiseDouble + computeHctLigandPairwiseDouble).
 extern "C" __global__ void computeBornRadiiOBCDouble(
-    const float* __restrict__ radii,
+    const real* __restrict__ radii,
     const double* __restrict__ hctReceptorD,
     const double* __restrict__ hctLigand,
     int numAtoms,
@@ -302,15 +302,14 @@ extern "C" __global__ void computeBornRadiiOBCDouble(
 // Per-atom OBC2 transform: psi_s -> Born radius and chain-rule factors
 // dR/dPsi, d2R/dPsi2, dE/dHCT. Reads double bornRadii + double
 // hctReceptor (recomputed for the Hessian path from the fixed-point
-// buffer) plus float hctLigand cast to double. dE_dR_in stays float
-// because the J^T M J error analysis showed dE_dR's float precision
-// has negligible impact on Hessian element accuracy at Mpro scale.
+// buffer) plus hctLigand cast to double. dE_dR_in is read at context
+// precision (real) and cast to double.
 extern "C" __global__ void prepareHessianIntermediatesDouble(
-    const float* __restrict__ radii,
+    const real* __restrict__ radii,
     const double* __restrict__ bornRadii,
     const double* __restrict__ hctReceptor,
     const double* __restrict__ hctLigand,
-    const float* __restrict__ dE_dR_in,
+    const real* __restrict__ dE_dR_in,
     int numAtoms,
     int templateNumAtoms,
     double* __restrict__ dR_dPsi_out,
@@ -370,16 +369,16 @@ extern "C" __global__ void prepareHessianIntermediatesDouble(
 extern "C" __global__ void computeHCTJacobianPairwiseDouble(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
-    const float* __restrict__ scaleFactors,
+    const real* __restrict__ radii,
+    const real* __restrict__ scaleFactors,
     const int* __restrict__ exclusionAtoms,
     const int* __restrict__ exclusionStart,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     int totalParticles,
     double* __restrict__ jacobian
@@ -418,7 +417,7 @@ extern "C" __global__ void computeHCTJacobianPairwiseDouble(
     // Receptor pairwise sum (only self-diagonal block of J accumulates;
     // receptor atoms are frozen so off-diagonal entries are zero).
     for (int rj = 0; rj < numReceptorAtoms; rj++) {
-        float3 pj = receptorPositions[rj];
+        real4 pj = receptorPositions[rj];
         double dx = pk_x - (double)pj.x;
         double dy = pk_y - (double)pj.y;
         double dz = pk_z - (double)pj.z;
@@ -493,13 +492,13 @@ extern "C" __global__ void computeHCTJacobianPairwiseDouble(
 extern "C" __global__ void computeReceptorPairwiseHessianDouble(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ radii,
+    const real* __restrict__ radii,
     const int* __restrict__ groupStart,
     int numGroups,
     int templateNumAtoms,
-    const float3* __restrict__ receptorPositions,
-    const float* __restrict__ receptorRadii,
-    const float* __restrict__ receptorScaleFactors,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorScaleFactors,
     int numReceptorAtoms,
     int totalParticles,
     double* __restrict__ hessianOut       // [N * 6]: xx, yy, zz, xy, xz, yz
@@ -531,7 +530,7 @@ extern "C" __global__ void computeReceptorPairwiseHessianDouble(
     double Hxy = 0.0, Hxz = 0.0, Hyz = 0.0;
 
     for (int rj = 0; rj < numReceptorAtoms; rj++) {
-        float3 pj = receptorPositions[rj];
+        real4 pj = receptorPositions[rj];
         double dx = pk_x - (double)pj.x;
         double dy = pk_y - (double)pj.y;
         double dz = pk_z - (double)pj.z;
@@ -579,12 +578,12 @@ extern "C" __global__ void computeReceptorPairwiseHessianDouble(
 extern "C" __global__ void computeBornCouplingMatrixDouble(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ charges,
-    const float* __restrict__ intrinsicRadii,
+    const real* __restrict__ charges,
+    const real* __restrict__ intrinsicRadii,
     const double* __restrict__ bornRadii,
     const double* __restrict__ dR_dPsi,
     const double* __restrict__ d2R_dPsi2,
-    const float* __restrict__ dE_dR,
+    const real* __restrict__ dE_dR,
     const int* __restrict__ exclusionAtoms,
     const int* __restrict__ exclusionStart,
     const int* __restrict__ groupStart,
@@ -718,7 +717,7 @@ extern "C" __global__ void computeBornCouplingMatrixDouble(
 extern "C" __global__ void assembleGBSAHessianDouble(
     const real4* __restrict__ posq,
     const int* __restrict__ particleIndices,
-    const float* __restrict__ charges,
+    const real* __restrict__ charges,
     const double* __restrict__ bornRadii,
     const int* __restrict__ exclusionAtoms,
     const int* __restrict__ exclusionStart,
@@ -729,8 +728,8 @@ extern "C" __global__ void assembleGBSAHessianDouble(
     const double* __restrict__ jacobian,
     const double* __restrict__ couplingMatrix,
     const double* __restrict__ dE_dHCT,
-    const float* __restrict__ scaleFactors,
-    const float* __restrict__ intrinsicRadii,
+    const real* __restrict__ scaleFactors,
+    const real* __restrict__ intrinsicRadii,
     const double* __restrict__ dR_dPsi,
     const double* __restrict__ gridHCTHessian,
     int totalParticles,
