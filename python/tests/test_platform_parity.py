@@ -56,11 +56,6 @@ OPEN_GAPS = {
     # positions). Energy is exact; only the ligand forces drift. CUDA is correct,
     # so the gap shows up against the OpenMM force anchor (CPU mirrors Reference).
     ('IsolatedGBSAForce[PAIRWISE] vs OpenMM', 'CPU', 'force'),
-    # NUTS rigid-body COM step loads hmcComputeGroupCOM, which is only compiled
-    # into the HMC module, so the NUTS CUDA path fails to create the kernel.
-    ('NUTS', 'CUDA/single', 'integrator'),
-    ('NUTS', 'CUDA/mixed', 'integrator'),
-    ('NUTS', 'CUDA/double', 'integrator'),
 }
 
 _failures = []

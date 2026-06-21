@@ -748,8 +748,12 @@ void CudaIntegrateMultiGroupNUTSStepKernel::execute(
         uturnDotBuffer.initialize<double>(cu, 2 * K, "nutsUturnDot");
         divergentBuffer.initialize<int>(cu, K, "nutsDivergent");
 
+        // The NUTS integrator reuses the shared rigid-body Monte Carlo kernels
+        // defined in the HMC source, so that source is compiled into this module
+        // alongside the NUTS kernels.
         CUmodule module = cu.createModule(
             CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::multiGroupHMCKernel +
             CudaGridForceKernelSources::multiGroupNUTSKernel);
         backupPositionsKernel = cu.getKernel(module, "nutsBackupPositions");
         drawMBVelocitiesFullKernel = cu.getKernel(module, "nutsDrawMBVelocitiesFull");
@@ -798,15 +802,21 @@ void CudaIntegrateMultiGroupNUTSStepKernel::execute(
         mcCOMBuffer.initialize<double>(cu, 3 * K, "nutsMCCOM");
         mcAcceptedBuffer.initialize<int>(cu, K, "nutsMCAccepted");
 
-        // Metric kernels (always loaded; buffers allocated on first use)
-        assembleMetricKernel = cu.getKernel(module, "assembleMetricTensor");
-        rmVelocityKickKernel = cu.getKernel(module, "rmVelocityKick");
-        rmComputeGroupKEKernel = cu.getKernel(module, "rmComputeGroupKE");
-        rmDrawMBVelocitiesFullKernel = cu.getKernel(module, "rmDrawMBVelocitiesFull");
-        rmDrawMBVelocitiesPartialKernel = cu.getKernel(module, "rmDrawMBVelocitiesPartial");
-        setIdentityMetricKernel = cu.getKernel(module, "setIdentityMetric");
-        accumulateHessianKernel = cu.getKernel(module, "accumulateHessian");
-        accumulateHessianWeightedKernel = cu.getKernel(module, "accumulateHessianWeighted");
+        // Metric kernels (loaded lazily - only if present in the module, matching
+        // the HMC integrator). The Riemannian metric source is not yet compiled
+        // into this module, so these stay disabled until that feature is wired up.
+        try {
+            assembleMetricKernel = cu.getKernel(module, "assembleMetricTensor");
+            rmVelocityKickKernel = cu.getKernel(module, "rmVelocityKick");
+            rmComputeGroupKEKernel = cu.getKernel(module, "rmComputeGroupKE");
+            rmDrawMBVelocitiesFullKernel = cu.getKernel(module, "rmDrawMBVelocitiesFull");
+            rmDrawMBVelocitiesPartialKernel = cu.getKernel(module, "rmDrawMBVelocitiesPartial");
+            setIdentityMetricKernel = cu.getKernel(module, "setIdentityMetric");
+            accumulateHessianKernel = cu.getKernel(module, "accumulateHessian");
+            accumulateHessianWeightedKernel = cu.getKernel(module, "accumulateHessianWeighted");
+        } catch (...) {
+            // Metric kernels not available - Riemannian metric features disabled
+        }
 
         hasInitializedKernel = true;
     }
