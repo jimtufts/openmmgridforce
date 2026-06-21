@@ -113,93 +113,108 @@ void ReferenceCalcIsolatedNonbondedForceKernel::initialize(
 
 // ==================== execute ====================
 
+void ReferenceCalcIsolatedNonbondedForceKernel::computeGroup(
+        int g, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
+
+    double scale = globalScalingFactor * groupScalingFactors[g];
+    if (scale == 0.0) return;
+
+    const vector<int>& particles = groupParticleIndices[g];
+    double groupEnergy = 0.0;
+
+    for (int i = 0; i < numAtoms; i++) {
+        for (int j = i + 1; j < numAtoms; j++) {
+            // Check exclusion
+            if (isExcluded(i, j)) continue;
+
+            // Get parameters
+            double qq, sig, eps;
+            int excepIdx = findException(i, j);
+            if (excepIdx >= 0) {
+                qq = exceptions[excepIdx].chargeProd;
+                sig = exceptions[excepIdx].sigma;
+                eps = exceptions[excepIdx].epsilon;
+            } else {
+                qq = charges[i] * charges[j];
+                sig = (sigmas[i] + sigmas[j]) * 0.5;
+                eps = sqrt(epsilons[i] * epsilons[j]);
+            }
+
+            // Get system particle indices
+            int particleI = particles[i];
+            int particleJ = particles[j];
+
+            // Compute distance
+            double dx = posData[particleI][0] - posData[particleJ][0];
+            double dy = posData[particleI][1] - posData[particleJ][1];
+            double dz = posData[particleI][2] - posData[particleJ][2];
+            double r2 = dx * dx + dy * dy + dz * dz;
+            double r = sqrt(r2);
+            double invR = 1.0 / r;
+
+            // Coulomb energy: E_c = k * qq / r
+            double coulombEnergy = COULOMB_CONST * qq * invR;
+
+            // LJ energy: E_lj = 4*eps*((sig/r)^12 - (sig/r)^6)
+            double sig_r = sig * invR;
+            double sig_r2 = sig_r * sig_r;
+            double sig_r6 = sig_r2 * sig_r2 * sig_r2;
+            double sig_r12 = sig_r6 * sig_r6;
+            double ljEnergy = 4.0 * eps * (sig_r12 - sig_r6);
+
+            double pairEnergy = (coulombEnergy + ljEnergy) * scale;
+
+            if (includeEnergy)
+                groupEnergy += pairEnergy;
+
+            if (includeForces) {
+                // dE_c/dr = -k*qq/r^2, dE_lj/dr = 4*eps*(-12*sig^12/r^13 + 6*sig^6/r^7)
+                double coulombForce = coulombEnergy * invR;  // k*qq/r^2
+                double ljForce = 4.0 * eps * (12.0 * sig_r12 - 6.0 * sig_r6) * invR;
+                double forceMagnitude = (coulombForce + ljForce) * scale;
+
+                double fx = forceMagnitude * dx * invR;
+                double fy = forceMagnitude * dy * invR;
+                double fz = forceMagnitude * dz * invR;
+
+                // Newton's 3rd law
+                forceData[particleI][0] += fx;
+                forceData[particleI][1] += fy;
+                forceData[particleI][2] += fz;
+                forceData[particleJ][0] -= fx;
+                forceData[particleJ][1] -= fy;
+                forceData[particleJ][2] -= fz;
+            }
+        }
+    }
+
+    if (includeEnergy)
+        groupEnergies[g] = groupEnergy;
+}
+
+void ReferenceCalcIsolatedNonbondedForceKernel::runGroups(
+        ContextImpl& context, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
+    for (int g = 0; g < numParticleGroups; g++)
+        computeGroup(g, posData, forceData, includeForces, includeEnergy);
+}
+
 double ReferenceCalcIsolatedNonbondedForceKernel::execute(
         ContextImpl& context, bool includeForces, bool includeEnergy) {
 
     vector<Vec3>& posData = refExtractPositions(context);
     vector<Vec3>& forceData = refExtractForces(context);
 
-    double totalEnergy = 0.0;
     fill(groupEnergies.begin(), groupEnergies.end(), 0.0);
 
-    for (int g = 0; g < numParticleGroups; g++) {
-        double scale = globalScalingFactor * groupScalingFactors[g];
-        if (scale == 0.0) continue;
+    runGroups(context, posData, forceData, includeForces, includeEnergy);
 
-        const vector<int>& particles = groupParticleIndices[g];
-
-        for (int i = 0; i < numAtoms; i++) {
-            for (int j = i + 1; j < numAtoms; j++) {
-                // Check exclusion
-                if (isExcluded(i, j)) continue;
-
-                // Get parameters
-                double qq, sig, eps;
-                int excepIdx = findException(i, j);
-                if (excepIdx >= 0) {
-                    qq = exceptions[excepIdx].chargeProd;
-                    sig = exceptions[excepIdx].sigma;
-                    eps = exceptions[excepIdx].epsilon;
-                } else {
-                    qq = charges[i] * charges[j];
-                    sig = (sigmas[i] + sigmas[j]) * 0.5;
-                    eps = sqrt(epsilons[i] * epsilons[j]);
-                }
-
-                // Get system particle indices
-                int particleI = particles[i];
-                int particleJ = particles[j];
-
-                // Compute distance
-                double dx = posData[particleI][0] - posData[particleJ][0];
-                double dy = posData[particleI][1] - posData[particleJ][1];
-                double dz = posData[particleI][2] - posData[particleJ][2];
-                double r2 = dx * dx + dy * dy + dz * dz;
-                double r = sqrt(r2);
-                double invR = 1.0 / r;
-                double invR2 = invR * invR;
-
-                // Coulomb energy: E_c = k * qq / r
-                double coulombEnergy = COULOMB_CONST * qq * invR;
-
-                // LJ energy: E_lj = 4*eps*((sig/r)^12 - (sig/r)^6)
-                double sig_r = sig * invR;
-                double sig_r2 = sig_r * sig_r;
-                double sig_r6 = sig_r2 * sig_r2 * sig_r2;
-                double sig_r12 = sig_r6 * sig_r6;
-                double ljEnergy = 4.0 * eps * (sig_r12 - sig_r6);
-
-                double pairEnergy = (coulombEnergy + ljEnergy) * scale;
-
-                if (includeEnergy) {
-                    totalEnergy += pairEnergy;
-                    groupEnergies[g] += pairEnergy;
-                }
-
-                if (includeForces) {
-                    // Force magnitude: F = -dE/dr * scale, but we want force vector
-                    // dE_c/dr = -k*qq/r^2, dE_lj/dr = 4*eps*(-12*sig^12/r^13 + 6*sig^6/r^7)
-                    // F_magnitude = (k*qq/r^2 + 4*eps*(12*sig_r12 - 6*sig_r6)/r) * scale
-                    double coulombForce = coulombEnergy * invR;  // k*qq/r^2
-                    double ljForce = 4.0 * eps * (12.0 * sig_r12 - 6.0 * sig_r6) * invR;
-                    double forceMagnitude = (coulombForce + ljForce) * scale;
-
-                    double fx = forceMagnitude * dx * invR;
-                    double fy = forceMagnitude * dy * invR;
-                    double fz = forceMagnitude * dz * invR;
-
-                    // Newton's 3rd law
-                    forceData[particleI][0] += fx;
-                    forceData[particleI][1] += fy;
-                    forceData[particleI][2] += fz;
-                    forceData[particleJ][0] -= fx;
-                    forceData[particleJ][1] -= fy;
-                    forceData[particleJ][2] -= fz;
-                }
-            }
-        }
-    }
-
+    // Deterministic, group-ordered reduction (matches serial Reference exactly).
+    double totalEnergy = 0.0;
+    if (includeEnergy)
+        for (int g = 0; g < numParticleGroups; g++)
+            totalEnergy += groupEnergies[g];
     return totalEnergy;
 }
 

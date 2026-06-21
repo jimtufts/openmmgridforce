@@ -32,6 +32,7 @@
 #include <iostream>
 
 #include "CpuGridForceKernelFactory.h"
+#include "CpuIsolatedNonbondedKernels.h"
 #include "ReferenceGridForceKernels.h"
 #include "ReferenceIsolatedNonbondedKernels.h"
 #include "ReferenceIsolatedBondedKernels.h"
@@ -82,7 +83,7 @@ KernelImpl* CpuGridForceKernelFactory::createKernelImpl(std::string name, const 
     if (name == CalcBondedHessianKernel::Name())
         return new ReferenceCalcBondedHessianKernel(name, platform);
     if (name == CalcIsolatedNonbondedForceKernel::Name())
-        return new ReferenceCalcIsolatedNonbondedForceKernel(name, platform);
+        return new CpuCalcIsolatedNonbondedForceKernel(name, platform);
     if (name == CalcIsolatedGBSAForceKernel::Name())
         return new ReferenceCalcIsolatedGBSAForceKernel(name, platform);
     if (name == CalcGBSAGridForceKernel::Name())
