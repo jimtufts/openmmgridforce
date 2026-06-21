@@ -42,7 +42,20 @@ public:
     std::vector<double> getHessianBlocks() const override;
     std::vector<double> getFullHessian() const override;
 
-private:
+protected:
+    // Compute one particle group's contribution (forces into the context array,
+    // energy into the per-[g] buffers). Groups are disjoint atom sets, so distinct
+    // groups never write the same force entry — safe to run concurrently.
+    void computeGroup(int g, std::vector<OpenMM::Vec3>& posData,
+                      std::vector<OpenMM::Vec3>& forceData,
+                      bool includeForces, bool includeEnergy);
+
+    // Run all groups. Serial here; the CPU platform overrides to parallelize.
+    virtual void runGroups(OpenMM::ContextImpl& context,
+                           std::vector<OpenMM::Vec3>& posData,
+                           std::vector<OpenMM::Vec3>& forceData,
+                           bool includeForces, bool includeEnergy);
+
     // Configuration
     int numAtoms;
     int numParticleGroups;

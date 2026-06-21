@@ -291,24 +291,12 @@ void ReferenceCalcIsolatedGBSAForceKernel::initialize(
 
 // ==================== execute ====================
 
-double ReferenceCalcIsolatedGBSAForceKernel::execute(
-        ContextImpl& context, bool includeForces, bool includeEnergy) {
+void ReferenceCalcIsolatedGBSAForceKernel::computeGroup(
+        int g, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
 
-    vector<Vec3>& posData = refExtractPositions(context);
-    vector<Vec3>& forceData = refExtractForces(context);
-
-    double totalEnergy = 0.0;
-
-    // Clear per-group results
-    fill(groupEnergies_.begin(), groupEnergies_.end(), 0.0);
-    fill(groupLigandSelfEnergies_.begin(), groupLigandSelfEnergies_.end(), 0.0);
-    fill(groupReceptorContributions_.begin(), groupReceptorContributions_.end(), 0.0);
-    fill(groupReceptorDesolvations_.begin(), groupReceptorDesolvations_.end(), 0.0);
-    fill(groupCrossTermEnergies_.begin(), groupCrossTermEnergies_.end(), 0.0);
-
-    for (int g = 0; g < numParticleGroups; g++) {
         double scale = globalScalingFactor * groupScalingFactors[g];
-        if (scale == 0.0) continue;
+        if (scale == 0.0) return;
 
         const vector<int>& particles = groupParticleIndices[g];
 
@@ -510,8 +498,6 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
             for (int i = 0; i < numAtoms; i++)
                 dE_dR_full[i] += dE_dR_sa[i];
         }
-
-        totalEnergy += groupEnergies_[g];
 
         // ---- Step 6: Forces (chain rule through Born radii) ----
         if (includeForces) {
@@ -861,7 +847,6 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
             desolvation *= scale;
             groupReceptorDesolvations_[g] = desolvation;
             groupEnergies_[g] += desolvation;
-            totalEnergy += desolvation;
 
             // 7d: Cross-term energy (receptor-ligand GB pairs, ALL receptor atoms)
             // Distance floor prevents singularity when ligand overlaps receptor
@@ -916,7 +901,6 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
             crossTermEnergy *= scale;
             groupCrossTermEnergies_[g] = crossTermEnergy;
             groupEnergies_[g] += crossTermEnergy;
-            totalEnergy += crossTermEnergy;
 
             // 7e: Receptor desolvation forces on ligand atoms
             if (includeForces) {
@@ -1085,8 +1069,36 @@ double ReferenceCalcIsolatedGBSAForceKernel::execute(
                 }
             }
         }
-    }
+}
 
+void ReferenceCalcIsolatedGBSAForceKernel::runGroups(
+        ContextImpl& context, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
+    for (int g = 0; g < numParticleGroups; g++)
+        computeGroup(g, posData, forceData, includeForces, includeEnergy);
+}
+
+double ReferenceCalcIsolatedGBSAForceKernel::execute(
+        ContextImpl& context, bool includeForces, bool includeEnergy) {
+
+    vector<Vec3>& posData = refExtractPositions(context);
+    vector<Vec3>& forceData = refExtractForces(context);
+
+    // Clear per-group results
+    fill(groupEnergies_.begin(), groupEnergies_.end(), 0.0);
+    fill(groupLigandSelfEnergies_.begin(), groupLigandSelfEnergies_.end(), 0.0);
+    fill(groupReceptorContributions_.begin(), groupReceptorContributions_.end(), 0.0);
+    fill(groupReceptorDesolvations_.begin(), groupReceptorDesolvations_.end(), 0.0);
+    fill(groupCrossTermEnergies_.begin(), groupCrossTermEnergies_.end(), 0.0);
+
+    runGroups(context, posData, forceData, includeForces, includeEnergy);
+
+    // Deterministic, group-ordered reduction (matches serial Reference exactly).
+    // groupEnergies_[g] holds the group's full contribution (GB + SA + PAIRWISE
+    // desolvation + cross-term), which is exactly what was added to totalEnergy.
+    double totalEnergy = 0.0;
+    for (int g = 0; g < numParticleGroups; g++)
+        totalEnergy += groupEnergies_[g];
     return totalEnergy;
 }
 

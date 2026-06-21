@@ -307,21 +307,14 @@ void ReferenceCalcGBSAGridForceKernel::initialize(
 
 // ==================== execute ====================
 
-double ReferenceCalcGBSAGridForceKernel::execute(
-        ContextImpl& context, bool includeForces, bool includeEnergy) {
+void ReferenceCalcGBSAGridForceKernel::computeGroup(
+        int g, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
 
-    vector<Vec3>& posData = refExtractPositions(context);
-    vector<Vec3>& forceData = refExtractForces(context);
-
-    double totalEnergy = 0.0;
-    fill(groupEnergies_.begin(), groupEnergies_.end(), 0.0);
-    fill(groupLigandEnergies_.begin(), groupLigandEnergies_.end(), 0.0);
-
-    for (int g = 0; g < numParticleGroups; g++) {
         double scale = globalScalingFactor * groupScalingFactors[g];
         if (scale == 0.0) {
             groupBornRadii_[g].assign(numAtoms, 0.0);
-            continue;
+            return;
         }
 
         const vector<int>& particles = groupParticleIndices[g];
@@ -449,7 +442,6 @@ double ReferenceCalcGBSAGridForceKernel::execute(
         gbEnergy *= scale;
         groupEnergies_[g] += gbEnergy;
         groupLigandEnergies_[g] += gbEnergy;
-        totalEnergy += gbEnergy;
 
         // Step 5: Surface area (optional)
         double saEnergy = 0.0;
@@ -471,7 +463,6 @@ double ReferenceCalcGBSAGridForceKernel::execute(
             saEnergy *= scale;
             groupEnergies_[g] += saEnergy;
             groupLigandEnergies_[g] += saEnergy;
-            totalEnergy += saEnergy;
         }
 
         // Step 6: Chain rule forces
@@ -547,8 +538,30 @@ double ReferenceCalcGBSAGridForceKernel::execute(
                 forceData[pi][2] += forceMag * hctRecGradZ[i];
             }
         }
-    }
+}
 
+void ReferenceCalcGBSAGridForceKernel::runGroups(
+        ContextImpl& context, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
+    for (int g = 0; g < numParticleGroups; g++)
+        computeGroup(g, posData, forceData, includeForces, includeEnergy);
+}
+
+double ReferenceCalcGBSAGridForceKernel::execute(
+        ContextImpl& context, bool includeForces, bool includeEnergy) {
+
+    vector<Vec3>& posData = refExtractPositions(context);
+    vector<Vec3>& forceData = refExtractForces(context);
+
+    fill(groupEnergies_.begin(), groupEnergies_.end(), 0.0);
+    fill(groupLigandEnergies_.begin(), groupLigandEnergies_.end(), 0.0);
+
+    runGroups(context, posData, forceData, includeForces, includeEnergy);
+
+    // Deterministic, group-ordered reduction (matches serial Reference exactly).
+    double totalEnergy = 0.0;
+    for (int g = 0; g < numParticleGroups; g++)
+        totalEnergy += groupEnergies_[g];
     return totalEnergy;
 }
 

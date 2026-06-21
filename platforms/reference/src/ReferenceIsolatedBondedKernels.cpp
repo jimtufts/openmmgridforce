@@ -92,21 +92,17 @@ void ReferenceCalcIsolatedBondedForceKernel::initialize(
 
 // ==================== execute ====================
 
-double ReferenceCalcIsolatedBondedForceKernel::execute(
-        ContextImpl& context, bool includeForces, bool includeEnergy) {
+void ReferenceCalcIsolatedBondedForceKernel::computeGroup(
+        int g, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
 
-    vector<Vec3>& posData = refExtractPositions(context);
-    vector<Vec3>& forceData = refExtractForces(context);
+    double scale = globalScalingFactor * groupScalingFactors[g];
+    if (scale == 0.0) return;
 
-    double totalEnergy = 0.0;
-    fill(groupEnergies.begin(), groupEnergies.end(), 0.0);
+    const vector<int>& particles = groupParticleIndices[g];
+    double groupEnergy = 0.0;
 
-    for (int g = 0; g < numParticleGroups; g++) {
-        double scale = globalScalingFactor * groupScalingFactors[g];
-        if (scale == 0.0) continue;
-
-        const vector<int>& particles = groupParticleIndices[g];
-
+    {
         // ========== Harmonic Bonds ==========
         // E = 0.5 * k * (r - r0)^2
         // Adapted from ReferenceHarmonicBondIxn::calculateBondIxn
@@ -123,10 +119,8 @@ double ReferenceCalcIsolatedBondedForceKernel::execute(
             double deltaIdeal = r - bonds[b].length;
             double energy = 0.5 * bonds[b].k * deltaIdeal * deltaIdeal * scale;
 
-            if (includeEnergy) {
-                totalEnergy += energy;
-                groupEnergies[g] += energy;
-            }
+            if (includeEnergy)
+                groupEnergy += energy;
 
             if (includeForces && r > 0.0) {
                 double dEdR = bonds[b].k * deltaIdeal * scale / r;
@@ -178,10 +172,8 @@ double ReferenceCalcIsolatedBondedForceKernel::execute(
             double energy = 0.5 * angles[a].k * deltaTheta * deltaTheta * scale;
             double dEdTheta = angles[a].k * deltaTheta * scale;
 
-            if (includeEnergy) {
-                totalEnergy += energy;
-                groupEnergies[g] += energy;
-            }
+            if (includeEnergy)
+                groupEnergy += energy;
 
             if (includeForces) {
                 // Force decomposition from ReferenceAngleBondIxn
@@ -279,10 +271,8 @@ double ReferenceCalcIsolatedBondedForceKernel::execute(
             double energy = kT * (1.0 + cos(deltaAngle)) * scale;
             double dEdAngle = -kT * n * sin(deltaAngle) * scale;
 
-            if (includeEnergy) {
-                totalEnergy += energy;
-                groupEnergies[g] += energy;
-            }
+            if (includeEnergy)
+                groupEnergy += energy;
 
             if (includeForces) {
                 // Force computation from ReferenceProperDihedralBond
@@ -331,6 +321,32 @@ double ReferenceCalcIsolatedBondedForceKernel::execute(
         }
     }
 
+    if (includeEnergy)
+        groupEnergies[g] = groupEnergy;
+}
+
+void ReferenceCalcIsolatedBondedForceKernel::runGroups(
+        ContextImpl& context, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
+    for (int g = 0; g < numParticleGroups; g++)
+        computeGroup(g, posData, forceData, includeForces, includeEnergy);
+}
+
+double ReferenceCalcIsolatedBondedForceKernel::execute(
+        ContextImpl& context, bool includeForces, bool includeEnergy) {
+
+    vector<Vec3>& posData = refExtractPositions(context);
+    vector<Vec3>& forceData = refExtractForces(context);
+
+    fill(groupEnergies.begin(), groupEnergies.end(), 0.0);
+
+    runGroups(context, posData, forceData, includeForces, includeEnergy);
+
+    // Deterministic, group-ordered reduction (matches serial Reference exactly).
+    double totalEnergy = 0.0;
+    if (includeEnergy)
+        for (int g = 0; g < numParticleGroups; g++)
+            totalEnergy += groupEnergies[g];
     return totalEnergy;
 }
 

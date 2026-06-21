@@ -33,6 +33,10 @@
 
 #include "CpuGridForceKernelFactory.h"
 #include "CpuIsolatedNonbondedKernels.h"
+#include "CpuIsolatedBondedKernels.h"
+#include "CpuIsolatedGBSAKernels.h"
+#include "CpuIsolatedSiteKernels.h"
+#include "CpuGBSAGridForceKernels.h"
 #include "ReferenceGridForceKernels.h"
 #include "ReferenceIsolatedNonbondedKernels.h"
 #include "ReferenceIsolatedBondedKernels.h"
@@ -85,13 +89,13 @@ KernelImpl* CpuGridForceKernelFactory::createKernelImpl(std::string name, const 
     if (name == CalcIsolatedNonbondedForceKernel::Name())
         return new CpuCalcIsolatedNonbondedForceKernel(name, platform);
     if (name == CalcIsolatedGBSAForceKernel::Name())
-        return new ReferenceCalcIsolatedGBSAForceKernel(name, platform);
+        return new CpuCalcIsolatedGBSAForceKernel(name, platform);
     if (name == CalcGBSAGridForceKernel::Name())
-        return new ReferenceCalcGBSAGridForceKernel(name, platform);
+        return new CpuCalcGBSAGridForceKernel(name, platform);
     if (name == CalcIsolatedBondedForceKernel::Name())
-        return new ReferenceCalcIsolatedBondedForceKernel(name, platform);
+        return new CpuCalcIsolatedBondedForceKernel(name, platform);
     if (name == CalcIsolatedSiteForceKernel::Name())
-        return new ReferenceCalcIsolatedSiteForceKernel(name, platform);
+        return new CpuCalcIsolatedSiteForceKernel(name, platform);
     if (name == IntegrateMultiGroupHMCStepKernel::Name())
         return new ReferenceIntegrateMultiGroupHMCStepKernel(name, platform);
     if (name == IntegrateMultiGroupNUTSStepKernel::Name())

@@ -47,66 +47,81 @@ void ReferenceCalcIsolatedSiteForceKernel::initialize(
     groupEnergies.resize(numParticleGroups, 0.0);
 }
 
+void ReferenceCalcIsolatedSiteForceKernel::computeGroup(
+        int g, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
+
+    double scale = globalScalingFactor * groupScalingFactors[g];
+    if (scale == 0.0) return;
+
+    const vector<int>& particles = groupParticleIndices[g];
+
+    // Compute mass-weighted COM
+    double comX = 0, comY = 0, comZ = 0;
+    for (int i = 0; i < numAtoms; i++) {
+        int p = particles[i];
+        comX += masses[i] * posData[p][0];
+        comY += masses[i] * posData[p][1];
+        comZ += masses[i] * posData[p][2];
+    }
+    comX /= totalMass;
+    comY /= totalMass;
+    comZ /= totalMass;
+
+    // Distance from site center
+    double dx = comX - centerX;
+    double dy = comY - centerY;
+    double dz = comZ - centerZ;
+    double r = sqrt(dx * dx + dy * dy + dz * dz);
+
+    // Flat-bottom: only restrain outside maxRadius
+    double deltaR = r - maxRadius;
+    if (deltaR <= 0.0) return;
+
+    double energy = 0.5 * forceConstant * deltaR * deltaR * scale;
+
+    if (includeEnergy) {
+        groupEnergies[g] += energy;
+    }
+
+    if (includeForces && r > 1.0e-12) {
+        // dE/dr = k * (r - maxR) * scale
+        // F_i = -dE/dr * (COM - center) / r * m_i / M_total
+        double dEdR = forceConstant * deltaR * scale;
+        double prefactor = -dEdR / (r * totalMass);
+
+        for (int i = 0; i < numAtoms; i++) {
+            int p = particles[i];
+            double w = prefactor * masses[i];
+            forceData[p][0] += w * dx;
+            forceData[p][1] += w * dy;
+            forceData[p][2] += w * dz;
+        }
+    }
+}
+
+void ReferenceCalcIsolatedSiteForceKernel::runGroups(
+        ContextImpl& context, vector<Vec3>& posData, vector<Vec3>& forceData,
+        bool includeForces, bool includeEnergy) {
+    for (int g = 0; g < numParticleGroups; g++)
+        computeGroup(g, posData, forceData, includeForces, includeEnergy);
+}
+
 double ReferenceCalcIsolatedSiteForceKernel::execute(
         ContextImpl& context, bool includeForces, bool includeEnergy) {
 
     vector<Vec3>& posData = refExtractPositions(context);
     vector<Vec3>& forceData = refExtractForces(context);
 
-    double totalEnergy = 0.0;
     fill(groupEnergies.begin(), groupEnergies.end(), 0.0);
 
-    for (int g = 0; g < numParticleGroups; g++) {
-        double scale = globalScalingFactor * groupScalingFactors[g];
-        if (scale == 0.0) continue;
+    runGroups(context, posData, forceData, includeForces, includeEnergy);
 
-        const vector<int>& particles = groupParticleIndices[g];
-
-        // Compute mass-weighted COM
-        double comX = 0, comY = 0, comZ = 0;
-        for (int i = 0; i < numAtoms; i++) {
-            int p = particles[i];
-            comX += masses[i] * posData[p][0];
-            comY += masses[i] * posData[p][1];
-            comZ += masses[i] * posData[p][2];
-        }
-        comX /= totalMass;
-        comY /= totalMass;
-        comZ /= totalMass;
-
-        // Distance from site center
-        double dx = comX - centerX;
-        double dy = comY - centerY;
-        double dz = comZ - centerZ;
-        double r = sqrt(dx * dx + dy * dy + dz * dz);
-
-        // Flat-bottom: only restrain outside maxRadius
-        double deltaR = r - maxRadius;
-        if (deltaR <= 0.0) continue;
-
-        double energy = 0.5 * forceConstant * deltaR * deltaR * scale;
-
-        if (includeEnergy) {
-            totalEnergy += energy;
-            groupEnergies[g] += energy;
-        }
-
-        if (includeForces && r > 1.0e-12) {
-            // dE/dr = k * (r - maxR) * scale
-            // F_i = -dE/dr * (COM - center) / r * m_i / M_total
-            double dEdR = forceConstant * deltaR * scale;
-            double prefactor = -dEdR / (r * totalMass);
-
-            for (int i = 0; i < numAtoms; i++) {
-                int p = particles[i];
-                double w = prefactor * masses[i];
-                forceData[p][0] += w * dx;
-                forceData[p][1] += w * dy;
-                forceData[p][2] += w * dz;
-            }
-        }
-    }
-
+    // Deterministic, group-ordered reduction (matches serial Reference exactly).
+    double totalEnergy = 0.0;
+    if (includeEnergy)
+        for (int g = 0; g < numParticleGroups; g++)
+            totalEnergy += groupEnergies[g];
     return totalEnergy;
 }
 
