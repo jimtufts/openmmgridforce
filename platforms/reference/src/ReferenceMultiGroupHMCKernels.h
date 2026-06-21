@@ -53,7 +53,7 @@ public:
         return std::vector<double>(numGroups, 1.0);
     }
 
-private:
+protected:
     int numGroups;
     int atomsPerGroup;
     int numParticles;
@@ -78,15 +78,24 @@ private:
     int mcAcceptedTotal = 0;
     std::vector<int> lastMCAcceptedPerGroup;
 
-    // RNG
-    std::mt19937 rng;
-    std::normal_distribution<double> normalDist;
-    std::uniform_real_distribution<double> uniformDist;
+    // Per-group RNG streams (one independent generator + distribution objects per
+    // group, seeded deterministically from the master seed). Group k draws only
+    // from groupRng[k], so its trajectory is independent of thread scheduling and
+    // of the other groups — identical results for any thread count.
+    std::vector<std::mt19937> groupRng;
+    std::vector<std::normal_distribution<double>> groupNormal;
+    std::vector<std::uniform_real_distribution<double>> groupUniform;
 
     // Per-group energy extraction functions, populated during initialize().
     // Each entry is a callable that returns per-group energies [K] from one Force.
     // After calcForcesAndEnergy(), we call all of these and sum to get per-group PE.
     std::vector<std::function<std::vector<double>()>> groupEnergyExtractors;
+
+    // Apply a per-group operation to every group. Serial here; the CPU platform
+    // overrides to distribute groups across its thread pool. Group bodies must be
+    // independent (each touches only its own group's atoms/buffers/RNG stream).
+    virtual void forEachGroup(OpenMM::ContextImpl& context,
+                              const std::function<void(int)>& body);
 
     // Sum per-group PE from all registered forces (call after calcForcesAndEnergy)
     void computeGroupPE(std::vector<double>& groupPE) const;

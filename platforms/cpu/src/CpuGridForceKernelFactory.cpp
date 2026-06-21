@@ -38,6 +38,7 @@
 #include "CpuIsolatedGBSAKernels.h"
 #include "CpuIsolatedSiteKernels.h"
 #include "CpuGBSAGridForceKernels.h"
+#include "CpuMultiGroupHMCKernels.h"
 #include "ReferenceGridForceKernels.h"
 #include "ReferenceIsolatedNonbondedKernels.h"
 #include "ReferenceIsolatedBondedKernels.h"
@@ -98,7 +99,7 @@ KernelImpl* CpuGridForceKernelFactory::createKernelImpl(std::string name, const 
     if (name == CalcIsolatedSiteForceKernel::Name())
         return new CpuCalcIsolatedSiteForceKernel(name, platform);
     if (name == IntegrateMultiGroupHMCStepKernel::Name())
-        return new ReferenceIntegrateMultiGroupHMCStepKernel(name, platform);
+        return new CpuIntegrateMultiGroupHMCStepKernel(name, platform);
     if (name == IntegrateMultiGroupNUTSStepKernel::Name())
         return new ReferenceIntegrateMultiGroupNUTSStepKernel(name, platform);
 
