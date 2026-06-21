@@ -81,15 +81,25 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::initialize(
     mcAttemptedTotal = 0;
     mcAcceptedTotal = 0;
 
-    int seed = integrator.getRandomNumberSeed();
+    unsigned int seed = (unsigned int)integrator.getRandomNumberSeed();
     if (seed == 0) {
         random_device rd;
         seed = rd();
     }
-    rng.seed(seed);
-    normalDist = normal_distribution<double>(0.0, 1.0);
-    uniformDist = uniform_real_distribution<double>(0.0, 1.0);
-    exponentialDist = exponential_distribution<double>(1.0);
+    groupRng.resize(numGroups);
+    groupNormal.assign(numGroups, normal_distribution<double>(0.0, 1.0));
+    groupUniform.assign(numGroups, uniform_real_distribution<double>(0.0, 1.0));
+    groupExponential.assign(numGroups, exponential_distribution<double>(1.0));
+    for (int k = 0; k < numGroups; k++) {
+        seed_seq seq{seed, (unsigned int)(k + 1)};
+        groupRng[k].seed(seq);
+    }
+}
+
+void ReferenceIntegrateMultiGroupNUTSStepKernel::forEachGroup(
+        ContextImpl& context, const std::function<void(int)>& body) {
+    for (int k = 0; k < numGroups; k++)
+        body(k);
 }
 
 void ReferenceIntegrateMultiGroupNUTSStepKernel::computeGroupPE(
@@ -132,41 +142,45 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::leapfrogStep(
     int allGroupsMask = 0xFFFFFFFF;
 
     // Half-kick
-    vector<Vec3>& forceData = refExtractForces(context);
-    for (int k = 0; k < numGroups; k++) {
-        if (!active[k]) continue;
-        double halfDt = 0.5 * signedDt[k];
-        int base = k * atomsPerGroup;
-        for (int a = 0; a < atomsPerGroup; a++) {
-            int idx = base + a;
-            if (masses[idx] > 0)
-                velData[idx] += forceData[idx] * (halfDt / masses[idx]);
-        }
+    {
+        vector<Vec3>& forceData = refExtractForces(context);
+        forEachGroup(context, [&](int k) {
+            if (!active[k]) return;
+            double halfDt = 0.5 * signedDt[k];
+            int base = k * atomsPerGroup;
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = base + a;
+                if (masses[idx] > 0)
+                    velData[idx] += forceData[idx] * (halfDt / masses[idx]);
+            }
+        });
     }
 
     // Drift
-    for (int k = 0; k < numGroups; k++) {
-        if (!active[k]) continue;
+    forEachGroup(context, [&](int k) {
+        if (!active[k]) return;
         double dt = signedDt[k];
         int base = k * atomsPerGroup;
         for (int a = 0; a < atomsPerGroup; a++)
             posData[base + a] += velData[base + a] * dt;
-    }
+    });
 
     // Forces (include energy when requested so callers can read cached PE)
     context.calcForcesAndEnergy(true, includeEnergy, allGroupsMask);
 
     // Half-kick
-    forceData = refExtractForces(context);
-    for (int k = 0; k < numGroups; k++) {
-        if (!active[k]) continue;
-        double halfDt = 0.5 * signedDt[k];
-        int base = k * atomsPerGroup;
-        for (int a = 0; a < atomsPerGroup; a++) {
-            int idx = base + a;
-            if (masses[idx] > 0)
-                velData[idx] += forceData[idx] * (halfDt / masses[idx]);
-        }
+    {
+        vector<Vec3>& forceData = refExtractForces(context);
+        forEachGroup(context, [&](int k) {
+            if (!active[k]) return;
+            double halfDt = 0.5 * signedDt[k];
+            int base = k * atomsPerGroup;
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = base + a;
+                if (masses[idx] > 0)
+                    velData[idx] += forceData[idx] * (halfDt / masses[idx]);
+            }
+        });
     }
 }
 
@@ -240,17 +254,19 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
         positionsBackup[i] = posData[i];
 
     // ===== 2. Draw MB velocities =====
-    for (int k = 0; k < K; k++) {
+    forEachGroup(context, [&](int k) {
         int base = k * atomsPerGroup;
+        auto& rngk = groupRng[k];
+        auto& nd = groupNormal[k];
         if (integrator.getMomentumRefreshMode() == MultiGroupNUTSIntegrator::FULL) {
             for (int a = 0; a < atomsPerGroup; a++) {
                 int idx = base + a;
                 double m = masses[idx];
                 if (m <= 0.0) continue;
                 double sigma = sqrt(kT[k] / m);
-                velData[idx] = Vec3(sigma * normalDist(rng),
-                                    sigma * normalDist(rng),
-                                    sigma * normalDist(rng));
+                velData[idx] = Vec3(sigma * nd(rngk),
+                                    sigma * nd(rngk),
+                                    sigma * nd(rngk));
             }
         } else {
             double theta = integrator.getPartialRefreshAngle();
@@ -261,13 +277,13 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
                 double m = masses[idx];
                 if (m <= 0.0) continue;
                 double sigma = sqrt(kT[k] / m);
-                Vec3 vRand(sigma * normalDist(rng),
-                           sigma * normalDist(rng),
-                           sigma * normalDist(rng));
+                Vec3 vRand(sigma * nd(rngk),
+                           sigma * nd(rngk),
+                           sigma * nd(rngk));
                 velData[idx] = velData[idx] * cosTheta + vRand * sinTheta;
             }
         }
-    }
+    });
 
     // ===== 3. Compute initial H_0 =====
     vector<double> keInit(K);
@@ -281,10 +297,10 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
 
     vector<double> H0(K);
     vector<double> logu(K);
-    for (int k = 0; k < K; k++) {
+    forEachGroup(context, [&](int k) {
         H0[k] = peInit[k] + keInit[k];
-        logu[k] = -H0[k] / kT[k] - exponentialDist(rng);
-    }
+        logu[k] = -H0[k] / kT[k] - groupExponential[k](groupRng[k]);
+    });
 
     // ===== 4. Initialize tree =====
     for (int i = 0; i < totalGroupAtoms; i++) {
@@ -313,12 +329,13 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
 
         // Choose random direction per active group
         vector<int> direction(K);
-        for (int k = 0; k < K; k++)
-            direction[k] = active[k] ? ((uniformDist(rng) < 0.5) ? -1 : 1) : 1;
+        forEachGroup(context, [&](int k) {
+            direction[k] = active[k] ? ((groupUniform[k](groupRng[k]) < 0.5) ? -1 : 1) : 1;
+        });
 
         // Restore from appropriate endpoint
-        for (int k = 0; k < K; k++) {
-            if (!active[k]) continue;
+        forEachGroup(context, [&](int k) {
+            if (!active[k]) return;
             int base = k * atomsPerGroup;
             for (int a = 0; a < atomsPerGroup; a++) {
                 int idx = base + a;
@@ -330,7 +347,7 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
                     velData[idx] = vminus[idx];
                 }
             }
-        }
+        });
 
         // Signed dt
         vector<double> signedDt(K);
@@ -344,7 +361,9 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
         int numSteps = 1 << depth;
         vector<int> subtreeNValid(K, 0);
         vector<double> subtreeCandidatePE(K, 0.0);
-        vector<bool> subtreeHasCandidate(K, false);
+        // char, not vector<bool>: distinct elements must be independently
+        // writable from different threads (vector<bool> packs bits into shared words).
+        vector<char> subtreeHasCandidate(K, 0);
 
         for (int step = 0; step < numSteps; step++) {
             // includeEnergy=true so forces cache per-group energies
@@ -356,8 +375,8 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
             vector<double> keStep(K);
             computeGroupKE(context, keStep);
 
-            for (int k = 0; k < K; k++) {
-                if (!active[k]) continue;
+            forEachGroup(context, [&](int k) {
+                if (!active[k]) return;
 
                 double Hk = peStep[k] + keStep[k];
                 double logPk = -Hk / kT[k];
@@ -370,12 +389,12 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
                 if (isDivergent) {
                     active[k] = 0;
                     divergent[k] = 1;
-                    continue;
+                    return;
                 }
 
                 if (logPk > logu[k]) {
                     subtreeNValid[k]++;
-                    if (uniformDist(rng) < 1.0 / subtreeNValid[k]) {
+                    if (groupUniform[k](groupRng[k]) < 1.0 / subtreeNValid[k]) {
                         subtreeCandidatePE[k] = peStep[k];
                         subtreeHasCandidate[k] = true;
                         // Save to subtree candidate (not main candidate)
@@ -384,12 +403,12 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
                             subtreeCandidatePos[base + a] = posData[base + a];
                     }
                 }
-            }
+            });
         }
 
         // Save to endpoint
-        for (int k = 0; k < K; k++) {
-            if (!active[k]) continue;
+        forEachGroup(context, [&](int k) {
+            if (!active[k]) return;
             int base = k * atomsPerGroup;
             for (int a = 0; a < atomsPerGroup; a++) {
                 int idx = base + a;
@@ -401,16 +420,16 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
                     vminus[idx] = velData[idx];
                 }
             }
-        }
+        });
 
         // Combine subtree candidate with main candidate
-        for (int k = 0; k < K; k++) {
-            if (!active[k]) continue;
-            if (!subtreeHasCandidate[k]) continue;
+        forEachGroup(context, [&](int k) {
+            if (!active[k]) return;
+            if (!subtreeHasCandidate[k]) return;
 
             int totalN = nValid[k] + subtreeNValid[k];
             double acceptProb = (double)subtreeNValid[k] / totalN;
-            if (uniformDist(rng) < acceptProb) {
+            if (groupUniform[k](groupRng[k]) < acceptProb) {
                 candidatePE[k] = subtreeCandidatePE[k];
                 // Copy subtree candidate to main candidate
                 int base = k * atomsPerGroup;
@@ -418,11 +437,11 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
                     candidatePos[base + a] = subtreeCandidatePos[base + a];
             }
             nValid[k] = totalN;
-        }
+        });
 
         // U-turn check
-        for (int k = 0; k < K; k++) {
-            if (!active[k]) continue;
+        forEachGroup(context, [&](int k) {
+            if (!active[k]) return;
             int base = k * atomsPerGroup;
 
             double dot1 = 0.0, dot2 = 0.0;
@@ -435,7 +454,7 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
 
             if (dot1 < 0.0 || dot2 < 0.0)
                 active[k] = 0;
-        }
+        });
 
         // Record tree depths
         for (int k = 0; k < K; k++) {
@@ -455,7 +474,7 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
     }
 
     // ===== 6. Set from candidates, restore divergent =====
-    for (int k = 0; k < K; k++) {
+    forEachGroup(context, [&](int k) {
         int base = k * atomsPerGroup;
         if (divergent[k]) {
             for (int a = 0; a < atomsPerGroup; a++) {
@@ -468,7 +487,7 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
                 velData[base + a] = Vec3(0, 0, 0);
             }
         }
-    }
+    });
 
     // ===== 7. Update statistics =====
     for (int k = 0; k < K; k++) {
@@ -542,16 +561,17 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::executeMC(
         kT[k] = BOLTZ * integrator.getGroupTemperature(k);
 
     vector<Vec3> backup(numParticles);
-    double R[9];
 
     for (int trial = 0; trial < numTrials; trial++) {
-        for (int i = 0; i < numParticles; i++)
-            backup[i] = posData[i];
-
-        vector<Vec3> com(K, Vec3(0, 0, 0));
-        for (int k = 0; k < K; k++) {
-            if (!mcEnabled[k]) continue;
+        // Backup, compute the group COM, and propose+apply the rigid-body move.
+        // Each group uses only its own RNG stream and atoms, so the proposal is
+        // independent of thread count.
+        forEachGroup(context, [&](int k) {
+            if (!mcEnabled[k]) return;
             int base = k * atomsPerGroup;
+            for (int a = 0; a < atomsPerGroup; a++)
+                backup[base + a] = posData[base + a];
+
             double totalMass = 0.0;
             Vec3 acc(0, 0, 0);
             for (int a = 0; a < atomsPerGroup; a++) {
@@ -560,42 +580,37 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::executeMC(
                 acc += posData[idx] * m;
                 totalMass += m;
             }
-            if (totalMass > 0.0) com[k] = acc * (1.0 / totalMass);
-        }
+            Vec3 com = (totalMass > 0.0) ? acc * (1.0 / totalMass) : Vec3(0, 0, 0);
 
-        for (int k = 0; k < K; k++) {
-            if (!mcEnabled[k]) continue;
+            double R[9];
             if (trial % 2 == 0)
-                generateRandomQuaternionRotationNUTS(rng, uniformDist, R);
+                generateRandomQuaternionRotationNUTS(groupRng[k], groupUniform[k], R);
             else {
                 for (int e = 0; e < 9; e++) R[e] = 0.0;
                 R[0] = R[4] = R[8] = 1.0;
             }
-            Vec3 t(normalDist(rng) * mcStep,
-                   normalDist(rng) * mcStep,
-                   normalDist(rng) * mcStep);
-            int base = k * atomsPerGroup;
+            Vec3 t(groupNormal[k](groupRng[k]) * mcStep,
+                   groupNormal[k](groupRng[k]) * mcStep,
+                   groupNormal[k](groupRng[k]) * mcStep);
             for (int a = 0; a < atomsPerGroup; a++) {
                 int idx = base + a;
-                Vec3 rel = posData[idx] - com[k];
+                Vec3 rel = posData[idx] - com;
                 Vec3 rot(R[0]*rel[0] + R[1]*rel[1] + R[2]*rel[2],
                          R[3]*rel[0] + R[4]*rel[1] + R[5]*rel[2],
                          R[6]*rel[0] + R[7]*rel[1] + R[8]*rel[2]);
-                posData[idx] = rot + com[k] + t;
+                posData[idx] = rot + com + t;
             }
-        }
+        });
 
         context.calcForcesAndEnergy(true, true, allGroupsMask);
         vector<double> peTrial(K, 0.0);
         computeGroupPE(peTrial);
 
-        for (int k = 0; k < K; k++) {
-            if (!mcEnabled[k]) continue;
-            mcAttemptedTotal++;
+        forEachGroup(context, [&](int k) {
+            if (!mcEnabled[k]) return;
             double dE = peTrial[k] - peBaseline[k];
-            bool accept = (dE <= 0.0) || (uniformDist(rng) < exp(-dE / kT[k]));
+            bool accept = (dE <= 0.0) || (groupUniform[k](groupRng[k]) < exp(-dE / kT[k]));
             if (accept) {
-                mcAcceptedTotal++;
                 lastMCAcceptedPerGroup[k]++;
                 peBaseline[k] = peTrial[k];
             } else {
@@ -603,8 +618,16 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::executeMC(
                 for (int a = 0; a < atomsPerGroup; a++)
                     posData[base + a] = backup[base + a];
             }
-        }
+        });
     }
+
+    // Deterministic serial reduction of the global MC counters.
+    int eligible = 0;
+    for (int k = 0; k < K; k++)
+        if (mcEnabled[k]) eligible++;
+    mcAttemptedTotal += eligible * numTrials;
+    for (int k = 0; k < K; k++)
+        mcAcceptedTotal += lastMCAcceptedPerGroup[k];
 }
 
 }  // namespace GridForcePlugin

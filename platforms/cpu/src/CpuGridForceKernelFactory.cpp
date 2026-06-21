@@ -39,6 +39,7 @@
 #include "CpuIsolatedSiteKernels.h"
 #include "CpuGBSAGridForceKernels.h"
 #include "CpuMultiGroupHMCKernels.h"
+#include "CpuMultiGroupNUTSKernels.h"
 #include "ReferenceGridForceKernels.h"
 #include "ReferenceIsolatedNonbondedKernels.h"
 #include "ReferenceIsolatedBondedKernels.h"
@@ -101,7 +102,7 @@ KernelImpl* CpuGridForceKernelFactory::createKernelImpl(std::string name, const 
     if (name == IntegrateMultiGroupHMCStepKernel::Name())
         return new CpuIntegrateMultiGroupHMCStepKernel(name, platform);
     if (name == IntegrateMultiGroupNUTSStepKernel::Name())
-        return new ReferenceIntegrateMultiGroupNUTSStepKernel(name, platform);
+        return new CpuIntegrateMultiGroupNUTSStepKernel(name, platform);
 
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

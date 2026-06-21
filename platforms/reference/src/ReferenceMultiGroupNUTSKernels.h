@@ -50,7 +50,7 @@ public:
     std::vector<int> getLastMCAccepted() const override { return lastMCAcceptedPerGroup; }
     void resetMCCounters() override;
 
-private:
+protected:
     int numGroups;
     int atomsPerGroup;
     int numParticles;
@@ -82,13 +82,22 @@ private:
     int mcAcceptedTotal = 0;
     std::vector<int> lastMCAcceptedPerGroup;
 
-    // RNG
-    std::mt19937 rng;
-    std::normal_distribution<double> normalDist;
-    std::uniform_real_distribution<double> uniformDist;
-    std::exponential_distribution<double> exponentialDist;
+    // Per-group RNG streams (one independent generator + distribution objects per
+    // group, seeded deterministically from the master seed). Group k draws only
+    // from groupRng[k], so its trajectory is independent of thread scheduling and
+    // of the other groups — identical results for any thread count.
+    std::vector<std::mt19937> groupRng;
+    std::vector<std::normal_distribution<double>> groupNormal;
+    std::vector<std::uniform_real_distribution<double>> groupUniform;
+    std::vector<std::exponential_distribution<double>> groupExponential;
 
     std::vector<std::function<std::vector<double>()>> groupEnergyExtractors;
+
+    // Apply a per-group operation to every group. Serial here; the CPU platform
+    // overrides to distribute groups across its thread pool. Group bodies must be
+    // independent (each touches only its own group's atoms/buffers/RNG stream).
+    virtual void forEachGroup(OpenMM::ContextImpl& context,
+                              const std::function<void(int)>& body);
 
     void computeGroupPE(std::vector<double>& groupPE) const;
     void computeGroupKE(OpenMM::ContextImpl& context, std::vector<double>& groupKE) const;
