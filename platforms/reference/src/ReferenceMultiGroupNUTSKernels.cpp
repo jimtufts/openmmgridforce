@@ -31,6 +31,25 @@ static vector<Vec3>& refExtractVelocitiesNUTS(ContextImpl& context) {
     return *((vector<Vec3>*)data->velocities);
 }
 
+// Uniform random rotation matrix (row-major 3x3) via Shoemake's quaternion method.
+static void generateRandomQuaternionRotationNUTS(
+        mt19937& rng, uniform_real_distribution<double>& uDist, double* R) {
+    double u0 = uDist(rng), u1 = uDist(rng), u2 = uDist(rng);
+    double s0 = sqrt(1.0 - u0), s1 = sqrt(u0);
+    double t1 = 2.0 * M_PI * u1, t2 = 2.0 * M_PI * u2;
+    double q0 = s0 * sin(t1), q1 = s0 * cos(t1);
+    double q2 = s1 * sin(t2), q3 = s1 * cos(t2);
+    R[0] = q0*q0 + q1*q1 - q2*q2 - q3*q3;
+    R[1] = 2*(q1*q2 - q0*q3);
+    R[2] = 2*(q1*q3 + q0*q2);
+    R[3] = 2*(q1*q2 + q0*q3);
+    R[4] = q0*q0 - q1*q1 + q2*q2 - q3*q3;
+    R[5] = 2*(q2*q3 - q0*q1);
+    R[6] = 2*(q1*q3 - q0*q2);
+    R[7] = 2*(q2*q3 + q0*q1);
+    R[8] = q0*q0 - q1*q1 - q2*q2 + q3*q3;
+}
+
 void ReferenceIntegrateMultiGroupNUTSStepKernel::initialize(
         const System& system, const MultiGroupNUTSIntegrator& integrator) {
 
@@ -58,6 +77,9 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::initialize(
     trialCounts.resize(numGroups, 0);
     divergenceCounts.resize(numGroups, 0);
     cumulativeTreeDepths.resize(numGroups, 0LL);
+    lastMCAcceptedPerGroup.resize(numGroups, 0);
+    mcAttemptedTotal = 0;
+    mcAcceptedTotal = 0;
 
     int seed = integrator.getRandomNumberSeed();
     if (seed == 0) {
@@ -203,6 +225,10 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::execute(
             }
         }
     }
+
+    // Rigid-body MC pre-step. May change positions, invalidating forces.
+    if (integrator.getNumMCTrials() > 0)
+        executeMC(context, integrator);
 
     // Per-group kT and signed dt
     vector<double> kT(K);
@@ -477,6 +503,108 @@ void ReferenceIntegrateMultiGroupNUTSStepKernel::resetCounters() {
     fill(trialCounts.begin(), trialCounts.end(), 0);
     fill(divergenceCounts.begin(), divergenceCounts.end(), 0);
     fill(cumulativeTreeDepths.begin(), cumulativeTreeDepths.end(), 0LL);
+}
+
+void ReferenceIntegrateMultiGroupNUTSStepKernel::resetMCCounters() {
+    mcAttemptedTotal = 0;
+    mcAcceptedTotal = 0;
+    fill(lastMCAcceptedPerGroup.begin(), lastMCAcceptedPerGroup.end(), 0);
+}
+
+// Rigid-body Monte Carlo pre-step. Each trial proposes, per eligible group, a
+// random rotation about the group center of mass (even trials) plus a Gaussian
+// translation, then accepts or rejects per group with the Metropolis criterion
+// on that group's potential energy. Mirrors the CUDA executeMC.
+void ReferenceIntegrateMultiGroupNUTSStepKernel::executeMC(
+        ContextImpl& context, const MultiGroupNUTSIntegrator& integrator) {
+
+    int K = numGroups;
+    int numTrials = integrator.getNumMCTrials();
+    double mcStep = integrator.getMCStepSize();
+
+    fill(lastMCAcceptedPerGroup.begin(), lastMCAcceptedPerGroup.end(), 0);
+
+    vector<int> mcEnabled = integrator.getAllGroupMCEnabled();
+    bool anyEligible = false;
+    for (int k = 0; k < K; k++)
+        if (mcEnabled[k]) { anyEligible = true; break; }
+    if (!anyEligible) return;
+
+    vector<Vec3>& posData = refExtractPositions(context);
+
+    int allGroupsMask = 0xFFFFFFFF;
+    context.calcForcesAndEnergy(true, true, allGroupsMask);
+    vector<double> peBaseline(K, 0.0);
+    computeGroupPE(peBaseline);
+
+    vector<double> kT(K);
+    for (int k = 0; k < K; k++)
+        kT[k] = BOLTZ * integrator.getGroupTemperature(k);
+
+    vector<Vec3> backup(numParticles);
+    double R[9];
+
+    for (int trial = 0; trial < numTrials; trial++) {
+        for (int i = 0; i < numParticles; i++)
+            backup[i] = posData[i];
+
+        vector<Vec3> com(K, Vec3(0, 0, 0));
+        for (int k = 0; k < K; k++) {
+            if (!mcEnabled[k]) continue;
+            int base = k * atomsPerGroup;
+            double totalMass = 0.0;
+            Vec3 acc(0, 0, 0);
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = base + a;
+                double m = masses[idx];
+                acc += posData[idx] * m;
+                totalMass += m;
+            }
+            if (totalMass > 0.0) com[k] = acc * (1.0 / totalMass);
+        }
+
+        for (int k = 0; k < K; k++) {
+            if (!mcEnabled[k]) continue;
+            if (trial % 2 == 0)
+                generateRandomQuaternionRotationNUTS(rng, uniformDist, R);
+            else {
+                for (int e = 0; e < 9; e++) R[e] = 0.0;
+                R[0] = R[4] = R[8] = 1.0;
+            }
+            Vec3 t(normalDist(rng) * mcStep,
+                   normalDist(rng) * mcStep,
+                   normalDist(rng) * mcStep);
+            int base = k * atomsPerGroup;
+            for (int a = 0; a < atomsPerGroup; a++) {
+                int idx = base + a;
+                Vec3 rel = posData[idx] - com[k];
+                Vec3 rot(R[0]*rel[0] + R[1]*rel[1] + R[2]*rel[2],
+                         R[3]*rel[0] + R[4]*rel[1] + R[5]*rel[2],
+                         R[6]*rel[0] + R[7]*rel[1] + R[8]*rel[2]);
+                posData[idx] = rot + com[k] + t;
+            }
+        }
+
+        context.calcForcesAndEnergy(true, true, allGroupsMask);
+        vector<double> peTrial(K, 0.0);
+        computeGroupPE(peTrial);
+
+        for (int k = 0; k < K; k++) {
+            if (!mcEnabled[k]) continue;
+            mcAttemptedTotal++;
+            double dE = peTrial[k] - peBaseline[k];
+            bool accept = (dE <= 0.0) || (uniformDist(rng) < exp(-dE / kT[k]));
+            if (accept) {
+                mcAcceptedTotal++;
+                lastMCAcceptedPerGroup[k]++;
+                peBaseline[k] = peTrial[k];
+            } else {
+                int base = k * atomsPerGroup;
+                for (int a = 0; a < atomsPerGroup; a++)
+                    posData[base + a] = backup[base + a];
+            }
+        }
+    }
 }
 
 }  // namespace GridForcePlugin

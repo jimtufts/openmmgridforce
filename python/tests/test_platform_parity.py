@@ -51,8 +51,12 @@ TOL = {
 # as GAP rather than failing the run; remove the entry when the gap is closed.
 # Keys: (case, label, kind).
 OPEN_GAPS = {
-    # No known gaps currently. Add (case, label, kind) tuples here when one is
-    # identified, so it is tracked explicitly rather than silently passing.
+    # CUDA NUTS rigid-body MC under-accepts a rigid-invariant move (~10% vs the
+    # expected ~100%); the CUDA HMC path and both Reference paths are correct.
+    # A CUDA NUTS-only defect to fix in the NUTS executeMC.
+    ('NUTS-mc', 'CUDA/single', 'mc'),
+    ('NUTS-mc', 'CUDA/mixed', 'mc'),
+    ('NUTS-mc', 'CUDA/double', 'mc'),
 }
 
 _failures = []
@@ -728,6 +732,53 @@ def integrators_section(specs):
                 else:
                     print(f"    FAIL {nm:4s} {label:12s}: {repr(e)[:80]}")
                     _failures.append((nm, label, 'integrator', repr(e)))
+
+    # Rigid-body MC moves: a rigid rotation+translation of a group leaves its
+    # internal (bonded-only) energy invariant, so dE = 0 and every Metropolis
+    # trial must be accepted (~100%). This checks the move geometry and counters.
+    print("\n=== MultiGroup rigid-body MC (rigid-invariant energy) ===")
+    for IntCls, nm in [(gfp.MultiGroupHMCIntegrator, 'HMC'),
+                       (gfp.MultiGroupNUTSIntegrator, 'NUTS')]:
+        for spec in specs:
+            label = spec[0]
+            try:
+                system = mm.System()
+                for _ in range(K * N):
+                    system.addParticle(12.0)
+                f = gfp.IsolatedBondedForce()
+                f.setNumAtoms(N)
+                for b in bonds:
+                    f.addBond(*b)
+                for a in angles:
+                    f.addAngle(*a)
+                for g in range(K):
+                    f.addParticleGroup(f'g{g}', list(range(g * N, (g + 1) * N)))
+                system.addForce(f)
+                integ = IntCls(K, N, 0.001)
+                integ.setNumMCTrials(4)
+                integ.setMCStepSize(0.05)
+                integ.setAllGroupMCEnabled([1] * K)
+                integ.setRandomNumberSeed(12345)
+                ctx = mm.Context(system, integ,
+                                 mm.Platform.getPlatformByName(spec[1]), spec[2])
+                ctx.setPositions(all_pos)
+                integ.step(10)
+                att, acc = integ.getMCAttempted(), integ.getMCAccepted()
+                rate = acc / att if att else 0.0
+                ok = att > 0 and rate > 0.95
+                tag = (nm + '-mc', label, 'mc')
+                if not ok and tag in OPEN_GAPS:
+                    print(f"    GAP  {nm:4s} {label:12s}: rate={rate:.3f} ({acc}/{att})")
+                    _gaps.append(tag)
+                else:
+                    status = 'OK' if ok else 'FAIL'
+                    print(f"    {status:4s} {nm:4s} {label:12s}: MC accept rate={rate:.3f} ({acc}/{att})")
+                    if not ok:
+                        _failures.append((nm + '-mc', label, 'mc', f"rate={rate:.3f}"))
+                del ctx
+            except Exception as e:
+                print(f"    FAIL {nm:4s} {label:12s}: {repr(e)[:80]}")
+                _failures.append((nm + '-mc', label, 'mc', repr(e)))
 
 
 SECTIONS = {

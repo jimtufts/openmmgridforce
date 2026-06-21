@@ -40,13 +40,13 @@ public:
     std::vector<int> getStabilityRejectCounts() const override { return stabilityRejectCounts; }
     void resetCounters() override;
 
-    // MC stubs (Reference platform — MC not yet implemented)
+    // Rigid-body Monte Carlo pre-step (random rotation about COM + translation).
     void executeMC(OpenMM::ContextImpl& context,
-                   const MultiGroupHMCIntegrator& integrator) override {}
-    int getMCAttempted() const override { return 0; }
-    int getMCAccepted() const override { return 0; }
-    std::vector<int> getLastMCAccepted() const override { return std::vector<int>(numGroups, 0); }
-    void resetMCCounters() override {}
+                   const MultiGroupHMCIntegrator& integrator) override;
+    int getMCAttempted() const override { return mcAttemptedTotal; }
+    int getMCAccepted() const override { return mcAcceptedTotal; }
+    std::vector<int> getLastMCAccepted() const override { return lastMCAcceptedPerGroup; }
+    void resetMCCounters() override;
 
     // Riemannian metric (Reference platform — identity only, non-identity throws)
     std::vector<double> getGroupMetricConditionNumbers() const override {
@@ -72,6 +72,11 @@ private:
     std::vector<int> acceptCounts;
     std::vector<int> trialCounts;
     std::vector<int> stabilityRejectCounts;
+
+    // Rigid-body MC statistics
+    int mcAttemptedTotal = 0;
+    int mcAcceptedTotal = 0;
+    std::vector<int> lastMCAcceptedPerGroup;
 
     // RNG
     std::mt19937 rng;
