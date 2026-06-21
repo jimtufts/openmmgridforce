@@ -40,9 +40,11 @@ bool ReferenceCalcGBSAGridForceKernel::isExcluded(int i, int j) const {
 double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         double x, double y, double z,
         double R_i_off, bool computeGrad,
-        double& gradX, double& gradY, double& gradZ) const {
+        double& gradX, double& gradY, double& gradZ,
+        double* hess) const {
 
     gradX = gradY = gradZ = 0.0;
+    if (hess) for (int c = 0; c < 6; c++) hess[c] = 0.0;
 
     if (!desolvationGrid) return 0.0;
 
@@ -197,6 +199,31 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         gradX = (dh_dfx + dCorr_dN * dN_dfx + dCorr_dA * dA_dfx + dCorr_dB * dB_dfx) * invSpacing;
         gradY = (dh_dfy + dCorr_dN * dN_dfy + dCorr_dA * dA_dfy + dCorr_dB * dB_dfy) * invSpacing;
         gradZ = (dh_dfz + dCorr_dN * dN_dfz + dCorr_dA * dA_dfz + dCorr_dB * dB_dfz) * invSpacing;
+    }
+
+    // Second derivatives of the interpolated HCT (trilinear). Pure d2 (xx,yy,zz)
+    // vanish for trilinear; only the mixed terms survive. The combined field at
+    // each corner is hct + delta*N - 0.25*delta*sigma*A + logTerm*B.
+    if (hess) {
+        double dN = delta, dA = -0.25 * delta * sigma, dB = logTerm;
+        double v000 = h000 + dN * N000 + dA * A000 + dB * B000;
+        double v001 = h001 + dN * N001 + dA * A001 + dB * B001;
+        double v010 = h010 + dN * N010 + dA * A010 + dB * B010;
+        double v011 = h011 + dN * N011 + dA * A011 + dB * B011;
+        double v100 = h100 + dN * N100 + dA * A100 + dB * B100;
+        double v101 = h101 + dN * N101 + dA * A101 + dB * B101;
+        double v110 = h110 + dN * N110 + dA * A110 + dB * B110;
+        double v111 = h111 + dN * N111 + dA * A111 + dB * B111;
+        double invSpacing2 = 1.0 / (spacing * spacing);
+        hess[0] = 0.0;  // xx
+        hess[1] = 0.0;  // yy
+        hess[2] = 0.0;  // zz
+        hess[3] = (ofz * (v000 - v010 - v100 + v110)
+                   + fz * (v001 - v011 - v101 + v111)) * invSpacing2;  // xy
+        hess[4] = (ofy * (v000 - v001 - v100 + v101)
+                   + fy * (v010 - v011 - v110 + v111)) * invSpacing2;  // xz
+        hess[5] = (ofx * (v000 - v001 - v010 + v011)
+                   + fx * (v100 - v101 - v110 + v111)) * invSpacing2;  // yz
     }
 
     return result;
@@ -552,92 +579,425 @@ void ReferenceCalcGBSAGridForceKernel::updateParametersInContext(
 }
 
 // ==================== computeHessian ====================
+//
+// Analytical second derivatives of the grid-GB energy. Each particle group is
+// isolated, so the Hessian is block-diagonal in the (3*totalParticles) matrix.
+// Within a group the energy depends on coordinates directly (the explicit r in
+// the Still pair term) and through the Born radii R_i = G(Psi_i), where
+// Psi_i = Psi_i^grid(x_i) + sum_{j!=i} HCT(r_ij). The receptor screening enters
+// only through the per-atom grid term Psi_i^grid (no receptor degrees of
+// freedom), contributing its gradient to the Jacobian self-block and its
+// second derivative to the diagonal atom block. The assembly mirrors the CUDA
+// kernel: H = H_direct + H_cross + J^T M J + dE/dPsi * d2Psi.
+
+namespace {
+
+// Born transform derivatives dR/dPsi and d2R/dPsi2 for OBC-II Born radii, where
+// Psi is the (unscaled) HCT sum. Returns zeros where the radius is capped.
+struct GridBornDerivs { double dRdPsi, d2RdPsi2; };
+
+inline GridBornDerivs gridBornDerivs(double R_intrinsic, double R_off,
+                                     double hctTotal, double R_born, bool capped) {
+    GridBornDerivs d{0.0, 0.0};
+    if (capped || R_off <= 0.0) return d;
+    double psi = 0.5 * R_off * hctTotal;
+    double psi2 = psi * psi;
+    double arg = OBC_ALPHA * psi - OBC_BETA * psi2 + OBC_GAMMA * psi2 * psi;
+    double t = tanh(arg);
+    double sech2 = 1.0 - t * t;
+    double darg = OBC_ALPHA - 2.0 * OBC_BETA * psi + 3.0 * OBC_GAMMA * psi2;
+    double d2arg = -2.0 * OBC_BETA + 6.0 * OBC_GAMMA * psi;
+    double dpsi = 0.5 * R_off;          // dpsi/dPsi
+    double Dc = dpsi / R_intrinsic;
+    d.dRdPsi = R_born * R_born * sech2 * darg * Dc;
+    double A = R_born * R_born, B = sech2, C = darg;
+    double dA = 2.0 * R_born * d.dRdPsi;
+    double dargP = darg * dpsi;
+    double dB = -2.0 * sech2 * t * dargP;
+    double dC = d2arg * dpsi;
+    d.d2RdPsi2 = (dA * B * C + A * dB * C + A * B * dC) * Dc;
+    return d;
+}
+
+struct GridStillPair { double f, f2, et; };
+inline GridStillPair gridStillPair(double r2, double Ra, double Rb) {
+    GridStillPair s;
+    double RaRb = Ra * Rb;
+    s.et = exp(-r2 / (4.0 * RaRb));
+    s.f2 = r2 + RaRb * s.et;
+    s.f = sqrt(s.f2);
+    return s;
+}
+
+}  // namespace
 
 void ReferenceCalcGBSAGridForceKernel::computeHessian(ContextImpl& context) {
-    // Numerical finite differences for the first (and only) particle group
-    int hessianSize = 3 * numAtoms;
-    hessianBlocks_.assign(6 * numAtoms, 0.0);
-    fullHessian_.assign(hessianSize * hessianSize, 0.0);
-
-    if (numAtoms == 0 || numParticleGroups == 0) return;
-
     vector<Vec3>& posData = refExtractPositions(context);
-    const vector<int>& particles = groupParticleIndices[0];
 
-    double delta = 0.001;  // nm
+    int totalParticles = numParticleGroups * numAtoms;
+    int dim3N = 3 * totalParticles;
+    hessianBlocks_.assign(6 * totalParticles, 0.0);
+    fullHessian_.assign(static_cast<size_t>(dim3N) * dim3N, 0.0);
+    if (totalParticles == 0) return;
 
-    // Central difference: H[a][b] = (E(+a,+b) + E(-a,-b) - E(+a,-b) - E(-a,+b)) / (4*delta^2)
-    // But for efficiency, use force-based: H[a][b] = -(F_a(+b) - F_a(-b)) / (2*delta)
+    const int hmap[3][3] = {{0, 3, 4}, {3, 1, 5}, {4, 5, 2}};  // (a,b)->block index
 
-    // Save original positions
-    vector<Vec3> savedPos(numAtoms);
-    for (int i = 0; i < numAtoms; i++)
-        savedPos[i] = posData[particles[i]];
+    for (int g = 0; g < numParticleGroups; g++) {
+        double scale = globalScalingFactor * groupScalingFactors[g];
+        if (scale == 0.0) continue;
+        const vector<int>& particles = groupParticleIndices[g];
+        int N = numAtoms;
+        int n3 = 3 * N;
 
-    // For each coordinate b, perturb +/- delta, compute forces, build Hessian column
-    for (int atomB = 0; atomB < numAtoms; atomB++) {
-        for (int dimB = 0; dimB < 3; dimB++) {
-            int colIdx = 3 * atomB + dimB;
-
-            // Perturb +delta
-            posData[particles[atomB]][dimB] += delta;
-            // Zero forces
-            vector<Vec3>& forceData = refExtractForces(context);
-            for (int i = 0; i < numAtoms; i++) {
-                int pi = particles[i];
-                forceData[pi] = Vec3(0, 0, 0);
+        // ---- Forward quantities the Hessian differentiates ----
+        // Receptor grid HCT (value + gradient + second derivative) and the
+        // ligand-ligand HCT sum (honoring exclusions, as in execute()).
+        vector<double> hctReceptor(N, 0.0), hctLigand(N, 0.0);
+        vector<double> gridGradX(N, 0.0), gridGradY(N, 0.0), gridGradZ(N, 0.0);
+        vector<double> gridHess(static_cast<size_t>(N) * 6, 0.0);
+        for (int i = 0; i < N; i++) {
+            int pi = particles[i];
+            double Ri_off = radii[i] - DIELECTRIC_OFFSET;
+            double gx, gy, gz, hh[6];
+            hctReceptor[i] = interpolateReceptorHCT(
+                posData[pi][0], posData[pi][1], posData[pi][2],
+                Ri_off, true, gx, gy, gz, hh);
+            gridGradX[i] = gx; gridGradY[i] = gy; gridGradZ[i] = gz;
+            for (int c = 0; c < 6; c++) gridHess[(size_t)i*6 + c] = hh[c];
+            for (int j = 0; j < N; j++) {
+                if (i == j || isExcluded(i, j)) continue;
+                int pj = particles[j];
+                double dx = posData[pi][0]-posData[pj][0];
+                double dy = posData[pi][1]-posData[pj][1];
+                double dz = posData[pi][2]-posData[pj][2];
+                double r = sqrt(dx*dx+dy*dy+dz*dz);
+                if (r < 1e-10) continue;
+                double Rj_off = radii[j] - DIELECTRIC_OFFSET;
+                hctLigand[i] += computeHCTTerm(r, Ri_off, Rj_off, scaleFactors[j]);
             }
-            execute(context, true, false);
-            vector<Vec3> forcePlus(numAtoms);
-            for (int i = 0; i < numAtoms; i++)
-                forcePlus[i] = forceData[particles[i]];
+        }
 
-            // Restore
-            posData[particles[atomB]][dimB] = savedPos[atomB][dimB];
+        vector<double> hctTotal(N), born(N);
+        vector<char> capped(N, 0);
+        for (int i = 0; i < N; i++) {
+            hctTotal[i] = hctReceptor[i] + hctLigand[i];
+            double R_off = radii[i] - DIELECTRIC_OFFSET;
+            double psi = 0.5 * R_off * hctTotal[i];
+            double psi2 = psi*psi;
+            double t = tanh(OBC_ALPHA*psi - OBC_BETA*psi2 + OBC_GAMMA*psi2*psi);
+            double inner = 1.0/R_off - t/radii[i];
+            if (inner > 0.0) born[i] = 1.0/inner;
+            else { born[i] = 500.0; capped[i] = 1; }
+        }
 
-            // Perturb -delta
-            posData[particles[atomB]][dimB] -= delta;
-            for (int i = 0; i < numAtoms; i++) {
-                int pi = particles[i];
-                forceData[pi] = Vec3(0, 0, 0);
+        // dE/dR (GB self + ligand-ligand pairs) and surface area.
+        vector<double> dE_dR(N, 0.0);
+        for (int i = 0; i < N; i++)
+            dE_dR[i] += -0.5 * prefactor * charges[i]*charges[i] / (born[i]*born[i]);
+        for (int i = 0; i < N; i++) {
+            int pi = particles[i];
+            for (int j = i+1; j < N; j++) {
+                if (isExcluded(i, j)) continue;
+                int pj = particles[j];
+                double dx = posData[pi][0]-posData[pj][0];
+                double dy = posData[pi][1]-posData[pj][1];
+                double dz = posData[pi][2]-posData[pj][2];
+                double r2 = dx*dx+dy*dy+dz*dz;
+                double D = born[i]*born[j];
+                double al = r2/(4.0*D), et = exp(-al);
+                double f2 = r2 + D*et, f = sqrt(f2);
+                double qq = charges[i]*charges[j];
+                double dfi = born[j]*et*(1.0+al)/(2.0*f);
+                double dfj = born[i]*et*(1.0+al)/(2.0*f);
+                dE_dR[i] += -prefactor*qq/f2*dfi;
+                dE_dR[j] += -prefactor*qq/f2*dfj;
             }
-            execute(context, true, false);
-            vector<Vec3> forceMinus(numAtoms);
-            for (int i = 0; i < numAtoms; i++)
-                forceMinus[i] = forceData[particles[i]];
+        }
+        if (includeSurfaceArea) {
+            for (int i = 0; i < N; i++) {
+                double Rp = radii[i] + probeRadius;
+                double ratio = radii[i]/born[i];
+                double ratio6 = ratio*ratio*ratio; ratio6 *= ratio6;
+                dE_dR[i] += -6.0 * surfaceTension * 4.0 * M_PI * Rp*Rp * ratio6 / born[i];
+            }
+        }
 
-            // Restore
-            posData[particles[atomB]][dimB] = savedPos[atomB][dimB];
+        // Per-atom Born transform derivatives and dE/dPsi.
+        vector<double> dRdPsi(N), d2RdPsi2(N), dE_dHCT(N);
+        for (int i = 0; i < N; i++) {
+            double R_off = radii[i] - DIELECTRIC_OFFSET;
+            GridBornDerivs bd = gridBornDerivs(radii[i], R_off, hctTotal[i], born[i], capped[i]);
+            dRdPsi[i] = bd.dRdPsi;
+            d2RdPsi2[i] = bd.d2RdPsi2;
+            dE_dHCT[i] = dE_dR[i] * bd.dRdPsi;
+        }
 
-            // H[a][b] = -(F_a(+b) - F_a(-b)) / (2*delta)
-            for (int atomA = 0; atomA < numAtoms; atomA++) {
-                for (int dimA = 0; dimA < 3; dimA++) {
-                    int rowIdx = 3 * atomA + dimA;
-                    double h_ab = -(forcePlus[atomA][dimA] - forceMinus[atomA][dimA]) / (2.0 * delta);
-                    fullHessian_[rowIdx * hessianSize + colIdx] = h_ab;
+        // ---- Jacobian J[k][3*i+a] = dPsi_k/dx_{i,a} ----
+        // Ligand-ligand pairwise terms plus the receptor grid gradient (grid
+        // depends only on x_k, so it enters only the self block).
+        vector<double> J(static_cast<size_t>(N) * n3, 0.0);
+        for (int k = 0; k < N; k++) {
+            int pk = particles[k];
+            double Rk_off = radii[k] - DIELECTRIC_OFFSET;
+            double jsx = gridGradX[k], jsy = gridGradY[k], jsz = gridGradZ[k];
+            for (int j = 0; j < N; j++) {
+                if (j == k || isExcluded(k, j)) continue;
+                int pj = particles[j];
+                double dx = posData[pk][0]-posData[pj][0];
+                double dy = posData[pk][1]-posData[pj][1];
+                double dz = posData[pk][2]-posData[pj][2];
+                double r = sqrt(dx*dx+dy*dy+dz*dz);
+                if (r < 1e-10) continue;
+                double Rj_off = radii[j] - DIELECTRIC_OFFSET;
+                double I1 = computeHCTTermDerivative(r, Rk_off, Rj_off, scaleFactors[j]);
+                double invr = 1.0/r;
+                jsx += I1*dx*invr; jsy += I1*dy*invr; jsz += I1*dz*invr;
+                J[(size_t)k*n3 + 3*j + 0] = -I1*dx*invr;
+                J[(size_t)k*n3 + 3*j + 1] = -I1*dy*invr;
+                J[(size_t)k*n3 + 3*j + 2] = -I1*dz*invr;
+            }
+            J[(size_t)k*n3 + 3*k + 0] = jsx;
+            J[(size_t)k*n3 + 3*k + 1] = jsy;
+            J[(size_t)k*n3 + 3*k + 2] = jsz;
+        }
+
+        // ---- Coupling matrix M[k][l] = d2E/dPsi_k dPsi_l ----
+        vector<double> M(static_cast<size_t>(N) * N, 0.0);
+        for (int k = 0; k < N; k++) {
+            int pk = particles[k];
+            double q_k = charges[k];
+            double Rk = born[k], dRk = dRdPsi[k];
+            double diag = prefactor * q_k*q_k / (Rk*Rk*Rk) * dRk*dRk;  // self
+            if (includeSurfaceArea) {
+                double Rp = radii[k] + probeRadius;
+                double ratio = radii[k]/Rk;
+                double ratio6 = ratio*ratio*ratio; ratio6 *= ratio6;
+                double E_SA = surfaceTension * 4.0 * M_PI * Rp*Rp * ratio6;
+                diag += 42.0 * E_SA / (Rk*Rk) * dRk*dRk;
+            }
+            diag += dE_dR[k] * d2RdPsi2[k];     // OBC curvature
+            for (int l = 0; l < N; l++) {
+                if (l == k || isExcluded(k, l)) continue;
+                int pl = particles[l];
+                double dx = posData[pl][0]-posData[pk][0];
+                double dy = posData[pl][1]-posData[pk][1];
+                double dz = posData[pl][2]-posData[pk][2];
+                double r2 = dx*dx+dy*dy+dz*dz;
+                double Rl = born[l], dRl = dRdPsi[l];
+                GridStillPair sp = gridStillPair(r2, Rk, Rl);
+                double f = sp.f, et = sp.et;
+                double C = prefactor * q_k * charges[l];
+                double df2_dRk = et*(Rl + 0.25*r2/Rk);
+                double df_dRk = df2_dRk/(2.0*f);
+                double dalpha_dRk = et*r2/(4.0*Rk*Rk*Rl);
+                double d2f2_dRk2 = dalpha_dRk*(Rl + 0.25*r2/Rk) + et*(-0.25*r2/(Rk*Rk));
+                double d2f_dRk2 = d2f2_dRk2/(2.0*f) - df2_dRk*df2_dRk/(4.0*f*f*f);
+                double d2E_dRk2 = C*(2.0*df_dRk*df_dRk/(f*f*f) - d2f_dRk2/(f*f));
+                diag += d2E_dRk2 * dRk * dRk;
+                double df2_dRl = et*(Rk + 0.25*r2/Rl);
+                double df_dRl = df2_dRl/(2.0*f);
+                double dalpha_dRl = et*r2/(4.0*Rk*Rl*Rl);
+                double d2f2_dRkRl = dalpha_dRl*(Rl + 0.25*r2/Rk) + et;
+                double d2f_dRkRl = d2f2_dRkRl/(2.0*f) - df2_dRk*df2_dRl/(4.0*f*f*f);
+                double d2E_dRkRl = C*(2.0*df_dRk*df_dRl/(f*f*f) - d2f_dRkRl/(f*f));
+                M[(size_t)k*N + l] = d2E_dRkRl * dRk * dRl;
+            }
+            M[(size_t)k*N + k] = diag;
+        }
+
+        // ---- Assemble the group block ----
+        vector<double> Hloc(static_cast<size_t>(n3) * n3, 0.0);
+        for (int ai = 0; ai < N; ai++) {
+            int pai = particles[ai];
+            for (int aj = ai; aj < N; aj++) {
+                int paj = particles[aj];
+                for (int a = 0; a < 3; a++) {
+                    int row = 3*ai + a;
+                    int bStart = (aj == ai) ? a : 0;
+                    for (int b = bStart; b < 3; b++) {
+                        int col = 3*aj + b;
+                        double Hval = 0.0;
+
+                        if (ai == aj) {
+                            double pix = posData[pai][0], piy = posData[pai][1], piz = posData[pai][2];
+                            double q_i = charges[ai];
+                            double Ri = born[ai];
+                            double Ri_off = radii[ai] - DIELECTRIC_OFFSET;
+                            double Si = Ri_off * scaleFactors[ai];
+                            for (int l = 0; l < N; l++) {
+                                if (l == ai || isExcluded(ai, l)) continue;
+                                int pl = particles[l];
+                                double dx = posData[pl][0]-pix, dy = posData[pl][1]-piy, dz = posData[pl][2]-piz;
+                                double r2 = dx*dx+dy*dy+dz*dz, r = sqrt(r2);
+                                if (r < 1e-10) continue;
+                                double Rl = born[l];
+                                GridStillPair sp = gridStillPair(r2, Ri, Rl);
+                                double f = sp.f, et = sp.et;
+                                double C = prefactor * q_i * charges[l];
+                                double df2_dr = 2.0*r*(1.0 - 0.25*et);
+                                double df_dr = df2_dr/(2.0*f);
+                                double dEdr = -C*df_dr/(f*f);
+                                double d2f2_dr2 = 2.0 - 0.5*et + 0.25*r2*et/(Ri*Rl);
+                                double d2f_dr2 = d2f2_dr2/(2.0*f) - df2_dr*df2_dr/(4.0*f*f*f);
+                                double d2Edr2 = C*(2.0*df_dr*df_dr/(f*f*f) - d2f_dr2/(f*f));
+                                double Rl_off = radii[l] - DIELECTRIC_OFFSET;
+                                double Sl = Rl_off * scaleFactors[l];
+                                if (Ri_off < r + Sl) {
+                                    double I1 = computeHCTTermDerivative(r, Ri_off, Rl_off, scaleFactors[l]);
+                                    double I2 = computeHCTTermSecondDerivative(r, Ri_off, Rl_off, scaleFactors[l]);
+                                    dEdr += dE_dHCT[ai]*I1; d2Edr2 += dE_dHCT[ai]*I2;
+                                }
+                                if (Rl_off < r + Si) {
+                                    double I1 = computeHCTTermDerivative(r, Rl_off, Ri_off, scaleFactors[ai]);
+                                    double I2 = computeHCTTermSecondDerivative(r, Rl_off, Ri_off, scaleFactors[ai]);
+                                    dEdr += dE_dHCT[l]*I1; d2Edr2 += dE_dHCT[l]*I2;
+                                }
+                                double dalpha_dRi = et*r2/(4.0*Ri*Ri*Rl);
+                                double d2f2_dr_dRi = 2.0*r*(-0.25*dalpha_dRi);
+                                double df2_dRi = et*(Rl + 0.25*r2/Ri);
+                                double d2f_dr_dRi = d2f2_dr_dRi/(2.0*f) - df2_dr*df2_dRi/(4.0*f*f*f);
+                                double d2E_dr_dRi = C*(2.0*df_dr*(df2_dRi/(2.0*f))/(f*f*f) - d2f_dr_dRi/(f*f));
+                                double g_i = d2E_dr_dRi * dRdPsi[ai];
+                                double dalpha_dRl = et*r2/(4.0*Ri*Rl*Rl);
+                                double d2f2_dr_dRl = 2.0*r*(-0.25*dalpha_dRl);
+                                double df2_dRl = et*(Ri + 0.25*r2/Rl);
+                                double d2f_dr_dRl = d2f2_dr_dRl/(2.0*f) - df2_dr*df2_dRl/(4.0*f*f*f);
+                                double d2E_dr_dRl = C*(2.0*df_dr*(df2_dRl/(2.0*f))/(f*f*f) - d2f_dr_dRl/(f*f));
+                                double g_l = d2E_dr_dRl * dRdPsi[l];
+                                double Dd[3] = {dx, dy, dz};
+                                double ir = 1.0/r, ir2 = ir*ir;
+                                Hval += (d2Edr2 - dEdr*ir)*Dd[a]*Dd[b]*ir2
+                                      + ((a==b) ? dEdr*ir : 0.0);
+                                double dr_a = -Dd[a]*ir, dr_b = -Dd[b]*ir;
+                                Hval += g_i*(dr_a*J[(size_t)ai*n3 + 3*ai + b] + J[(size_t)ai*n3 + 3*ai + a]*dr_b);
+                                Hval += g_l*(dr_a*J[(size_t)l*n3 + 3*ai + b] + J[(size_t)l*n3 + 3*ai + a]*dr_b);
+                            }
+                            // Receptor grid self-Hessian: dE/dPsi_ai * d2Psi_grid/dx dx.
+                            Hval += dE_dHCT[ai] * gridHess[(size_t)ai*6 + hmap[a][b]];
+                        } else {
+                            double pix = posData[pai][0], piy = posData[pai][1], piz = posData[pai][2];
+                            double pjx = posData[paj][0], pjy = posData[paj][1], pjz = posData[paj][2];
+                            double q_i = charges[ai], q_j = charges[aj];
+                            double Ri = born[ai], Rj = born[aj];
+                            double dx = pjx-pix, dy = pjy-piy, dz = pjz-piz;
+                            double r2 = dx*dx+dy*dy+dz*dz, r = sqrt(r2);
+                            if (r >= 1e-10 && !isExcluded(ai, aj)) {
+                                GridStillPair sp = gridStillPair(r2, Ri, Rj);
+                                double f = sp.f, et = sp.et;
+                                double C = prefactor * q_i * q_j;
+                                double df2_dr = 2.0*r*(1.0 - 0.25*et);
+                                double df_dr = df2_dr/(2.0*f);
+                                double dEdr = -C*df_dr/(f*f);
+                                double d2f2_dr2 = 2.0 - 0.5*et + 0.25*r2*et/(Ri*Rj);
+                                double d2f_dr2 = d2f2_dr2/(2.0*f) - df2_dr*df2_dr/(4.0*f*f*f);
+                                double d2Edr2 = C*(2.0*df_dr*df_dr/(f*f*f) - d2f_dr2/(f*f));
+                                double Ri_off = radii[ai]-DIELECTRIC_OFFSET, Rj_off = radii[aj]-DIELECTRIC_OFFSET;
+                                double Si = Ri_off*scaleFactors[ai], Sj = Rj_off*scaleFactors[aj];
+                                if (Ri_off < r + Sj) {
+                                    double I1 = computeHCTTermDerivative(r, Ri_off, Rj_off, scaleFactors[aj]);
+                                    double I2 = computeHCTTermSecondDerivative(r, Ri_off, Rj_off, scaleFactors[aj]);
+                                    dEdr += dE_dHCT[ai]*I1; d2Edr2 += dE_dHCT[ai]*I2;
+                                }
+                                if (Rj_off < r + Si) {
+                                    double I1 = computeHCTTermDerivative(r, Rj_off, Ri_off, scaleFactors[ai]);
+                                    double I2 = computeHCTTermSecondDerivative(r, Rj_off, Ri_off, scaleFactors[ai]);
+                                    dEdr += dE_dHCT[aj]*I1; d2Edr2 += dE_dHCT[aj]*I2;
+                                }
+                                double ir = 1.0/r, ir2 = ir*ir;
+                                double Dd[3] = {dx, dy, dz};
+                                Hval += -(d2Edr2 - dEdr*ir)*Dd[a]*Dd[b]*ir2
+                                      - ((a==b) ? dEdr*ir : 0.0);
+                            }
+                            // g-terms: pairs involving ai (column), then aj (row).
+                            for (int l = 0; l < N; l++) {
+                                if (l == ai || isExcluded(ai, l)) continue;
+                                int pl = particles[l];
+                                double dx_=posData[pl][0]-pix, dy_=posData[pl][1]-piy, dz_=posData[pl][2]-piz;
+                                double r2_=dx_*dx_+dy_*dy_+dz_*dz_, r_=sqrt(r2_);
+                                if (r_ < 1e-10) continue;
+                                double Rl = born[l];
+                                GridStillPair sp = gridStillPair(r2_, Ri, Rl);
+                                double f=sp.f, et=sp.et; double C=prefactor*q_i*charges[l];
+                                double df2 = 2.0*r_*(1.0-0.25*et); double df = df2/(2.0*f);
+                                double da_i = et*r2_/(4.0*Ri*Ri*Rl);
+                                double d2f2ri = 2.0*r_*(-0.25*da_i);
+                                double df2ri = et*(Rl+0.25*r2_/Ri);
+                                double d2fri = d2f2ri/(2.0*f) - df2*df2ri/(4.0*f*f*f);
+                                double g_i = C*(2.0*df*(df2ri/(2.0*f))/(f*f*f) - d2fri/(f*f))*dRdPsi[ai];
+                                double da_l = et*r2_/(4.0*Ri*Rl*Rl);
+                                double d2f2rl = 2.0*r_*(-0.25*da_l);
+                                double df2rl = et*(Ri+0.25*r2_/Rl);
+                                double d2frl = d2f2rl/(2.0*f) - df2*df2rl/(4.0*f*f*f);
+                                double g_l = C*(2.0*df*(df2rl/(2.0*f))/(f*f*f) - d2frl/(f*f))*dRdPsi[l];
+                                double Dd_[3]={dx_,dy_,dz_};
+                                double dr_a = -Dd_[a]/r_;
+                                double v_col = g_i*J[(size_t)ai*n3+col] + g_l*J[(size_t)l*n3+col];
+                                Hval += dr_a*v_col;
+                            }
+                            for (int m = 0; m < N; m++) {
+                                if (m == aj || isExcluded(aj, m)) continue;
+                                int pm = particles[m];
+                                double dx_=posData[pm][0]-pjx, dy_=posData[pm][1]-pjy, dz_=posData[pm][2]-pjz;
+                                double r2_=dx_*dx_+dy_*dy_+dz_*dz_, r_=sqrt(r2_);
+                                if (r_ < 1e-10) continue;
+                                double Rm = born[m];
+                                GridStillPair sp = gridStillPair(r2_, Rj, Rm);
+                                double f=sp.f, et=sp.et; double C=prefactor*q_j*charges[m];
+                                double df2 = 2.0*r_*(1.0-0.25*et); double df = df2/(2.0*f);
+                                double da_j = et*r2_/(4.0*Rj*Rj*Rm);
+                                double d2f2rj = 2.0*r_*(-0.25*da_j);
+                                double df2rj = et*(Rm+0.25*r2_/Rj);
+                                double d2frj = d2f2rj/(2.0*f) - df2*df2rj/(4.0*f*f*f);
+                                double g_j = C*(2.0*df*(df2rj/(2.0*f))/(f*f*f) - d2frj/(f*f))*dRdPsi[aj];
+                                double da_m = et*r2_/(4.0*Rj*Rm*Rm);
+                                double d2f2rm = 2.0*r_*(-0.25*da_m);
+                                double df2rm = et*(Rj+0.25*r2_/Rm);
+                                double d2frm = d2f2rm/(2.0*f) - df2*df2rm/(4.0*f*f*f);
+                                double g_m = C*(2.0*df*(df2rm/(2.0*f))/(f*f*f) - d2frm/(f*f))*dRdPsi[m];
+                                double Dd_[3]={dx_,dy_,dz_};
+                                double dr_b = -Dd_[b]/r_;
+                                double v_row = g_j*J[(size_t)aj*n3+row] + g_m*J[(size_t)m*n3+row];
+                                Hval += v_row*dr_b;
+                            }
+                        }
+
+                        // J^T M J (Born coupling across all atoms).
+                        for (int kk = 0; kk < N; kk++) {
+                            double Jk = J[(size_t)kk*n3 + row];
+                            if (fabs(Jk) < 1e-18) continue;
+                            for (int ll = 0; ll < N; ll++) {
+                                double Mkl = M[(size_t)kk*N + ll];
+                                if (fabs(Mkl) < 1e-18) continue;
+                                Hval += Jk * Mkl * J[(size_t)ll*n3 + col];
+                            }
+                        }
+
+                        Hloc[(size_t)row*n3 + col] = Hval;
+                        if (col != row) Hloc[(size_t)col*n3 + row] = Hval;
+                    }
                 }
             }
         }
-    }
 
-    // Extract diagonal blocks
-    for (int i = 0; i < numAtoms; i++) {
-        int base = 3 * i;
-        hessianBlocks_[6 * i + 0] = fullHessian_[(base + 0) * hessianSize + (base + 0)]; // dxx
-        hessianBlocks_[6 * i + 1] = fullHessian_[(base + 1) * hessianSize + (base + 1)]; // dyy
-        hessianBlocks_[6 * i + 2] = fullHessian_[(base + 2) * hessianSize + (base + 2)]; // dzz
-        hessianBlocks_[6 * i + 3] = fullHessian_[(base + 0) * hessianSize + (base + 1)]; // dxy
-        hessianBlocks_[6 * i + 4] = fullHessian_[(base + 0) * hessianSize + (base + 2)]; // dxz
-        hessianBlocks_[6 * i + 5] = fullHessian_[(base + 1) * hessianSize + (base + 2)]; // dyz
-    }
-
-    // Symmetrize the full Hessian
-    for (int i = 0; i < hessianSize; i++) {
-        for (int j = i + 1; j < hessianSize; j++) {
-            double avg = 0.5 * (fullHessian_[i * hessianSize + j] + fullHessian_[j * hessianSize + i]);
-            fullHessian_[i * hessianSize + j] = avg;
-            fullHessian_[j * hessianSize + i] = avg;
+        // Scale and scatter the group block into the global (slot-indexed) matrix.
+        for (int r = 0; r < n3; r++) {
+            int slotRow = 3*(g*N + r/3) + (r%3);
+            for (int c = 0; c < n3; c++) {
+                int slotCol = 3*(g*N + c/3) + (c%3);
+                fullHessian_[(size_t)slotRow*dim3N + slotCol] = scale * Hloc[(size_t)r*n3 + c];
+            }
         }
+    }
+
+    // Extract per-atom diagonal blocks [dxx, dyy, dzz, dxy, dxz, dyz].
+    for (int i = 0; i < totalParticles; i++) {
+        int base = 3*i;
+        hessianBlocks_[6*i + 0] = fullHessian_[(size_t)(base+0)*dim3N + (base+0)];
+        hessianBlocks_[6*i + 1] = fullHessian_[(size_t)(base+1)*dim3N + (base+1)];
+        hessianBlocks_[6*i + 2] = fullHessian_[(size_t)(base+2)*dim3N + (base+2)];
+        hessianBlocks_[6*i + 3] = fullHessian_[(size_t)(base+0)*dim3N + (base+1)];
+        hessianBlocks_[6*i + 4] = fullHessian_[(size_t)(base+0)*dim3N + (base+2)];
+        hessianBlocks_[6*i + 5] = fullHessian_[(size_t)(base+1)*dim3N + (base+2)];
     }
 }
 

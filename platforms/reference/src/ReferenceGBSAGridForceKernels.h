@@ -73,14 +73,15 @@ private:
     mutable std::vector<double> groupLigandEnergies_;
     mutable std::vector<std::vector<double>> groupBornRadii_;
 
-    // Hessian storage
-    mutable std::vector<double> hessianBlocks_;   // [6 * numAtoms]
-    mutable std::vector<double> fullHessian_;      // [3N * 3N]
+    // Hessian storage (over all particle groups, block-diagonal per group)
+    mutable std::vector<double> hessianBlocks_;   // [6 * numParticleGroups * numAtoms]
+    mutable std::vector<double> fullHessian_;      // [(3 * numParticleGroups * numAtoms)^2]
 
     // Internal helpers
     double interpolateReceptorHCT(double x, double y, double z,
                                    double R_i_off, bool computeGradient,
-                                   double& gradX, double& gradY, double& gradZ) const;
+                                   double& gradX, double& gradY, double& gradZ,
+                                   double* hess = nullptr) const;
     bool isExcluded(int i, int j) const;
 };
 

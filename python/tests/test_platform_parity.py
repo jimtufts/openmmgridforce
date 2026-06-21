@@ -626,9 +626,27 @@ def gbsagrid_section(specs):
         for _ in range(n_lig):
             system.addParticle(12.0)
         system.addForce(f)
-        return system
+        return system, f
 
-    compare(case, eval_all(build, lig_pos * unit.nanometers, specs), specs)
+    compare(case, eval_all(lambda: build()[0], lig_pos * unit.nanometers, specs), specs)
+
+    # Analytical Hessian: full 3N x 3N, validated against JAX autodiff offline.
+    # Here we anchor every platform/precision to the double Reference.
+    print(f"\n=== {case} Hessian ===")
+    hess = {}
+    for spec in specs:
+        system, force = build()
+        try:
+            ctx, _ = _context(system, spec)
+            ctx.setPositions(lig_pos * unit.nanometers)
+            ctx.getState(getEnergy=True)
+            force.computeHessian(ctx)
+            n = 3 * n_lig
+            hess[spec[0]] = np.array(force.getFullHessian(ctx)).reshape(n, n)
+            del ctx
+        except Exception as e:
+            hess[spec[0]] = ('EXC', repr(e))
+    _compare_hessian(case + " Hessian", hess, specs)
 
 
 # ------------------------------------------------------ BondedHessian class
