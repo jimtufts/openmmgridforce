@@ -51,7 +51,7 @@ extension = Extension(name='_gridforceplugin',
                     )
 
 setup(name='gridforceplugin',
-      version='0.7.1',
+      version='0.8.0',
       py_modules=['gridforceplugin', 'grid_io', 'nc_converter'],
       ext_modules=[extension],
       install_requires=[],
