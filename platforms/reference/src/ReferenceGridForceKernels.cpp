@@ -32,6 +32,7 @@
 #include "ReferenceGridForceKernels.h"
 #include "GridForce.h"
 #include "TriquinticMatrix.h"
+#include "TricubicMatrix.h"
 
 #include "openmm/OpenMMException.h"
 #include "openmm/HarmonicBondForce.h"
@@ -71,20 +72,6 @@ inline double bspline_deriv2_0(double t) { return 1.0 - t; }
 inline double bspline_deriv2_1(double t) { return 3.0 * t - 2.0; }
 inline double bspline_deriv2_2(double t) { return -3.0 * t + 1.0; }
 inline double bspline_deriv2_3(double t) { return t; }
-
-// Cubic Hermite basis functions for tricubic interpolation
-// These interpolate exactly through points while maintaining C1 continuity
-// h00, h01 are for function values; h10, h11 are for derivatives
-inline double hermite_h00(double t) { return (1.0 + 2.0*t) * (1.0 - t) * (1.0 - t); }  // Interpolates f(0)
-inline double hermite_h10(double t) { return t * (1.0 - t) * (1.0 - t); }              // Scales f'(0)
-inline double hermite_h01(double t) { return t * t * (3.0 - 2.0*t); }                  // Interpolates f(1)
-inline double hermite_h11(double t) { return t * t * (t - 1.0); }                      // Scales f'(1)
-
-// Derivatives of Hermite basis functions (for computing forces)
-inline double hermite_dh00(double t) { return 6.0*t*t - 6.0*t; }
-inline double hermite_dh10(double t) { return 3.0*t*t - 4.0*t + 1.0; }
-inline double hermite_dh01(double t) { return -6.0*t*t + 6.0*t; }
-inline double hermite_dh11(double t) { return 3.0*t*t - 2.0*t; }
 
 // Quintic Hermite basis functions for C2 continuous interpolation
 // These interpolate exactly through points with C2 continuity
@@ -848,107 +835,46 @@ void ReferenceCalcGridForceKernel::computeAtom(int ia,
                 forceData[ia] -= effectiveScaling * grd;
 
             } else if (g_interpolationMethod == 2) {
-                // TRICUBIC HERMITE INTERPOLATION (2x2x2 cell with derivatives)
-                // Uses cubic Hermite interpolation for exact interpolation with C1 continuity
-
-                // Get 8 corner values of the cell
-                int im = ix * nyz + iy * g_counts[2] + iz;
-                int imp = im + g_counts[2];
-                int ip = im + nyz;
-                int ipp = ip + g_counts[2];
-
-                double f000 = g_vals[im];
-                double f001 = g_vals[im + 1];
-                double f010 = g_vals[imp];
-                double f011 = g_vals[imp + 1];
-                double f100 = g_vals[ip];
-                double f101 = g_vals[ip + 1];
-                double f110 = g_vals[ipp];
-                double f111 = g_vals[ipp + 1];
-
-                // Estimate derivatives at corners using centered finite differences
-                // For derivative in x-direction at each corner
-                double dx000 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+1)*nyz + iy*g_counts[2] + iz] - g_vals[(ix-1)*nyz + iy*g_counts[2] + iz]) / (2.0 * g_spacing[0]) : 0.0;
-                double dx001 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+1)*nyz + iy*g_counts[2] + iz+1] - g_vals[(ix-1)*nyz + iy*g_counts[2] + iz+1]) / (2.0 * g_spacing[0]) : 0.0;
-                double dx010 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+1)*nyz + (iy+1)*g_counts[2] + iz] - g_vals[(ix-1)*nyz + (iy+1)*g_counts[2] + iz]) / (2.0 * g_spacing[0]) : 0.0;
-                double dx011 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+1)*nyz + (iy+1)*g_counts[2] + iz+1] - g_vals[(ix-1)*nyz + (iy+1)*g_counts[2] + iz+1]) / (2.0 * g_spacing[0]) : 0.0;
-                double dx100 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+2)*nyz + iy*g_counts[2] + iz] - g_vals[ix*nyz + iy*g_counts[2] + iz]) / (2.0 * g_spacing[0]) : 0.0;
-                double dx101 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+2)*nyz + iy*g_counts[2] + iz+1] - g_vals[ix*nyz + iy*g_counts[2] + iz+1]) / (2.0 * g_spacing[0]) : 0.0;
-                double dx110 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+2)*nyz + (iy+1)*g_counts[2] + iz] - g_vals[ix*nyz + (iy+1)*g_counts[2] + iz]) / (2.0 * g_spacing[0]) : 0.0;
-                double dx111 = (ix > 0 && ix < g_counts[0]-1) ?
-                    (g_vals[(ix+2)*nyz + (iy+1)*g_counts[2] + iz+1] - g_vals[ix*nyz + (iy+1)*g_counts[2] + iz+1]) / (2.0 * g_spacing[0]) : 0.0;
-
-                // Interpolate in x-direction first (8 1D interpolations -> 4 values)
-                double h00_x = hermite_h00(fx), h01_x = hermite_h01(fx), h10_x = hermite_h10(fx), h11_x = hermite_h11(fx);
-                double dh00_x = hermite_dh00(fx), dh01_x = hermite_dh01(fx), dh10_x = hermite_dh10(fx), dh11_x = hermite_dh11(fx);
-
-                double v00 = h00_x * f000 + h01_x * f100 + h10_x * dx000 * g_spacing[0] + h11_x * dx100 * g_spacing[0];
-                double v01 = h00_x * f001 + h01_x * f101 + h10_x * dx001 * g_spacing[0] + h11_x * dx101 * g_spacing[0];
-                double v10 = h00_x * f010 + h01_x * f110 + h10_x * dx010 * g_spacing[0] + h11_x * dx110 * g_spacing[0];
-                double v11 = h00_x * f011 + h01_x * f111 + h10_x * dx011 * g_spacing[0] + h11_x * dx111 * g_spacing[0];
-
-                double dv00 = dh00_x * f000 + dh01_x * f100 + dh10_x * dx000 * g_spacing[0] + dh11_x * dx100 * g_spacing[0];
-                double dv01 = dh00_x * f001 + dh01_x * f101 + dh10_x * dx001 * g_spacing[0] + dh11_x * dx101 * g_spacing[0];
-                double dv10 = dh00_x * f010 + dh01_x * f110 + dh10_x * dx010 * g_spacing[0] + dh11_x * dx110 * g_spacing[0];
-                double dv11 = dh00_x * f011 + dh01_x * f111 + dh10_x * dx011 * g_spacing[0] + dh11_x * dx111 * g_spacing[0];
-
-                // Estimate y-derivatives for the interpolated values
-                double dy00 = (iy > 0 && iy < g_counts[1]-1) ? (v10 - (h00_x * g_vals[im - g_counts[2]] + h01_x * g_vals[ip - g_counts[2]])) / g_spacing[1] : 0.0;
-                double dy01 = (iy > 0 && iy < g_counts[1]-1) ? (v11 - (h00_x * g_vals[im + 1 - g_counts[2]] + h01_x * g_vals[ip + 1 - g_counts[2]])) / g_spacing[1] : 0.0;
-                double dy10 = (iy > 0 && iy < g_counts[1]-1) ? ((h00_x * g_vals[im + 2*g_counts[2]] + h01_x * g_vals[ip + 2*g_counts[2]]) - v00) / g_spacing[1] : 0.0;
-                double dy11 = (iy > 0 && iy < g_counts[1]-1) ? ((h00_x * g_vals[im + 1 + 2*g_counts[2]] + h01_x * g_vals[ip + 1 + 2*g_counts[2]]) - v01) / g_spacing[1] : 0.0;
-
-                // Interpolate in y-direction (4 1D interpolations -> 2 values)
-                double h00_y = hermite_h00(fy), h01_y = hermite_h01(fy), h10_y = hermite_h10(fy), h11_y = hermite_h11(fy);
-                double dh00_y = hermite_dh00(fy), dh01_y = hermite_dh01(fy), dh10_y = hermite_dh10(fy), dh11_y = hermite_dh11(fy);
-
-                double v0 = h00_y * v00 + h01_y * v10 + h10_y * dy00 * g_spacing[1] + h11_y * dy10 * g_spacing[1];
-                double v1 = h00_y * v01 + h01_y * v11 + h10_y * dy01 * g_spacing[1] + h11_y * dy11 * g_spacing[1];
-
-                double dvdx_0 = h00_y * dv00 + h01_y * dv10;
-                double dvdx_1 = h00_y * dv01 + h01_y * dv11;
-                double dvdy = (dh00_y * v00 + dh01_y * v10 + dh10_y * dy00 * g_spacing[1] + dh11_y * dy10 * g_spacing[1]);
-
-                // Estimate z-derivatives
-                double dz0 = (iz > 0 && iz < g_counts[2]-1) ? (v1 - (h00_y * (h00_x * g_vals[im - 1] + h01_x * g_vals[ip - 1]) + h01_y * (h00_x * g_vals[imp - 1] + h01_x * g_vals[ipp - 1]))) / g_spacing[2] : 0.0;
-                double dz1 = (iz > 0 && iz < g_counts[2]-1) ? ((h00_y * (h00_x * g_vals[im + 2] + h01_x * g_vals[ip + 2]) + h01_y * (h00_x * g_vals[imp + 2] + h01_x * g_vals[ipp + 2])) - v0) / g_spacing[2] : 0.0;
-
-                // Final interpolation in z-direction
-                double h00_z = hermite_h00(fz), h01_z = hermite_h01(fz), h10_z = hermite_h10(fz), h11_z = hermite_h11(fz);
-                double dh00_z = hermite_dh00(fz), dh01_z = hermite_dh01(fz), dh10_z = hermite_dh10(fz), dh11_z = hermite_dh11(fz);
-
-                interpolated = h00_z * v0 + h01_z * v1 + h10_z * dz0 * g_spacing[2] + h11_z * dz1 * g_spacing[2];
-
-                double dvdx = h00_z * dvdx_0 + h01_z * dvdx_1;
-                double dvdz = dh00_z * v0 + dh01_z * v1 + dh10_z * dz0 * g_spacing[2] + dh11_z * dz1 * g_spacing[2];
-
-                // Apply inverse power transformation if specified
+                // LEKIEN-MARSDEN TRICUBIC HERMITE (C1, matches CUDA/RASPA3). Uses the
+                // precomputed derivative grid (8 of the 27 derivatives per corner) and the
+                // 64x64 coefficient matrix -- the same construction as the CUDA kernel and the
+                // triquintic path below -- replacing the earlier finite-difference Hermite.
+                if (g_derivatives.empty()) {
+                    throw OpenMMException("GridForce: Tricubic interpolation (method=2) requires precomputed derivatives. Generate grid with setComputeDerivatives(True) or use a different interpolation method.");
+                }
+                int totalPoints = g_counts[0] * g_counts[1] * g_counts[2];
+                int corners[8][3] = {
+                    {ix, iy, iz}, {ix+1, iy, iz}, {ix, iy+1, iz}, {ix+1, iy+1, iz},
+                    {ix, iy, iz+1}, {ix+1, iy, iz+1}, {ix, iy+1, iz+1}, {ix+1, iy+1, iz+1}
+                };
+                // Tricubic needs {f,fx,fy,fz,fxy,fxz,fyz,fxyz} from the RASPA3 27-derivative order.
+                const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
+                double X[64];
+                for (int d = 0; d < 8; d++)
+                    for (int c = 0; c < 8; c++) {
+                        int point_idx = corners[c][0] * nyz + corners[c][1] * g_counts[2] + corners[c][2];
+                        X[d * 8 + c] = g_derivatives[derivMap[d] * totalPoints + point_idx];
+                    }
+                double a[64];
+                tricubicAssemble(X, a);
+                double value, dvalue_dx, dvalue_dy, dvalue_dz;
+                tricubicEvalVG(a, fx, fy, fz, &value, &dvalue_dx, &dvalue_dy, &dvalue_dz);
+                interpolated = value;
+                // Stored derivatives are divided by spacing^n (see generateGrid), so the unit-cell
+                // gradient is multiplied by spacing to recover physical units (matches triquintic/CUDA).
+                double dvdx = dvalue_dx * g_spacing[0];
+                double dvdy = dvalue_dy * g_spacing[1];
+                double dvdz = dvalue_dz * g_spacing[2];
                 if (g_inv_power > 0.0) {
                     double base_interpolated = interpolated;
                     interpolated = pow(interpolated, g_inv_power);
                     double power_factor = g_inv_power * pow(base_interpolated, g_inv_power - 1.0);
-                    dvdx *= power_factor;
-                    dvdy *= power_factor;
-                    dvdz *= power_factor;
+                    dvdx *= power_factor; dvdy *= power_factor; dvdz *= power_factor;
                 }
-
-                // Convert gradients to forces
-                grd = Vec3(dvdx / g_spacing[0], dvdy / g_spacing[1], dvdz / g_spacing[2]);
-
-                // Apply runtime cap (tanh capping after interpolation)
+                grd = Vec3(dvdx, dvdy, dvdz);
                 applyRuntimeCap(effectiveCap, interpolated, grd);
-
-                // Energy and force
                 atomEnergy += effectiveScaling * interpolated;
                 forceData[ia] -= effectiveScaling * grd;
-
             } else if (g_interpolationMethod == 3) {
                 // TRIQUINTIC HERMITE INTERPOLATION (C² continuous)
                 // Uses tensor-product quintic Hermite interpolation with precomputed derivatives
@@ -1445,12 +1371,10 @@ void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<
             H.yz /= g_spacing[1] * g_spacing[2];
 
         } else if (g_interpolationMethod == 2) {
-            // TRICUBIC HERMITE is unsupported for the Hessian (mirrors CUDA, whose
-            // computeGridHessian handles only methods 1, 3, 4). The Reference
-            // tricubic force path is a non-tensor-product Hermite construction with
-            // finite-difference corner slopes whose reported gradient already drops
-            // cross-stage terms, so it has no self-consistent analytic Hessian and
-            // no trusted reference to validate against.
+            // Tricubic Hermite Hessian is unsupported, mirroring CUDA (computeGridHessian
+            // handles only methods 1, 3, 4). The force path is C1, so its second
+            // derivatives are discontinuous across cell faces; use triquintic (method 3)
+            // when a grid Hessian is required.
             throw OpenMMException("GridForce: Hessian not supported for tricubic Hermite (method 2)");
 
         } else if (g_interpolationMethod == 3) {
