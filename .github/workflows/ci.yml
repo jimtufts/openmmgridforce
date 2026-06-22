@@ -1,0 +1,49 @@
+name: CI (Reference + CPU)
+
+# Builds the plugin without CUDA (GitHub-hosted runners have no GPU) and runs the
+# parity harness in CI mode, which exercises every force kernel, integrator, and
+# Hessian path on the Reference and CPU platforms. The full matrix (adding CUDA at
+# single/mixed/double) runs locally via `python test_platform_parity.py` with a GPU.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  reference-cpu:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}   # login shell so the conda env (compilers, CONDA_PREFIX) is active
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: gridforce
+          auto-activate-base: false
+
+      - name: Install build + runtime dependencies
+        run: |
+          mamba install -y -c conda-forge \
+            python=3.12 openmm numpy cmake make swig \
+            "gxx_linux-64>=12" "gcc_linux-64>=12"
+
+      - name: Configure (Reference + CPU; CUDA auto-skipped without a toolkit)
+        run: cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$CONDA_PREFIX"
+
+      - name: Build and install the plugin libraries
+        run: cmake --build build --target install -j2
+
+      - name: Build and install the Python wrapper
+        run: cmake --build build --target PythonInstall -j2
+
+      - name: Parity harness (Reference + CPU, GPU-free)
+        env:
+          GRIDFORCE_TEST_CI: '1'
+        run: |
+          cd python/tests
+          python test_platform_parity.py

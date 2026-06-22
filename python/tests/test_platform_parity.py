@@ -63,16 +63,22 @@ _failures = []
 _gaps = []
 
 
-def platform_specs():
-    """(label, platform_name, properties, precision_class) for what's installed."""
+def platform_specs(ci=False):
+    """(label, platform_name, properties, precision_class) for what's installed.
+
+    ci=True restricts to the GPU-free Reference + CPU platforms (and pins the CPU
+    thread count) for CI runners that have no CUDA; full mode also adds CUDA at
+    single/mixed/double when available."""
+    cpu_props = {'Threads': '2'} if ci else {}
     specs = [(REFERENCE, 'Reference', {}, 'double'),
-             ('CPU', 'CPU', {}, 'double')]
-    try:
-        mm.Platform.getPlatformByName('CUDA')
-        for prec in ('single', 'mixed', 'double'):
-            specs.append((f'CUDA/{prec}', 'CUDA', {'Precision': prec}, prec))
-    except Exception:
-        pass
+             ('CPU', 'CPU', cpu_props, 'double')]
+    if not ci:
+        try:
+            mm.Platform.getPlatformByName('CUDA')
+            for prec in ('single', 'mixed', 'double'):
+                specs.append((f'CUDA/{prec}', 'CUDA', {'Precision': prec}, prec))
+        except Exception:
+            pass
     return [s for s in specs if _platform_ok(s[1])]
 
 
@@ -835,9 +841,16 @@ SECTIONS = {
 
 
 def main():
-    specs = platform_specs()
-    print(f"Platform/precision matrix: {[s[0] for s in specs]}")
-    which = sys.argv[1] if len(sys.argv) > 1 else 'all'
+    # CI mode: arg "ci" or env GRIDFORCE_TEST_CI=1 -> Reference+CPU only (no CUDA),
+    # for GPU-free CI runners. A section name may still be given alongside "ci".
+    args = sys.argv[1:]
+    env_ci = os.environ.get('GRIDFORCE_TEST_CI', '') not in ('', '0', 'false', 'False')
+    ci = env_ci or ('ci' in args)
+    args = [a for a in args if a != 'ci']
+    specs = platform_specs(ci=ci)
+    print(f"Mode: {'CI (Reference+CPU)' if ci else 'full'}   "
+          f"Platform/precision matrix: {[s[0] for s in specs]}")
+    which = args[0] if args else 'all'
     todo = SECTIONS if which == 'all' else {which: SECTIONS[which]}
     for name, fn in todo.items():
         try:
