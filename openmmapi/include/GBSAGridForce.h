@@ -228,6 +228,18 @@ public:
      */
     bool getComputeGridDerivatives() const { return computeGridDerivatives; }
 
+    /**
+     * Set the Gaussian smoothing sigma (in grid-spacing units) applied to the
+     * correction grids (N, A, B) during auto-generation. 0 (default) disables
+     * smoothing. Matches scipy.ndimage.gaussian_filter with a single scalar sigma.
+     */
+    void setCorrectionSmoothingSigma(double sigma);
+
+    /**
+     * Get the correction-grid Gaussian smoothing sigma.
+     */
+    double getCorrectionSmoothingSigma() const { return correctionSmoothingSigma_; }
+
     // ========== KDE Smoothing Parameters ==========
 
     /**
@@ -501,6 +513,7 @@ private:
     double probeRadius_;
     std::vector<double> rThresholds_;
     bool computeGridDerivatives;
+    double correctionSmoothingSigma_;
 
     // KDE smoothing parameters
     double kdeThreshold_;

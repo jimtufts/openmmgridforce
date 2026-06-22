@@ -436,6 +436,9 @@ public:
     void setComputeGridDerivatives(bool compute);
     bool getComputeGridDerivatives() const;
 
+    void setCorrectionSmoothingSigma(double sigma);
+    double getCorrectionSmoothingSigma() const;
+
     void setKDEThreshold(double threshold);
     double getKDEThreshold() const;
     void setKDEBandwidth(double bandwidth);

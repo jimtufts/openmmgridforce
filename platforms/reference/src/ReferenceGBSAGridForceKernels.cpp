@@ -8,6 +8,7 @@
 
 #include "ReferenceGBSAGridForceKernels.h"
 #include "ReferenceGridInterpolation.h"
+#include "ReferenceHCTDerivatives.h"
 #include "GBSAGridForce.h"
 
 #include "openmm/OpenMMException.h"
@@ -29,6 +30,66 @@ namespace GridForcePlugin {
 static const double OBC_ALPHA = 1.0;
 static const double OBC_BETA = 0.8;
 static const double OBC_GAMMA = 4.85;
+
+namespace {
+
+// Separable Gaussian smoothing of one [nx,ny,nz] block stored at `base` within
+// `data` (C-order ix*ny*nz + iy*nz + iz). Matches scipy.ndimage.gaussian_filter
+// with the default truncate=4.0 and 'reflect' boundary: a symmetric normalized
+// kernel exp(-0.5*(x/sigma)^2) is applied once per axis. Work is done in double
+// and written back to float32 to mirror the Python generator.
+void smoothCorrectionGrid(std::vector<float>& data, size_t base,
+                          int nx, int ny, int nz, double sigma) {
+    if (sigma <= 0.0) return;
+    int lw = (int)(4.0 * sigma + 0.5);
+    std::vector<double> w(2 * lw + 1);
+    double sum = 0.0;
+    double sd = sigma * sigma;
+    for (int i = -lw; i <= lw; i++) {
+        double v = exp(-0.5 * (double)(i * i) / sd);
+        w[i + lw] = v;
+        sum += v;
+    }
+    for (double& v : w) v /= sum;
+
+    const size_t n = (size_t)nx * ny * nz;
+    std::vector<double> a(n), b(n);
+    for (size_t i = 0; i < n; i++) a[i] = data[base + i];
+
+    auto reflect = [](int idx, int len) {
+        // scipy 'reflect' (d c b a | a b c d): period 2*len, mirrored.
+        if (len == 1) return 0;
+        int period = 2 * len;
+        idx %= period;
+        if (idx < 0) idx += period;
+        if (idx >= len) idx = period - 1 - idx;
+        return idx;
+    };
+
+    auto convAxis = [&](const std::vector<double>& in, std::vector<double>& out,
+                        int axis) {
+        for (int ix = 0; ix < nx; ix++)
+        for (int iy = 0; iy < ny; iy++)
+        for (int iz = 0; iz < nz; iz++) {
+            double acc = 0.0;
+            for (int k = -lw; k <= lw; k++) {
+                int jx = ix, jy = iy, jz = iz;
+                if (axis == 0) jx = reflect(ix + k, nx);
+                else if (axis == 1) jy = reflect(iy + k, ny);
+                else jz = reflect(iz + k, nz);
+                acc += w[k + lw] * in[(size_t)jx*ny*nz + (size_t)jy*nz + jz];
+            }
+            out[(size_t)ix*ny*nz + (size_t)iy*nz + iz] = acc;
+        }
+    };
+
+    convAxis(a, b, 0);
+    convAxis(b, a, 1);
+    convAxis(a, b, 2);
+    for (size_t i = 0; i < n; i++) data[base + i] = (float)b[i];
+}
+
+}  // namespace
 
 // ==================== isExcluded ====================
 
@@ -312,6 +373,8 @@ void ReferenceCalcGBSAGridForceKernel::initialize(
         force.getGridOrigin(genOrigin_[0], genOrigin_[1], genOrigin_[2]);
         genSpacing_ = force.getGridSpacing();
         genRThresholds_ = force.getRThresholds();
+        genComputeDerivatives_ = force.getComputeGridDerivatives();
+        genSmoothingSigma_ = force.getCorrectionSmoothingSigma();
         probeRadius = force.getProbeRadius();
         if (genReceptorPositions_.empty() || genReceptorRadii_.empty() ||
             genReceptorScales_.empty())
@@ -640,7 +703,14 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
         recS[j] = recOff[j] * recScale[j];
     }
 
-    vector<float> hctProbe((size_t)numPoints, 0.0f);
+    const bool computeDerivs = genComputeDerivatives_;
+    const int nderivs = DesolvationGrid::NUM_DERIVATIVES;  // 27
+
+    // With derivatives the hct array is derivative-major: [d*numPoints + idx].
+    // The d=0 block holds the plain HCT value, so the trilinear value path is
+    // unchanged. Corrections N/A/B remain value-only [nbins*numPoints].
+    const size_t hctSize = computeDerivs ? (size_t)nderivs * numPoints : (size_t)numPoints;
+    vector<float> hctProbe(hctSize, 0.0f);
     vector<float> corrN((size_t)nbins * numPoints, 0.0f);
     vector<float> corrA((size_t)nbins * numPoints, 0.0f);
     vector<float> corrB((size_t)nbins * numPoints, 0.0f);
@@ -653,6 +723,7 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
         double px = ox + ix * sp, py = oy + iy * sp, pz = oz + iz * sp;
 
         double hp = 0.0;
+        double derivSum[27] = {0.0};
         vector<double> N(nbins, 0.0), A(nbins, 0.0), B(nbins, 0.0);
         for (int j = 0; j < nrec; j++) {
             double dx = px - genReceptorPositions_[3*j+0];
@@ -663,6 +734,14 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
             hp += computeHCTTerm(r, R_probe_off, recOff[j], recScale[j]);
             if (r <= 1e-6) continue;
             double cross = fabs(r - recS[j]);
+            // Triquintic derivative sum (matches the Python generator path:
+            // skip r<1e-6 and R_probe_off >= r + S_j; dx,dy,dz point from the
+            // receptor atom to the grid point).
+            if (computeDerivs && R_probe_off < r + recS[j]) {
+                double d[27];
+                computeHctDerivsTriquintic(dx, dy, dz, recS[j], R_probe_off, d);
+                for (int k = 0; k < nderivs; k++) derivSum[k] += d[k];
+            }
             if (cross >= R_probe_off) continue;
             for (int b = 0; b < nbins; b++) {
                 if (cross < genRThresholds_[b]) {
@@ -672,7 +751,13 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
                 }
             }
         }
-        hctProbe[idx] = (float)hp;
+        if (computeDerivs) {
+            scaleDerivativesToCellFractional(derivSum, sp);
+            for (int k = 0; k < nderivs; k++)
+                hctProbe[(size_t)k*numPoints + idx] = (float)derivSum[k];
+        } else {
+            hctProbe[idx] = (float)hp;
+        }
         for (int b = 0; b < nbins; b++) {
             corrN[(size_t)b*numPoints + idx] = (float)N[b];
             corrA[(size_t)b*numPoints + idx] = (float)A[b];
@@ -680,8 +765,19 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
         }
     });
 
+    // Gaussian-smooth the value-only correction grids per bin if requested,
+    // matching scipy.ndimage.gaussian_filter (separable, 'reflect' boundary).
+    if (genSmoothingSigma_ > 0.0) {
+        for (int b = 0; b < nbins; b++) {
+            smoothCorrectionGrid(corrN, (size_t)b*numPoints, nx, ny, nz, genSmoothingSigma_);
+            smoothCorrectionGrid(corrA, (size_t)b*numPoints, nx, ny, nz, genSmoothingSigma_);
+            smoothCorrectionGrid(corrB, (size_t)b*numPoints, nx, ny, nz, genSmoothingSigma_);
+        }
+    }
+
     auto grid = std::make_shared<DesolvationGrid>(nx, ny, nz, sp, probeRadius, genRThresholds_);
     grid->setOrigin(ox, oy, oz);
+    grid->setHasDerivatives(computeDerivs);
     grid->setHctProbe(std::move(hctProbe));
     grid->setCorrectionN(std::move(corrN));
     grid->setCorrectionA(std::move(corrA));

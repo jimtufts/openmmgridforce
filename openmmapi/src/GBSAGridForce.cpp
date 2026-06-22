@@ -29,6 +29,7 @@ GBSAGridForce::GBSAGridForce()
       probeRadius_(0.14),
       rThresholds_({0.12, 0.16}),
       computeGridDerivatives(false),
+      correctionSmoothingSigma_(0.0),
       kdeThreshold_(0.02),
       kdeBandwidth_(0.04),
       kdeEpsilonB_(0.03),
@@ -156,6 +157,13 @@ void GBSAGridForce::setRThresholds(const vector<double>& thresholds) {
 
 void GBSAGridForce::setComputeGridDerivatives(bool compute) {
     computeGridDerivatives = compute;
+}
+
+void GBSAGridForce::setCorrectionSmoothingSigma(double sigma) {
+    if (sigma < 0) {
+        throw OpenMMException("GBSAGridForce: correction smoothing sigma must be non-negative");
+    }
+    correctionSmoothingSigma_ = sigma;
 }
 
 void GBSAGridForce::setKDEThreshold(double threshold) {

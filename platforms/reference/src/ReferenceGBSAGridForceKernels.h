@@ -107,6 +107,8 @@ protected:
     double genOrigin_[3] = {0.0, 0.0, 0.0};
     double genSpacing_ = 0.0;
     std::vector<double> genRThresholds_;
+    bool genComputeDerivatives_ = false;
+    double genSmoothingSigma_ = 0.0;
 
     // Per-(group,atom) out-of-bounds flags from the last execute().
     mutable std::vector<int> outOfBoundsFlags_;
