@@ -699,6 +699,82 @@ def gbsagrid_section(specs):
             print(f"    EXC  {spec[0]:12s}: {repr(ex)[:70]}")
             _failures.append((case + " triquintic", spec[0], 'energy', repr(ex)))
 
+    # Buried-pose correction magnitude. For a ligand buried in the receptor cloud
+    # the N/A/B corrections are dominant (~15-20% of the energy), not the ~0.1%
+    # refinement seen for a solvent-exposed ligand: the single-probe HCT model fails
+    # in the close-contact crossover regime (S ~ r). This guards that the correction
+    # grids are generated AND applied -- zeroing them must move a buried energy by a
+    # large, unambiguous fraction -- and that CPU matches Reference bit-for-bit.
+    print(f"\n=== {case} buried-pose corrections ===")
+    try:
+        brng = np.random.RandomState(11)
+        bn_rec, bn_lig = 40, 6
+        brec = brng.randn(bn_rec, 3) * 0.45                 # receptor cloud at origin
+        blig = brng.randn(bn_lig, 3) * 0.12 + brec.mean(axis=0)   # buried at the centroid
+        blr = np.array([0.17, 0.15, 0.12, 0.155, 0.17, 0.14])
+        bls = np.array([0.72, 0.85, 0.85, 0.72, 0.72, 0.85])
+        blq = np.array([0.35, -0.4, 0.25, -0.15, 0.3, -0.2])
+        bmin = np.array([-1.0, -1.0, -1.0]); bc, bsp = 21, 0.1
+        bpg = generate_desolvation_grid(
+            rec_positions=brec, rec_radii=np.full(bn_rec, 0.17),
+            rec_scales=np.full(bn_rec, 0.72), origin=bmin, counts=(bc, bc, bc),
+            spacing=bsp, probe_radius=0.14, verbose=False)
+
+        def buried_build(zero_corr):
+            cg = gfp.DesolvationGrid(bc, bc, bc, float(bsp), 0.14, list(bpg.r_thresholds))
+            cg.setOrigin(float(bmin[0]), float(bmin[1]), float(bmin[2]))
+            cg.setHctProbe(bpg.hct_probe.flatten(order='C').tolist())
+            if zero_corr:
+                z = [0.0] * (bpg.n_bins * bc * bc * bc)
+                cg.setCorrectionN(z); cg.setCorrectionA(z); cg.setCorrectionB(z)
+            else:
+                cN, cA, cB = [], [], []
+                for b in range(bpg.n_bins):
+                    cN.extend(bpg.correction_N[b].flatten(order='C').tolist())
+                    cA.extend(bpg.correction_A[b].flatten(order='C').tolist())
+                    cB.extend(bpg.correction_B[b].flatten(order='C').tolist())
+                cg.setCorrectionN(cN); cg.setCorrectionA(cA); cg.setCorrectionB(cB)
+            f = gfp.GBSAGridForce(); f.setNumAtoms(bn_lig); f.setIncludeSurfaceArea(False)
+            f.setInterpolationMethod(0)
+            for i in range(bn_lig):
+                f.setAtomParameters(i, float(blq[i]), float(blr[i]), float(bls[i]))
+            f.setDesolvationGrid(cg); f.setParticles(list(range(bn_lig)))
+            f.addParticleGroup('lig', list(range(bn_lig)))
+            s = mm.System()
+            for _ in range(bn_lig):
+                s.addParticle(12.0)
+            s.addForce(f); return s
+
+        def buried_E(zero_corr, spec):
+            ctx, _ = _context(buried_build(zero_corr), spec)
+            ctx.setPositions(blig * unit.nanometers)
+            E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+                unit.kilojoules_per_mole)
+            del ctx
+            return E
+        ref_spec = (REFERENCE, 'Reference', {}, 'double')
+        e_corr = buried_E(False, ref_spec)
+        e_hct = buried_E(True, ref_spec)
+        shift = abs(e_corr - e_hct) / max(1.0, abs(e_corr))
+        ok = np.isfinite(e_corr) and np.isfinite(e_hct) and shift > 0.05
+        print(f"    {'OK' if ok else 'FAIL':4s} Reference    buried corrections shift {shift*100:.1f}% "
+              f"(corr {e_corr:.3f}, HCT-only {e_hct:.3f})  [{case} buried-corr]")
+        if not ok:
+            _failures.append((case + " buried-corr", REFERENCE, 'energy', f"shift={shift:.2e}"))
+        for spec in specs:
+            if spec[1] != 'CPU':
+                continue
+            e_cpu = buried_E(False, spec)
+            d = abs(e_cpu - e_corr)
+            okp = d < 1e-9
+            print(f"    {'OK' if okp else 'FAIL':4s} {spec[0]:12s} buried corrected E vs Reference "
+                  f"abs={d:.2e}  [{case} buried-corr]")
+            if not okp:
+                _failures.append((case + " buried-corr", spec[0], 'energy', f"abs={d:.2e}"))
+    except Exception as ex:
+        print(f"    EXC  buried corrections: {repr(ex)[:70]}")
+        _failures.append((case + " buried-corr", '-', 'energy', repr(ex)))
+
 
 # ------------------------------------------------------ grid generation
 def gridgen_section(specs):
