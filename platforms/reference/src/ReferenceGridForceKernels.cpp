@@ -335,9 +335,17 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
         double ox, oy, oz;
         grid_force.getGridOrigin(ox, oy, oz);
 
-        // Generate grid
-        generateGrid(system, nonbondedForce, isolatedNonbondedForce, gridType,
-                     receptorAtoms, receptorPositions, ox, oy, oz);
+        // Defer generation to the first execute(), where a Context (and the CPU
+        // thread pool used by parallelFor) is available. System/Forces persist for
+        // the Context lifetime, so capturing the pointers here is safe.
+        genNeedsGrid_ = true;
+        genSystem_ = &system;
+        genNonbonded_ = nonbondedForce;
+        genIsolated_ = isolatedNonbondedForce;
+        genGridType_ = gridType;
+        genReceptorAtoms_ = receptorAtoms;
+        genReceptorPositions_ = receptorPositions;
+        genOrigin_[0] = ox; genOrigin_[1] = oy; genOrigin_[2] = oz;
 
         // Copy generated values back to GridForce object so saveToFile() and getGridParameters() work
         const_cast<GridForce&>(grid_force).setGridValues(g_vals);
@@ -569,65 +577,59 @@ void ReferenceCalcGridForceKernel::generateGrid(
     const double COULOMB_CONST = 138.935456;  // kJ·nm/(mol·e²)
     const double U_MAX = g_gridCap;  // Configurable capping threshold
 
-    // For each grid point, compute grid values
-    int idx = 0;
-    for (int i = 0; i < nx; i++) {
-        for (int j = 0; j < ny; j++) {
-            for (int k = 0; k < nz; k++) {
-                // Grid point position (in nm)
-                double gx = originX + i * g_spacing[0];
-                double gy = originY + j * g_spacing[1];
-                double gz = originZ + k * g_spacing[2];
+    // For each grid point, compute grid values. Points are independent (each writes
+    // only g_vals[idx]), so parallelFor runs this serially on Reference and across
+    // the thread pool on the CPU platform.
+    parallelFor(totalPoints, [&](int idx) {
+        int i = idx / nyz;
+        int rem = idx % nyz;
+        int j = rem / nz;
+        int k = rem % nz;
 
-                // Calculate contribution from each receptor atom
-                double gridValue = 0.0;
-                for (size_t atomIdx = 0; atomIdx < receptorAtoms.size(); atomIdx++) {
-                    // Get atom position (in nm)
-                    Vec3 atomPos = receptorPositions[atomIdx];
+        // Grid point position (in nm)
+        double gx = originX + i * g_spacing[0];
+        double gy = originY + j * g_spacing[1];
+        double gz = originZ + k * g_spacing[2];
 
-                    // Calculate distance
-                    double dx = gx - atomPos[0];
-                    double dy = gy - atomPos[1];
-                    double dz = gz - atomPos[2];
-                    double r2 = dx*dx + dy*dy + dz*dz;
-                    double r = std::sqrt(r2);
+        // Calculate contribution from each receptor atom
+        double gridValue = 0.0;
+        for (size_t atomIdx = 0; atomIdx < receptorAtoms.size(); atomIdx++) {
+            Vec3 atomPos = receptorPositions[atomIdx];
+            double dx = gx - atomPos[0];
+            double dy = gy - atomPos[1];
+            double dz = gz - atomPos[2];
+            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+            if (r < 1e-6) r = 1e-6;  // avoid singularities
 
-                    // Avoid singularities at very small distances
-                    if (r < 1e-6) {
-                        r = 1e-6;
-                    }
-
-                    // Calculate contribution based on grid type
-                    if (gridType == "charge") {
-                        // Electrostatic potential: k * q / r
-                        gridValue += COULOMB_CONST * charges[atomIdx] / r;
-                    } else if (gridType == "ljr") {
-                        // LJ repulsive: sqrt(epsilon) * diameter^6 / r^12
-                        double diameter = 2.0 * sigmas[atomIdx];
-                        gridValue += std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 6.0) / std::pow(r, 12.0);
-                    } else if (gridType == "lja") {
-                        // LJ attractive: -2 * sqrt(epsilon) * diameter^3 / r^6
-                        double diameter = 2.0 * sigmas[atomIdx];
-                        gridValue += -2.0 * std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 3.0) / std::pow(r, 6.0);
-                    }
-                }
-
-                // Apply capping to avoid extreme values
-                gridValue = U_MAX * std::tanh(gridValue / U_MAX);
-                g_vals[idx++] = gridValue;
+            if (gridType == "charge") {
+                // Electrostatic potential: k * q / r
+                gridValue += COULOMB_CONST * charges[atomIdx] / r;
+            } else if (gridType == "ljr") {
+                // LJ repulsive: sqrt(epsilon) * diameter^6 / r^12
+                double diameter = 2.0 * sigmas[atomIdx];
+                gridValue += std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 6.0) / std::pow(r, 12.0);
+            } else if (gridType == "lja") {
+                // LJ attractive: -2 * sqrt(epsilon) * diameter^3 / r^6
+                double diameter = 2.0 * sigmas[atomIdx];
+                gridValue += -2.0 * std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 3.0) / std::pow(r, 6.0);
             }
         }
-    }
 
-    // Compute derivatives if requested (using CAPPED grid values for stability)
+        // Apply capping to avoid extreme values
+        g_vals[idx] = U_MAX * std::tanh(gridValue / U_MAX);
+    });
+
+    // Compute derivatives if requested (using CAPPED grid values for stability).
+    // Reads the completed g_vals stencil (read-only) and writes disjoint output
+    // slots per point, so parallelFor is safe.
     if (g_computeDerivatives) {
         g_derivatives.resize(27 * totalPoints, 0.0);
 
-        int nOverlapPoints = 0;
-        idx = 0;
-        for (int i = 0; i < nx; i++) {
-            for (int j = 0; j < ny; j++) {
-                for (int k = 0; k < nz; k++) {
+        parallelFor(totalPoints, [&](int idx) {
+                    int i = idx / nyz;
+                    int rem = idx % nyz;
+                    int j = rem / nz;
+                    int k = rem % nz;
                     // Compute all 27 derivatives at this point from the capped grid
                     std::vector<double> derivs = computeDerivativesAtPoint(
                         g_vals, i, j, k,
@@ -670,24 +672,10 @@ void ReferenceCalcGridForceKernel::generateGrid(
                     scaling[25] = 1.0 / (g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fxyyzz
                     scaling[26] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fxxyyzz
 
-                    // Debug: print raw derivatives for one point
-                    static bool printed_derivs = false;
-                    if (!printed_derivs && i == nx/2 && j == ny/2 && k == nz/2) {
-                        printed_derivs = true;
-                        std::cout << "Raw derivatives at grid center before scaling:" << std::endl;
-                        std::cout << "  f = " << derivs[0] << std::endl;
-                        std::cout << "  fx = " << derivs[1] << " (physical: kJ/mol/nm)" << std::endl;
-                        std::cout << "  fy = " << derivs[2] << std::endl;
-                        std::cout << "  fz = " << derivs[3] << std::endl;
-                        std::cout << "  Grid spacing: " << g_spacing[0] << " nm" << std::endl;
-                    }
-
-                    // Store scaled derivatives
+                    // Store scaled derivatives.
                     // Handle overlap regions like RASPA3: zero out higher derivatives if energy is capped
                     double gridValue = g_vals[idx];
                     bool isOverlap = (gridValue >= U_MAX * 0.999);  // Close to cap means we're in overlap region
-
-                    if (isOverlap) nOverlapPoints++;
 
                     for (int d = 0; d < 27; d++) {
                         double val = derivs[d] * scaling[d];
@@ -708,14 +696,7 @@ void ReferenceCalcGridForceKernel::generateGrid(
                         int deriv_idx = d * totalPoints + idx;
                         g_derivatives[deriv_idx] = val;
                     }
-
-                    idx++;
-                }
-            }
-        }
-
-        std::cout << "Derivative computation: " << nOverlapPoints << " / " << totalPoints
-                  << " points in overlap region (capped)" << std::endl;
+        });
     }
 }
 
@@ -1205,6 +1186,16 @@ double ReferenceCalcGridForceKernel::execute(ContextImpl &context,
                                              bool includeEnergy) {
 
     g_lastContext = &context;
+
+    // Build the auto-generated grid on first use (deferred from initialize() so the
+    // CPU thread pool is available for parallel generation).
+    if (genNeedsGrid_ && g_vals.empty()) {
+        generateGrid(*genSystem_, genNonbonded_, genIsolated_, genGridType_,
+                     genReceptorAtoms_, genReceptorPositions_,
+                     genOrigin_[0], genOrigin_[1], genOrigin_[2]);
+        genNeedsGrid_ = false;
+    }
+
     vector<Vec3> &posData = extractPositions(context);
     vector<Vec3> &forceData = extractForces(context);
 

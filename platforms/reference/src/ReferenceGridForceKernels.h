@@ -185,6 +185,19 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
                      const std::vector<OpenMM::Vec3>& receptorPositions,
                      double originX, double originY, double originZ);
 
+    // Auto-generation inputs captured in initialize(); the grid is built lazily in
+    // the first execute(), where a Context (and thus the thread pool used by the
+    // CPU platform's parallelFor) is available. System/Forces persist for the
+    // Context lifetime, so storing the pointers is safe.
+    bool genNeedsGrid_ = false;
+    const OpenMM::System* genSystem_ = nullptr;
+    const OpenMM::NonbondedForce* genNonbonded_ = nullptr;
+    const IsolatedNonbondedForce* genIsolated_ = nullptr;
+    std::string genGridType_;
+    std::vector<int> genReceptorAtoms_;
+    std::vector<OpenMM::Vec3> genReceptorPositions_;
+    double genOrigin_[3] = {0.0, 0.0, 0.0};
+
     std::vector<int> g_counts;
     std::vector<double> g_spacing;
     std::vector<double> g_vals;
