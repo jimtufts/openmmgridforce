@@ -33,6 +33,7 @@
 #include "GridForce.h"
 #include "TriquinticMatrix.h"
 #include "TricubicMatrix.h"
+#include "BSplinePrefilter.h"
 
 #include "openmm/OpenMMException.h"
 #include "openmm/HarmonicBondForce.h"
@@ -174,6 +175,17 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     g_runtimeCap = grid_force.getRuntimeCap();
     g_outOfBoundsRestraint = grid_force.getOutOfBoundsRestraint();
     g_interpolationMethod = grid_force.getInterpolationMethod();
+    g_bsplinePrefilterOrder = grid_force.getBSplinePrefilterOrder();
+    g_blurSigma = grid_force.getGaussianBlurSigma();
+    // arcsinh dynamic-range compression and the GPU adaptive (PCG) prefilter are
+    // CUDA-only; fail loudly rather than silently generate a grid that diverges from
+    // CUDA. (The standard cubic/quintic prefilter and Gaussian blur are supported.)
+    if (grid_force.getArcsinhScale() > 0.0)
+        throw OpenMMException("GridForce: arcsinh transform is not supported on the Reference/CPU "
+                              "platform; use it on CUDA or leave setArcsinhScale at 0.");
+    if (grid_force.getAdaptiveRegularization() > 0.0)
+        throw OpenMMException("GridForce: adaptive (regularized PCG) B-spline prefilter is CUDA-only; "
+                              "use a standard prefilter order (3 or 5) on Reference/CPU.");
     grid_force.getGridOrigin(g_origin_x, g_origin_y, g_origin_z);
 
     // Compute effective bounds in grid-local coordinates
@@ -592,13 +604,14 @@ void ReferenceCalcGridForceKernel::generateGrid(
                 // Electrostatic potential: k * q / r
                 gridValue += COULOMB_CONST * charges[atomIdx] / r;
             } else if (gridType == "ljr") {
-                // LJ repulsive: sqrt(epsilon) * diameter^6 / r^12
-                double diameter = 2.0 * sigmas[atomIdx];
-                gridValue += std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 6.0) / std::pow(r, 12.0);
+                // LJ repulsive: sqrt(epsilon) * Rmin^6 / r^12, Rmin = 2^(1/6)*sigma
+                // (AMBER convention, matching the CUDA generation kernel).
+                double rmin = std::pow(2.0, 1.0/6.0) * sigmas[atomIdx];
+                gridValue += std::sqrt(epsilons[atomIdx]) * std::pow(rmin, 6.0) / std::pow(r, 12.0);
             } else if (gridType == "lja") {
-                // LJ attractive: -2 * sqrt(epsilon) * diameter^3 / r^6
-                double diameter = 2.0 * sigmas[atomIdx];
-                gridValue += -2.0 * std::sqrt(epsilons[atomIdx]) * std::pow(diameter, 3.0) / std::pow(r, 6.0);
+                // LJ attractive: -2 * sqrt(epsilon) * Rmin^3 / r^6, Rmin = 2^(1/6)*sigma.
+                double rmin = std::pow(2.0, 1.0/6.0) * sigmas[atomIdx];
+                gridValue += -2.0 * std::sqrt(epsilons[atomIdx]) * std::pow(rmin, 3.0) / std::pow(r, 6.0);
             }
         }
 
@@ -685,6 +698,16 @@ void ReferenceCalcGridForceKernel::generateGrid(
                     }
         });
     }
+
+    // Gaussian blur then B-spline prefilter, applied to the value grid AFTER the
+    // Hermite derivatives are taken from the raw values (matching the CUDA generation
+    // order). Blur smooths cap-boundary discontinuities; the prefilter converts the
+    // sampled values to interpolating B-spline coefficients so method-1 B-spline
+    // passes through the data. Both are generation-time, value-space, no eval change.
+    if (g_blurSigma > 0.0)
+        gaussianBlur3D(g_vals, g_counts[0], g_counts[1], g_counts[2], g_blurSigma);
+    if (g_bsplinePrefilterOrder > 0)
+        bsplinePrefilter3DByOrder(g_vals, g_counts[0], g_counts[1], g_counts[2], g_bsplinePrefilterOrder);
 }
 
 static inline void applyRuntimeCap(double cap, double& interpolated, Vec3& grd) {

@@ -213,6 +213,8 @@ class ReferenceCalcGridForceKernel : public CalcGridForceKernel {
     double g_inv_power;
     double g_gridCap;
     double g_runtimeCap;
+    int g_bsplinePrefilterOrder = 0;   // 0 = none; 3/5 = cubic/quintic B-spline prefilter at gen
+    double g_blurSigma = 0.0;          // Gaussian blur (grid-cell units) applied before prefilter
     double g_outOfBoundsRestraint;
     double g_effectiveMinX, g_effectiveMinY, g_effectiveMinZ;  // Effective bounds (grid-local)
     double g_effectiveMaxX, g_effectiveMaxY, g_effectiveMaxZ;
