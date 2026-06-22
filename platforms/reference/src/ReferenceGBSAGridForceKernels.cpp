@@ -249,6 +249,7 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
     // which forces method 0 when gridHctDerivatives is null). The N/A/B
     // corrections stay trilinear in all methods.
     bool useTriquintic = (interpolationMethod == 3) && desolvationGrid->hasDerivatives();
+    bool triqOk = false;
     double hctTri = 0.0, dhTri_dfx = 0.0, dhTri_dfy = 0.0, dhTri_dfz = 0.0;
     if (useTriquintic) {
         // Gather 216 values = 27 derivatives x 8 corners in deriv-major layout
@@ -286,7 +287,12 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
             if (j > 0) dhTri_dfy += coeff * j * sxp[i] * syp[j-1] * szp[k];
             if (k > 0) dhTri_dfz += coeff * k * sxp[i] * syp[j] * szp[k-1];
         }
-        hct = hctTri;
+        // Guard against a non-finite triquintic result (e.g. a supplied grid with
+        // NaN derivatives baked in at an atom surface): fall back to the trilinear
+        // value/gradient for this point rather than poisoning the energy.
+        triqOk = std::isfinite(hctTri) && std::isfinite(dhTri_dfx) &&
+                 std::isfinite(dhTri_dfy) && std::isfinite(dhTri_dfz);
+        if (triqOk) hct = hctTri;
     }
 
     // Trilinear interpolation for N, A, B correction grids
@@ -347,7 +353,7 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         // HCT gradient (cell-fractional units; converted to physical by
         // invSpacing below, identical handling for trilinear and triquintic).
         double dh_dfx, dh_dfy, dh_dfz;
-        if (useTriquintic) {
+        if (useTriquintic && triqOk) {
             dh_dfx = dhTri_dfx;
             dh_dfy = dhTri_dfy;
             dh_dfz = dhTri_dfz;
@@ -893,7 +899,16 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
             if (computeDerivs && R_probe_off < r + recS[j]) {
                 double d[27];
                 computeHctDerivsTriquintic(dx, dy, dz, recS[j], R_probe_off, d);
-                for (int k = 0; k < nderivs; k++) derivSum[k] += d[k];
+                // The analytical derivative has a removable log singularity at the
+                // atom surface (r ~ S) that evaluates to NaN/Inf. Skip such an
+                // atom's derivative contribution so a single grid point on an atom
+                // cannot poison every triquintic stencil that touches it; the HCT
+                // value itself (computeHCTTerm) stays finite there.
+                bool finite = true;
+                for (int k = 0; k < nderivs; k++)
+                    if (!std::isfinite(d[k])) { finite = false; break; }
+                if (finite)
+                    for (int k = 0; k < nderivs; k++) derivSum[k] += d[k];
             }
             if (cross >= R_probe_off) return;
             for (int b = 0; b < nbins; b++) {
