@@ -258,7 +258,6 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
     //  (ix,iy,iz+1),(ix+1,iy,iz+1),(ix,iy+1,iz+1),(ix+1,iy+1,iz+1)}.
     bool useTricubic = (interpolationMethod == 2) && desolvationGrid->hasDerivatives();
     bool useTriquintic = (interpolationMethod == 3) && desolvationGrid->hasDerivatives();
-    bool triqOk = false;
     double hctTri = 0.0, dhTri_dfx = 0.0, dhTri_dfy = 0.0, dhTri_dfz = 0.0;
     if (useTricubic) {
         // Tricubic needs 8 of the 27 stored derivatives, in derivative-major layout
@@ -273,9 +272,7 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         double a[64];
         tricubicAssemble(X, a);
         tricubicEvalVG(a, fx, fy, fz, &hctTri, &dhTri_dfx, &dhTri_dfy, &dhTri_dfz);
-        triqOk = std::isfinite(hctTri) && std::isfinite(dhTri_dfx) &&
-                 std::isfinite(dhTri_dfy) && std::isfinite(dhTri_dfz);
-        if (triqOk) hct = hctTri;
+        hct = hctTri;
     } else if (useTriquintic) {
         // Gather 216 values = 27 derivatives x 8 corners in deriv-major layout.
         const int corners[8] = {c000, c100, c010, c110, c001, c101, c011, c111};
@@ -309,13 +306,7 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
             if (j > 0) dhTri_dfy += coeff * j * sxp[i] * syp[j-1] * szp[k];
             if (k > 0) dhTri_dfz += coeff * k * sxp[i] * syp[j] * szp[k-1];
         }
-        // Guard against a non-finite triquintic result (e.g. a supplied grid whose
-        // far-field derivatives overflowed to NaN/Inf during generation): fall back
-        // to the trilinear value/gradient for this point rather than poisoning the
-        // energy.
-        triqOk = std::isfinite(hctTri) && std::isfinite(dhTri_dfx) &&
-                 std::isfinite(dhTri_dfy) && std::isfinite(dhTri_dfz);
-        if (triqOk) hct = hctTri;
+        hct = hctTri;
     }
 
     // Trilinear interpolation for N, A, B correction grids
@@ -376,7 +367,7 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         // HCT gradient (cell-fractional units; converted to physical by
         // invSpacing below, identical handling for trilinear and triquintic).
         double dh_dfx, dh_dfy, dh_dfz;
-        if ((useTricubic || useTriquintic) && triqOk) {
+        if (useTricubic || useTriquintic) {
             dh_dfx = dhTri_dfx;
             dh_dfy = dhTri_dfy;
             dh_dfz = dhTri_dfz;
@@ -436,6 +427,23 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
     }
 
     return result;
+}
+
+// Reject a derivative grid that carries non-finite values rather than silently
+// degrading higher-order interpolation to trilinear. A NaN/Inf in the supplied or
+// generated derivatives means the grid is corrupt (e.g. the Python generator's
+// r=S singularity); quietly falling back to a lower-order method produces results
+// that are wrong in a way that is nearly impossible to diagnose downstream.
+static void requireFiniteDerivativeGrid(const std::vector<float>& hctProbe,
+                                        const char* source) {
+    for (size_t i = 0; i < hctProbe.size(); i++) {
+        if (!std::isfinite(hctProbe[i]))
+            throw OpenMMException(std::string("GBSAGridForce: ") + source +
+                " contains non-finite (NaN/Inf) derivative values; higher-order "
+                "interpolation (method 2/3) cannot use it. Regenerate with finite "
+                "derivatives (the C++ generator drops far-field singular terms; the "
+                "Python generator has a known r=S singularity that must be cleaned).");
+    }
 }
 
 // ==================== initialize ====================
@@ -507,6 +515,9 @@ void ReferenceCalcGBSAGridForceKernel::initialize(
     desolvationGrid = force.getDesolvationGrid();
     if (desolvationGrid) {
         probeRadius = desolvationGrid->getProbeRadius();
+        if ((interpolationMethod == 2 || interpolationMethod == 3) &&
+            desolvationGrid->hasDerivatives())
+            requireFiniteDerivativeGrid(desolvationGrid->getHctProbe(), "supplied desolvation grid");
     } else if (force.getAutoGenerateGrid()) {
         autoGenerateGrid_ = true;
         genReceptorPositions_ = force.getReceptorPositions();
@@ -1003,6 +1014,11 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
             std::copy(slice.begin(), slice.end(), corrB.begin() + (size_t)b*numPoints);
         }
     }
+
+    // The per-atom skip above keeps the accumulated derivatives finite; assert it so
+    // a generation regression surfaces here rather than as a silent trilinear fallback.
+    if (computeDerivs)
+        requireFiniteDerivativeGrid(hctProbe, "auto-generated desolvation grid");
 
     auto grid = std::make_shared<DesolvationGrid>(nx, ny, nz, sp, probeRadius, genRThresholds_);
     grid->setOrigin(ox, oy, oz);

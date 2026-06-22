@@ -699,6 +699,50 @@ def gbsagrid_section(specs):
             print(f"    EXC  {spec[0]:12s}: {repr(ex)[:70]}")
             _failures.append((case + " triquintic", spec[0], 'energy', repr(ex)))
 
+    # Non-finite derivative guard. A supplied higher-order grid carrying any NaN/Inf
+    # must RAISE, never silently fall back to trilinear -- that masked a real
+    # divergence and is the kind of bug that is impossible to diagnose downstream.
+    # Trilinear (method 0) on the same grid must still work, since it reads no
+    # derivatives. (Reference/CPU only; these own the guard.)
+    print(f"\n=== {case} non-finite derivative guard ===")
+    gnx = gny = gnz = 8; gsp = 0.1; gnp = gnx * gny * gnz; gthr = [0.12, 0.16]
+
+    def run_poison(method, spec):
+        cg = gfp.DesolvationGrid(gnx, gny, gnz, float(gsp), 0.14, gthr)
+        cg.setOrigin(-0.4, -0.4, -0.4); cg.setHasDerivatives(True)
+        arr = np.full(27 * gnp, 0.01)
+        arr[26 * gnp + 100] = np.nan       # one NaN in the fxxyyzz block
+        cg.setHctProbe(arr.tolist())
+        zz = [0.0] * (len(gthr) * gnp)
+        cg.setCorrectionN(zz); cg.setCorrectionA(zz); cg.setCorrectionB(zz)
+        f = gfp.GBSAGridForce(); f.setNumAtoms(1); f.setIncludeSurfaceArea(False)
+        f.setInterpolationMethod(method); f.setAtomParameters(0, 0.2, 0.17, 0.72)
+        f.setParticles([0]); f.addParticleGroup('l', [0]); f.setDesolvationGrid(cg)
+        s = mm.System(); s.addParticle(12.0); s.addForce(f)
+        ctx, _ = _context(s, spec)
+        ctx.setPositions(np.array([[0.0, 0.0, 0.0]]))
+        E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+            unit.kilojoules_per_mole)
+        del ctx
+        return E
+    for spec in specs:
+        if spec[1] not in ('Reference', 'CPU'):
+            continue
+        try:
+            run_poison(3, spec); raises = False
+        except Exception:
+            raises = True
+        try:
+            tri_ok = np.isfinite(run_poison(0, spec))
+        except Exception:
+            tri_ok = False
+        ok = raises and tri_ok
+        print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} method-3 raises on NaN deriv, "
+              f"method-0 still works  [{case} nan-guard]")
+        if not ok:
+            _failures.append((case + " nan-guard", spec[0], 'guard',
+                              f"raises={raises} tri_ok={tri_ok}"))
+
     # Buried-pose correction magnitude. For a ligand buried in the receptor cloud
     # the N/A/B corrections are dominant (~15-20% of the energy), not the ~0.1%
     # refinement seen for a solvent-exposed ligand: the single-probe HCT model fails
