@@ -700,6 +700,161 @@ def gbsagrid_section(specs):
             _failures.append((case + " triquintic", spec[0], 'energy', repr(ex)))
 
 
+# ------------------------------------------------------ grid generation
+def gridgen_section(specs):
+    """Exercise the Reference/CPU grid GENERATION paths (CUDA-free): desolvation
+    auto-generation vs the Python reference generator, CPU==Reference determinism,
+    GridForce field-grid generation, and the out-of-bounds ligand flag."""
+    case = "GridGeneration"
+    print(f"\n=== {case} ===")
+    # Generation parity is Reference vs CPU only: CUDA uses a different generation
+    # model (KDE-smoothed desolvation; its own field-grid path), validated against
+    # CUDA separately, so cross-checking CUDA-gen against Reference-gen is not
+    # meaningful here. (Evaluation of a shared grid does match CUDA — see gbsagrid.)
+    gpu_free = [s for s in specs if s[1] in ('Reference', 'CPU')]
+    rng = np.random.RandomState(7)
+    n_rec, n_lig = 20, 4
+    rec_pos = rng.randn(n_rec, 3) * 0.4
+    rec_r = np.full(n_rec, 0.17); rec_s = np.full(n_rec, 0.72)
+    rec_q = rng.uniform(-0.5, 0.5, n_rec)            # fixed once (not per-build)
+    lig_pos = rng.randn(n_lig, 3) * 0.12 + [0.1, 0, 0]
+    lig_r = np.array([0.17, 0.15, 0.12, 0.155]); lig_s = np.array([0.72, 0.85, 0.85, 0.72])
+    lig_q = np.array([0.3, -0.4, 0.25, -0.15])
+    lo, hi, sp = -1.0, 1.0, 0.08
+    c = int(round((hi - lo) / sp)) + 1
+    thr = [0.12, 0.16]
+
+    def gbsa_autogen(method=0, derivs=False):
+        f = gfp.GBSAGridForce(); f.setNumAtoms(n_lig); f.setIncludeSurfaceArea(False)
+        f.setInterpolationMethod(method); f.setAutoGenerateGrid(True)
+        if derivs:
+            f.setComputeGridDerivatives(True)
+        for i in range(n_lig):
+            f.setAtomParameters(i, float(lig_q[i]), float(lig_r[i]), float(lig_s[i]))
+        f.setReceptorPositions(rec_pos.flatten().tolist())
+        f.setReceptorRadii(rec_r.tolist()); f.setReceptorScaleFactors(rec_s.tolist())
+        f.setGridOrigin(lo, lo, lo); f.setGridCounts(c, c, c); f.setGridSpacing(sp)
+        f.setProbeRadius(0.14); f.setRThresholds(thr)
+        f.setParticles(list(range(n_lig))); f.addParticleGroup('lig', list(range(n_lig)))
+        s = mm.System()
+        for _ in range(n_lig):
+            s.addParticle(12.0)
+        s.addForce(f)
+        return s, f
+
+    def gbsa_energy(maker, spec, pos=None):
+        system, f = maker
+        ctx, _ = _context(system, spec)
+        ctx.setPositions(lig_pos if pos is None else pos)
+        E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+            unit.kilojoules_per_mole)
+        flags = list(f.getParticleOutOfBoundsFlags(ctx))
+        del ctx
+        return E, flags
+
+    # (1) Desolvation C++ auto-gen vs the Python reference generator (Reference).
+    try:
+        sys.path.insert(0, os.path.dirname(PRMDIR))
+        from desolvation_grid_generator import generate_desolvation_grid
+        pg = generate_desolvation_grid(
+            rec_positions=rec_pos, rec_radii=rec_r, rec_scales=rec_s,
+            origin=np.array([lo, lo, lo]), counts=(c, c, c), spacing=sp,
+            probe_radius=0.14, r_thresholds=tuple(thr), verbose=False)
+
+        def gbsa_supplied():
+            cg = gfp.DesolvationGrid(c, c, c, float(sp), 0.14, list(pg.r_thresholds))
+            cg.setOrigin(lo, lo, lo); cg.setHctProbe(pg.hct_probe.flatten(order='C').tolist())
+            cN, cA, cB = [], [], []
+            for b in range(pg.n_bins):
+                cN.extend(pg.correction_N[b].flatten(order='C').tolist())
+                cA.extend(pg.correction_A[b].flatten(order='C').tolist())
+                cB.extend(pg.correction_B[b].flatten(order='C').tolist())
+            cg.setCorrectionN(cN); cg.setCorrectionA(cA); cg.setCorrectionB(cB)
+            f = gfp.GBSAGridForce(); f.setNumAtoms(n_lig); f.setIncludeSurfaceArea(False)
+            f.setInterpolationMethod(0)
+            for i in range(n_lig):
+                f.setAtomParameters(i, float(lig_q[i]), float(lig_r[i]), float(lig_s[i]))
+            f.setDesolvationGrid(cg)
+            f.setParticles(list(range(n_lig))); f.addParticleGroup('lig', list(range(n_lig)))
+            s = mm.System()
+            for _ in range(n_lig):
+                s.addParticle(12.0)
+            s.addForce(f)
+            return s, f
+        e_sup, _ = gbsa_energy(gbsa_supplied(), (REFERENCE, 'Reference', {}, 'double'))
+        e_gen, _ = gbsa_energy(gbsa_autogen(0), (REFERENCE, 'Reference', {}, 'double'))
+        d = abs(e_gen - e_sup)
+        ok = d < 1e-4
+        print(f"    {'OK' if ok else 'FAIL':4s} Reference    desolvation C++gen vs Python-gen "
+              f"abs={d:.2e}  [{case} desolv-vs-python]")
+        if not ok:
+            _failures.append((case + " desolv-vs-python", REFERENCE, 'energy', f"abs={d:.2e}"))
+    except Exception as e:
+        print(f"    SKIP desolvation-vs-python ({repr(e)[:60]})")
+
+    # (2) Desolvation auto-gen determinism: every platform == Reference auto-gen.
+    e_ref, _ = gbsa_energy(gbsa_autogen(0), (REFERENCE, 'Reference', {}, 'double'))
+    for spec in gpu_free:
+        try:
+            E, _ = gbsa_energy(gbsa_autogen(0), spec)
+            d = abs(E - e_ref)
+            ok = d < 1e-9
+            print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} desolvation auto-gen vs Reference "
+                  f"abs={d:.2e}  [{case} desolv]")
+            if not ok:
+                _failures.append((case + " desolv", spec[0], 'energy', f"abs={d:.2e}"))
+        except Exception as ex:
+            print(f"    EXC  {spec[0]:12s}: {repr(ex)[:60]}")
+            _failures.append((case + " desolv", spec[0], 'energy', repr(ex)))
+
+    # (3) Out-of-bounds ligand flag: an atom outside the grid is flagged.
+    oob_pos = lig_pos.copy(); oob_pos[1] = [9.0, 9.0, 9.0]
+    _, flags = gbsa_energy(gbsa_autogen(0), (REFERENCE, 'Reference', {}, 'double'), pos=oob_pos)
+    ok = len(flags) == n_lig and flags[1] == 1 and sum(flags) == 1
+    print(f"    {'OK' if ok else 'FAIL':4s} Reference    out-of-bounds flag {list(flags)} (expect 1 at idx 1)  [{case} oob]")
+    if not ok:
+        _failures.append((case + " oob", REFERENCE, 'flag', str(list(flags))))
+
+    # (4) GridForce field generation (charge/ljr/lja): every platform == Reference.
+    def gridforce_autogen(gtype):
+        s = mm.System(); s.addParticle(12.0)
+        nb = mm.NonbondedForce(); nb.addParticle(0.4, 0.3, 0.2)
+        for j in range(n_rec):
+            s.addParticle(12.0); nb.addParticle(float(rec_q[j]), 0.3, 0.25)
+        s.addForce(nb)
+        f = gfp.GridForce(); f.addGridCounts(c, c, c); f.addGridSpacing(sp, sp, sp)
+        f.setGridOrigin(lo, lo, lo); f.setAutoGenerateGrid(True); f.setGridType(gtype)
+        f.setReceptorAtoms(list(range(1, 1 + n_rec)))
+        f.setReceptorPositionsFromLists([tuple(p) for p in rec_pos])
+        f.setLigandAtoms([0]); f.addScalingFactor(1.0); f.setForceGroup(1)
+        s.addForce(f)
+        return s
+
+    def gridforce_energy(gtype, spec):
+        ctx, _ = _context(gridforce_autogen(gtype), spec)
+        ctx.setPositions(np.vstack([[0.1, 0.05, 0.0], rec_pos]))
+        E = ctx.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(
+            unit.kilojoules_per_mole)
+        del ctx
+        return E
+    for gtype in ('charge', 'ljr', 'lja'):
+        try:
+            er = gridforce_energy(gtype, (REFERENCE, 'Reference', {}, 'double'))
+            for spec in gpu_free:
+                if spec[0] == REFERENCE:
+                    continue
+                E = gridforce_energy(gtype, spec)
+                d = abs(E - er)
+                ok = d < 1e-9
+                print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} GridForce gen[{gtype}] vs Reference "
+                      f"abs={d:.2e}  [{case} field]")
+                if not ok:
+                    _failures.append((case + " field", spec[0], gtype, f"abs={d:.2e}"))
+        except Exception as ex:
+            print(f"    EXC  GridForce gen[{gtype}]: {repr(ex)[:60]}")
+            _failures.append((case + " field", '-', gtype, repr(ex)))
+
+
 # ------------------------------------------------------ BondedHessian class
 def bondedhessian_section(specs):
     case = "BondedHessian"
@@ -835,6 +990,7 @@ SECTIONS = {
     'site': site_section,
     'gbsa': gbsa_section,
     'gbsagrid': gbsagrid_section,
+    'gridgen': gridgen_section,
     'bondedhessian': bondedhessian_section,
     'integrators': integrators_section,
 }
