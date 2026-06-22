@@ -990,12 +990,15 @@ def gridgen_section(specs):
     for gtype in ('charge', 'ljr', 'lja'):
         try:
             er = gridforce_energy(gtype, (REFERENCE, 'Reference', {}, 'double'))
-            for spec in gpu_free:
+            for spec in specs:
                 if spec[0] == REFERENCE:
                     continue
                 E = gridforce_energy(gtype, spec)
                 d = abs(E - er)
-                ok = d < 1e-9
+                # CPU delegates to Reference (bit-exact); CUDA shares the formula but
+                # generates in float, so allow a small relative tolerance there.
+                tol = 1e-9 if spec[1] == 'CPU' else 5e-5 * max(1.0, abs(er))
+                ok = d < tol
                 print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} GridForce gen[{gtype}] vs Reference "
                       f"abs={d:.2e}  [{case} field]")
                 if not ok:
@@ -1003,6 +1006,55 @@ def gridgen_section(specs):
         except Exception as ex:
             print(f"    EXC  GridForce gen[{gtype}]: {repr(ex)[:60]}")
             _failures.append((case + " field", '-', gtype, repr(ex)))
+
+    # (5) GridForce field generation vs the ANALYTIC closed form. This is the
+    # independent ground truth -- CPU==Reference is circular (shared formula) and
+    # would not catch a wrong generation formula; this would (e.g. the AMBER
+    # Rmin=2^(1/6)*sigma convention). One receptor atom at a grid node; trilinear at
+    # another node returns the stored value, which must equal the capped analytic field.
+    COUL = 138.935456
+    alo, asp, ac = -1.0, 0.1, 21              # (0,0,0) and (0.5,0,0) are nodes
+    rq, rsig, reps, rr = 0.45, 0.30, 0.20, 0.5
+    rmin = (2.0 ** (1.0 / 6.0)) * rsig
+    gcap = gfp.GridForce().getGridCap()
+    def analytic_field(gtype):
+        if gtype == 'charge':
+            U = COUL * rq / rr
+        elif gtype == 'ljr':
+            U = np.sqrt(reps) * rmin ** 6 / rr ** 12
+        else:
+            U = -2.0 * np.sqrt(reps) * rmin ** 3 / rr ** 6
+        return gcap * np.tanh(U / gcap)       # generation applies a tanh cap
+    def one_atom_node_energy(gtype, spec):
+        s = mm.System(); s.addParticle(12.0)                 # ligand (probe)
+        nb = mm.NonbondedForce(); nb.addParticle(0.0, 0.3, 0.0)
+        s.addParticle(12.0); nb.addParticle(rq, rsig, reps)  # receptor atom at origin
+        s.addForce(nb)
+        f = gfp.GridForce(); f.addGridCounts(ac, ac, ac); f.addGridSpacing(asp, asp, asp)
+        f.setGridOrigin(alo, alo, alo); f.setAutoGenerateGrid(True); f.setGridType(gtype)
+        f.setReceptorAtoms([1]); f.setReceptorPositionsFromLists([(0.0, 0.0, 0.0)])
+        f.setLigandAtoms([0]); f.addScalingFactor(1.0); f.setForceGroup(1)
+        s.addForce(f)
+        ctx, _ = _context(s, spec)
+        ctx.setPositions(np.array([[rr, 0.0, 0.0], [0.0, 0.0, 0.0]]))   # ligand at a node
+        E = ctx.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(
+            unit.kilojoules_per_mole)
+        del ctx
+        return E
+    for gtype in ('charge', 'ljr', 'lja'):
+        ref = analytic_field(gtype)
+        for spec in specs:
+            try:
+                E = one_atom_node_energy(gtype, spec)
+                rel = abs(E - ref) / max(1.0, abs(ref))
+                ok = rel < 1e-4
+                print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} GridForce gen[{gtype}] vs analytic "
+                      f"({E:.4f} vs {ref:.4f}, rel {rel:.2e})  [{case} field-analytic]")
+                if not ok:
+                    _failures.append((case + " field-analytic", spec[0], gtype, f"rel={rel:.2e}"))
+            except Exception as ex:
+                print(f"    EXC  GridForce gen[{gtype}] analytic {spec[0]}: {repr(ex)[:50]}")
+                _failures.append((case + " field-analytic", spec[0], gtype, repr(ex)))
 
 
 # ------------------------------------------------------ BondedHessian class
