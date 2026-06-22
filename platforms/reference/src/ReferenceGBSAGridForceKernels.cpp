@@ -10,6 +10,8 @@
 #include "ReferenceGridInterpolation.h"
 #include "ReferenceHCTDerivatives.h"
 #include "TriquinticMatrix.h"
+#include "TricubicMatrix.h"
+#include "BSplinePrefilter.h"
 #include "GBSAGridForce.h"
 
 #include "openmm/OpenMMException.h"
@@ -244,18 +246,38 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
     double vp = ofy * vpm + fy * vpp;
     double hct = ofx * vm + fx * vp;
 
-    // Triquintic Hermite override for the HCT probe field. Falls back to the
-    // trilinear value above when the grid carries no derivatives (mirrors CUDA,
-    // which forces method 0 when gridHctDerivatives is null). The N/A/B
-    // corrections stay trilinear in all methods.
+    // Higher-order Hermite override for the HCT probe field: tricubic (method 2,
+    // C1, 8 derivatives/corner) or triquintic (method 3, C2, 27 derivatives/corner).
+    // Both read the 27-derivative grid stored in deriv-major layout [d*numPoints +
+    // idx]; tricubic selects its 8 derivatives from that layout via the same map as
+    // the CUDA kernel. Falls back to the trilinear value above when the grid carries
+    // no derivatives (mirrors CUDA, which forces method 0 when gridHctDerivatives is
+    // null). The N/A/B corrections stay trilinear in all methods (binned mode).
+    // Corner order matches the CUDA kernel:
+    // {(ix,iy,iz),(ix+1,iy,iz),(ix,iy+1,iz),(ix+1,iy+1,iz),
+    //  (ix,iy,iz+1),(ix+1,iy,iz+1),(ix,iy+1,iz+1),(ix+1,iy+1,iz+1)}.
+    bool useTricubic = (interpolationMethod == 2) && desolvationGrid->hasDerivatives();
     bool useTriquintic = (interpolationMethod == 3) && desolvationGrid->hasDerivatives();
     bool triqOk = false;
     double hctTri = 0.0, dhTri_dfx = 0.0, dhTri_dfy = 0.0, dhTri_dfz = 0.0;
-    if (useTriquintic) {
-        // Gather 216 values = 27 derivatives x 8 corners in deriv-major layout
-        // [d*numPoints + idx], corner order matching the CUDA kernel:
-        // {(ix,iy,iz),(ix+1,iy,iz),(ix,iy+1,iz),(ix+1,iy+1,iz),
-        //  (ix,iy,iz+1),(ix+1,iy,iz+1),(ix,iy+1,iz+1),(ix+1,iy+1,iz+1)}.
+    if (useTricubic) {
+        // Tricubic needs 8 of the 27 stored derivatives, in derivative-major layout
+        // X[deriv*8 + corner]. derivMap takes {f,fx,fy,fz,fxy,fxz,fyz,fxyz} from the
+        // RASPA3 27-derivative order {f,fx,fy,fz,fxx,fxy,fxz,fyy,fyz,fzz,...,fxyz}.
+        const int corners[8] = {c000, c100, c010, c110, c001, c101, c011, c111};
+        const int derivMap[8] = {0, 1, 2, 3, 5, 6, 8, 13};
+        double X[64];
+        for (int d = 0; d < 8; d++)
+            for (int c = 0; c < 8; c++)
+                X[d * 8 + c] = hctProbeData[(size_t)derivMap[d] * numPoints + corners[c]];
+        double a[64];
+        tricubicAssemble(X, a);
+        tricubicEvalVG(a, fx, fy, fz, &hctTri, &dhTri_dfx, &dhTri_dfy, &dhTri_dfz);
+        triqOk = std::isfinite(hctTri) && std::isfinite(dhTri_dfx) &&
+                 std::isfinite(dhTri_dfy) && std::isfinite(dhTri_dfz);
+        if (triqOk) hct = hctTri;
+    } else if (useTriquintic) {
+        // Gather 216 values = 27 derivatives x 8 corners in deriv-major layout.
         const int corners[8] = {c000, c100, c010, c110, c001, c101, c011, c111};
         double X[216];
         for (int d = 0; d < 27; d++)
@@ -354,7 +376,7 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         // HCT gradient (cell-fractional units; converted to physical by
         // invSpacing below, identical handling for trilinear and triquintic).
         double dh_dfx, dh_dfy, dh_dfz;
-        if (useTriquintic && triqOk) {
+        if ((useTricubic || useTriquintic) && triqOk) {
             dh_dfx = dhTri_dfx;
             dh_dfy = dhTri_dfy;
             dh_dfz = dhTri_dfz;
@@ -497,6 +519,7 @@ void ReferenceCalcGBSAGridForceKernel::initialize(
         genComputeDerivatives_ = force.getComputeGridDerivatives();
         genSmoothingSigma_ = force.getCorrectionSmoothingSigma();
         genCullCutoff_ = force.getReceptorCullingCutoff();
+        genBSplinePrefilterOrder_ = force.getBSplinePrefilterOrder();
         probeRadius = force.getProbeRadius();
         if (genReceptorPositions_.empty() || genReceptorRadii_.empty() ||
             genReceptorScales_.empty())
@@ -958,6 +981,26 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
             smoothCorrectionGrid(corrN, (size_t)b*numPoints, nx, ny, nz, genSmoothingSigma_);
             smoothCorrectionGrid(corrA, (size_t)b*numPoints, nx, ny, nz, genSmoothingSigma_);
             smoothCorrectionGrid(corrB, (size_t)b*numPoints, nx, ny, nz, genSmoothingSigma_);
+        }
+    }
+
+    // B-spline prefilter (opt-in via setBSplinePrefilterOrder; 0 = approximating).
+    // When requested, convert sampled values to interpolating B-spline coefficients
+    // so method-1 evaluation passes through the data — identical to the CUDA
+    // generation path (CudaGBSAGridForceKernels.cpp). Skipped when derivatives are
+    // present (triquintic uses Hermite derivatives, not B-spline coefficients).
+    if (genBSplinePrefilterOrder_ > 0 && !computeDerivs) {
+        bsplinePrefilter3DByOrder(hctProbe, nx, ny, nz, genBSplinePrefilterOrder_);
+        for (int b = 0; b < nbins; b++) {
+            vector<float> slice(corrN.begin() + (size_t)b*numPoints, corrN.begin() + (size_t)(b+1)*numPoints);
+            bsplinePrefilter3DByOrder(slice, nx, ny, nz, genBSplinePrefilterOrder_);
+            std::copy(slice.begin(), slice.end(), corrN.begin() + (size_t)b*numPoints);
+            slice.assign(corrA.begin() + (size_t)b*numPoints, corrA.begin() + (size_t)(b+1)*numPoints);
+            bsplinePrefilter3DByOrder(slice, nx, ny, nz, genBSplinePrefilterOrder_);
+            std::copy(slice.begin(), slice.end(), corrA.begin() + (size_t)b*numPoints);
+            slice.assign(corrB.begin() + (size_t)b*numPoints, corrB.begin() + (size_t)(b+1)*numPoints);
+            bsplinePrefilter3DByOrder(slice, nx, ny, nz, genBSplinePrefilterOrder_);
+            std::copy(slice.begin(), slice.end(), corrB.begin() + (size_t)b*numPoints);
         }
     }
 
