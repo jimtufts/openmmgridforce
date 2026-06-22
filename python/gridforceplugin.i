@@ -438,6 +438,8 @@ public:
 
     void setCorrectionSmoothingSigma(double sigma);
     double getCorrectionSmoothingSigma() const;
+    void setReceptorCullingCutoff(double cutoff);
+    double getReceptorCullingCutoff() const;
 
     void setKDEThreshold(double threshold);
     double getKDEThreshold() const;

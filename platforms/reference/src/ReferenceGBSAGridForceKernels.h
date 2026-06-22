@@ -109,6 +109,7 @@ protected:
     std::vector<double> genRThresholds_;
     bool genComputeDerivatives_ = false;
     double genSmoothingSigma_ = 0.0;
+    double genCullCutoff_ = 0.0;   // 0 = sum all receptor atoms (exact)
 
     // Per-(group,atom) out-of-bounds flags from the last execute().
     mutable std::vector<int> outOfBoundsFlags_;

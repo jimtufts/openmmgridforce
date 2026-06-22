@@ -30,6 +30,7 @@ GBSAGridForce::GBSAGridForce()
       rThresholds_({0.12, 0.16}),
       computeGridDerivatives(false),
       correctionSmoothingSigma_(0.0),
+      receptorCullingCutoff_(0.0),
       kdeThreshold_(0.02),
       kdeBandwidth_(0.04),
       kdeEpsilonB_(0.03),
@@ -164,6 +165,13 @@ void GBSAGridForce::setCorrectionSmoothingSigma(double sigma) {
         throw OpenMMException("GBSAGridForce: correction smoothing sigma must be non-negative");
     }
     correctionSmoothingSigma_ = sigma;
+}
+
+void GBSAGridForce::setReceptorCullingCutoff(double cutoff) {
+    if (cutoff < 0) {
+        throw OpenMMException("GBSAGridForce: receptor culling cutoff must be non-negative");
+    }
+    receptorCullingCutoff_ = cutoff;
 }
 
 void GBSAGridForce::setKDEThreshold(double threshold) {

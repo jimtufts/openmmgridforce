@@ -240,6 +240,21 @@ public:
      */
     double getCorrectionSmoothingSigma() const { return correctionSmoothingSigma_; }
 
+    /**
+     * Set a receptor culling cutoff (nm) for auto-generation. When > 0, each grid
+     * point sums only over receptor atoms within this distance (via a cell list),
+     * turning O(points * n_receptor) into O(points * local_receptor) — a large
+     * speedup for big receptors. 0 (default) sums all atoms (exact, matches the
+     * reference generator bit-for-bit). The HCT descreening decays rapidly with
+     * distance, so a generous cutoff (~1.2 nm) is effectively exact.
+     */
+    void setReceptorCullingCutoff(double cutoff);
+
+    /**
+     * Get the receptor culling cutoff (nm); 0 means no culling.
+     */
+    double getReceptorCullingCutoff() const { return receptorCullingCutoff_; }
+
     // ========== KDE Smoothing Parameters ==========
 
     /**
@@ -514,6 +529,7 @@ private:
     std::vector<double> rThresholds_;
     bool computeGridDerivatives;
     double correctionSmoothingSigma_;
+    double receptorCullingCutoff_;
 
     // KDE smoothing parameters
     double kdeThreshold_;

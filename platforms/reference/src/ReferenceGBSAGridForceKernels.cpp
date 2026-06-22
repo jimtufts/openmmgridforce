@@ -375,6 +375,7 @@ void ReferenceCalcGBSAGridForceKernel::initialize(
         genRThresholds_ = force.getRThresholds();
         genComputeDerivatives_ = force.getComputeGridDerivatives();
         genSmoothingSigma_ = force.getCorrectionSmoothingSigma();
+        genCullCutoff_ = force.getReceptorCullingCutoff();
         probeRadius = force.getProbeRadius();
         if (genReceptorPositions_.empty() || genReceptorRadii_.empty() ||
             genReceptorScales_.empty())
@@ -715,6 +716,44 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
     vector<float> corrA((size_t)nbins * numPoints, 0.0f);
     vector<float> corrB((size_t)nbins * numPoints, 0.0f);
 
+    // Optional receptor cell list for culling. With cutoff > 0, each grid point
+    // visits only receptor atoms in the 3x3x3 cell neighborhood (cell size =
+    // cutoff), turning the per-point loop from O(n_rec) into O(local_rec).
+    const double cutoff = genCullCutoff_;
+    const bool cull = (cutoff > 0.0 && nrec > 0);
+    double clo[3] = {0,0,0};
+    int cn[3] = {1,1,1};
+    vector<int> cellStart, cellAtoms;
+    if (cull) {
+        double chi[3];
+        for (int d = 0; d < 3; d++) { clo[d] = 1e30; chi[d] = -1e30; }
+        for (int j = 0; j < nrec; j++)
+            for (int d = 0; d < 3; d++) {
+                double v = genReceptorPositions_[3*j+d];
+                clo[d] = std::min(clo[d], v); chi[d] = std::max(chi[d], v);
+            }
+        for (int d = 0; d < 3; d++)
+            cn[d] = std::max(1, (int)floor((chi[d] - clo[d]) / cutoff) + 1);
+        int ncell = cn[0]*cn[1]*cn[2];
+        auto cellOf = [&](double x, double y, double z) {
+            int cx = std::min(std::max((int)floor((x-clo[0])/cutoff), 0), cn[0]-1);
+            int cy = std::min(std::max((int)floor((y-clo[1])/cutoff), 0), cn[1]-1);
+            int cz = std::min(std::max((int)floor((z-clo[2])/cutoff), 0), cn[2]-1);
+            return (cx*cn[1] + cy)*cn[2] + cz;
+        };
+        vector<int> count(ncell, 0);
+        for (int j = 0; j < nrec; j++)
+            count[cellOf(genReceptorPositions_[3*j], genReceptorPositions_[3*j+1], genReceptorPositions_[3*j+2])]++;
+        cellStart.assign(ncell+1, 0);
+        for (int c = 0; c < ncell; c++) cellStart[c+1] = cellStart[c] + count[c];
+        cellAtoms.resize(nrec);
+        vector<int> cursor(cellStart.begin(), cellStart.end()-1);
+        for (int j = 0; j < nrec; j++) {
+            int c = cellOf(genReceptorPositions_[3*j], genReceptorPositions_[3*j+1], genReceptorPositions_[3*j+2]);
+            cellAtoms[cursor[c]++] = j;
+        }
+    }
+
     parallelFor(context, numPoints, [&](int idx) {
         int ix = idx / nyz;
         int rem = idx % nyz;
@@ -725,30 +764,43 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
         double hp = 0.0;
         double derivSum[27] = {0.0};
         vector<double> N(nbins, 0.0), A(nbins, 0.0), B(nbins, 0.0);
-        for (int j = 0; j < nrec; j++) {
+        // Accumulate one receptor atom's contribution. When culling, atoms past
+        // the cutoff are skipped (their descreening is negligible).
+        auto addAtom = [&](int j) {
             double dx = px - genReceptorPositions_[3*j+0];
             double dy = py - genReceptorPositions_[3*j+1];
             double dz = pz - genReceptorPositions_[3*j+2];
             double r = sqrt(dx*dx + dy*dy + dz*dz);
+            if (cull && r > cutoff) return;
             // Probe HCT descreening from receptor atom j (probe is the receiver).
             hp += computeHCTTerm(r, R_probe_off, recOff[j], recScale[j]);
-            if (r <= 1e-6) continue;
+            if (r <= 1e-6) return;
             double cross = fabs(r - recS[j]);
-            // Triquintic derivative sum (matches the Python generator path:
-            // skip r<1e-6 and R_probe_off >= r + S_j; dx,dy,dz point from the
-            // receptor atom to the grid point).
             if (computeDerivs && R_probe_off < r + recS[j]) {
                 double d[27];
                 computeHctDerivsTriquintic(dx, dy, dz, recS[j], R_probe_off, d);
                 for (int k = 0; k < nderivs; k++) derivSum[k] += d[k];
             }
-            if (cross >= R_probe_off) continue;
+            if (cross >= R_probe_off) return;
             for (int b = 0; b < nbins; b++) {
                 if (cross < genRThresholds_[b]) {
                     N[b] += 1.0;
                     A[b] += r - recS[j]*recS[j] / r;
                     B[b] += 0.5 / r;
                 }
+            }
+        };
+        if (!cull) {
+            for (int j = 0; j < nrec; j++) addAtom(j);
+        } else {
+            int pcx = std::min(std::max((int)floor((px-clo[0])/cutoff), 0), cn[0]-1);
+            int pcy = std::min(std::max((int)floor((py-clo[1])/cutoff), 0), cn[1]-1);
+            int pcz = std::min(std::max((int)floor((pz-clo[2])/cutoff), 0), cn[2]-1);
+            for (int ax = std::max(0,pcx-1); ax <= std::min(cn[0]-1,pcx+1); ax++)
+            for (int ay = std::max(0,pcy-1); ay <= std::min(cn[1]-1,pcy+1); ay++)
+            for (int az = std::max(0,pcz-1); az <= std::min(cn[2]-1,pcz+1); az++) {
+                int c = (ax*cn[1] + ay)*cn[2] + az;
+                for (int t = cellStart[c]; t < cellStart[c+1]; t++) addAtom(cellAtoms[t]);
             }
         }
         if (computeDerivs) {
