@@ -9,6 +9,7 @@
 #include "ReferenceGBSAGridForceKernels.h"
 #include "ReferenceGridInterpolation.h"
 #include "ReferenceHCTDerivatives.h"
+#include "TriquinticMatrix.h"
 #include "GBSAGridForce.h"
 
 #include "openmm/OpenMMException.h"
@@ -183,6 +184,51 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
     double vp = ofy * vpm + fy * vpp;
     double hct = ofx * vm + fx * vp;
 
+    // Triquintic Hermite override for the HCT probe field. Falls back to the
+    // trilinear value above when the grid carries no derivatives (mirrors CUDA,
+    // which forces method 0 when gridHctDerivatives is null). The N/A/B
+    // corrections stay trilinear in all methods.
+    bool useTriquintic = (interpolationMethod == 3) && desolvationGrid->hasDerivatives();
+    double hctTri = 0.0, dhTri_dfx = 0.0, dhTri_dfy = 0.0, dhTri_dfz = 0.0;
+    if (useTriquintic) {
+        // Gather 216 values = 27 derivatives x 8 corners in deriv-major layout
+        // [d*numPoints + idx], corner order matching the CUDA kernel:
+        // {(ix,iy,iz),(ix+1,iy,iz),(ix,iy+1,iz),(ix+1,iy+1,iz),
+        //  (ix,iy,iz+1),(ix+1,iy,iz+1),(ix,iy+1,iz+1),(ix+1,iy+1,iz+1)}.
+        const int corners[8] = {c000, c100, c010, c110, c001, c101, c011, c111};
+        double X[216];
+        for (int d = 0; d < 27; d++)
+            for (int c = 0; c < 8; c++)
+                X[d * 8 + c] = hctProbeData[(size_t)d * numPoints + corners[c]];
+
+        // a = 0.125 * TRIQUINTIC_COEFFICIENTS * X
+        double a[216];
+        for (int i = 0; i < 216; i++) {
+            double acc = 0.0;
+            for (int j = 0; j < 216; j++)
+                acc += TRIQUINTIC_COEFFICIENTS[i][j] * X[j];
+            a[i] = 0.125 * acc;
+        }
+
+        double sxp[6], syp[6], szp[6];
+        sxp[0] = syp[0] = szp[0] = 1.0;
+        for (int p = 1; p < 6; p++) {
+            sxp[p] = sxp[p-1] * fx;
+            syp[p] = syp[p-1] * fy;
+            szp[p] = szp[p-1] * fz;
+        }
+        for (int k = 0; k < 6; k++)
+        for (int j = 0; j < 6; j++)
+        for (int i = 0; i < 6; i++) {
+            double coeff = a[i + 6*j + 36*k];
+            hctTri += coeff * sxp[i] * syp[j] * szp[k];
+            if (i > 0) dhTri_dfx += coeff * i * sxp[i-1] * syp[j] * szp[k];
+            if (j > 0) dhTri_dfy += coeff * j * sxp[i] * syp[j-1] * szp[k];
+            if (k > 0) dhTri_dfz += coeff * k * sxp[i] * syp[j] * szp[k-1];
+        }
+        hct = hctTri;
+    }
+
     // Trilinear interpolation for N, A, B correction grids
     double N000 = corrN[binOffset + c000], N001 = corrN[binOffset + c001];
     double N010 = corrN[binOffset + c010], N011 = corrN[binOffset + c011];
@@ -238,11 +284,19 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         double dCorr_dA = -0.25 * delta * sigma;
         double dCorr_dB = logTerm;
 
-        // Trilinear gradients for HCT
-        double dh_dfx = vp - vm;
-        double dh_dfy = ofx * (vmp - vmm) + fx * (vpp - vpm);
-        double dh_dfz = ofx * (ofy * (h001 - h000) + fy * (h011 - h010)) +
-                         fx * (ofy * (h101 - h100) + fy * (h111 - h110));
+        // HCT gradient (cell-fractional units; converted to physical by
+        // invSpacing below, identical handling for trilinear and triquintic).
+        double dh_dfx, dh_dfy, dh_dfz;
+        if (useTriquintic) {
+            dh_dfx = dhTri_dfx;
+            dh_dfy = dhTri_dfy;
+            dh_dfz = dhTri_dfz;
+        } else {
+            dh_dfx = vp - vm;
+            dh_dfy = ofx * (vmp - vmm) + fx * (vpp - vpm);
+            dh_dfz = ofx * (ofy * (h001 - h000) + fy * (h011 - h010)) +
+                      fx * (ofy * (h101 - h100) + fy * (h111 - h110));
+        }
 
         // Trilinear gradients for N
         double dN_dfx = Np - Nm;
