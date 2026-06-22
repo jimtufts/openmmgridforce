@@ -51,6 +51,10 @@ public:
     std::vector<double> getHessianBlocks();
     std::vector<double> getFullHessian();
 
+    std::vector<int> getParticleOutOfBoundsFlags() {
+        return kernel.getAs<CalcGBSAGridForceKernel>().getParticleOutOfBoundsFlags();
+    }
+
     void setSkipGroupEnergyDownload(bool skip) {
         kernel.getAs<CalcGBSAGridForceKernel>().setSkipGroupEnergyDownload(skip);
     }

@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <memory>
+#include <iostream>
 
 using namespace OpenMM;
 using namespace std;
@@ -41,10 +43,11 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
         double x, double y, double z,
         double R_i_off, bool computeGrad,
         double& gradX, double& gradY, double& gradZ,
-        double* hess) const {
+        double* hess, bool* outOfBounds) const {
 
     gradX = gradY = gradZ = 0.0;
     if (hess) for (int c = 0; c < 6; c++) hess[c] = 0.0;
+    if (outOfBounds) *outOfBounds = false;
 
     if (!desolvationGrid) return 0.0;
 
@@ -64,8 +67,10 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
     int iz = (int)floor(rz);
 
     // Bounds check
-    if (ix < 0 || ix >= nx - 1 || iy < 0 || iy >= ny - 1 || iz < 0 || iz >= nz - 1)
+    if (ix < 0 || ix >= nx - 1 || iy < 0 || iy >= ny - 1 || iz < 0 || iz >= nz - 1) {
+        if (outOfBounds) *outOfBounds = true;
         return 0.0;
+    }
 
     double fx = rx - ix;
     double fy = ry - iy;
@@ -293,11 +298,33 @@ void ReferenceCalcGBSAGridForceKernel::initialize(
     surfaceTension = force.getSurfaceTension();
     interpolationMethod = force.getInterpolationMethod();
 
-    // Grid
+    // Grid: use a supplied grid, else generate one from the receptor parameters
+    // (lazily in the first execute(), where a Context/thread pool is available).
     desolvationGrid = force.getDesolvationGrid();
-    if (!desolvationGrid)
-        throw OpenMMException("GBSAGridForce: desolvation grid must be set (auto-generation not supported on Reference platform)");
-    probeRadius = desolvationGrid->getProbeRadius();
+    if (desolvationGrid) {
+        probeRadius = desolvationGrid->getProbeRadius();
+    } else if (force.getAutoGenerateGrid()) {
+        autoGenerateGrid_ = true;
+        genReceptorPositions_ = force.getReceptorPositions();
+        genReceptorRadii_ = force.getReceptorRadii();
+        genReceptorScales_ = force.getReceptorScaleFactors();
+        force.getGridCounts(genCounts_[0], genCounts_[1], genCounts_[2]);
+        force.getGridOrigin(genOrigin_[0], genOrigin_[1], genOrigin_[2]);
+        genSpacing_ = force.getGridSpacing();
+        genRThresholds_ = force.getRThresholds();
+        probeRadius = force.getProbeRadius();
+        if (genReceptorPositions_.empty() || genReceptorRadii_.empty() ||
+            genReceptorScales_.empty())
+            throw OpenMMException("GBSAGridForce: auto-generation requires receptor "
+                                  "positions, radii, and scale factors");
+        if (genCounts_[0] <= 0 || genCounts_[1] <= 0 || genCounts_[2] <= 0 || genSpacing_ <= 0.0)
+            throw OpenMMException("GBSAGridForce: auto-generation requires grid counts and spacing");
+        if (genRThresholds_.empty())
+            throw OpenMMException("GBSAGridForce: auto-generation requires at least one R threshold");
+    } else {
+        throw OpenMMException("GBSAGridForce: desolvation grid must be set, or enable "
+                              "setAutoGenerateGrid with receptor parameters");
+    }
 
     // Initialize per-group result storage
     groupEnergies_.resize(numParticleGroups, 0.0);
@@ -329,12 +356,14 @@ void ReferenceCalcGBSAGridForceKernel::computeGroup(
             int pi = particles[i];
             double R_i_off = radii[i] - DIELECTRIC_OFFSET;
             double gx, gy, gz;
+            bool oob = false;
             hctReceptor[i] = interpolateReceptorHCT(
                 posData[pi][0], posData[pi][1], posData[pi][2],
-                R_i_off, includeForces, gx, gy, gz);
+                R_i_off, includeForces, gx, gy, gz, nullptr, &oob);
             hctRecGradX[i] = gx;
             hctRecGradY[i] = gy;
             hctRecGradZ[i] = gz;
+            outOfBoundsFlags_[(size_t)g * numAtoms + i] = oob ? 1 : 0;
         }
 
         // Step 2: Ligand-ligand HCT (with exclusions)
@@ -550,19 +579,114 @@ void ReferenceCalcGBSAGridForceKernel::runGroups(
 double ReferenceCalcGBSAGridForceKernel::execute(
         ContextImpl& context, bool includeForces, bool includeEnergy) {
 
+    // Build the desolvation grid on first use (auto-generation path).
+    if (autoGenerateGrid_ && !desolvationGrid)
+        generateDesolvationGrid(context);
+
     vector<Vec3>& posData = refExtractPositions(context);
     vector<Vec3>& forceData = refExtractForces(context);
 
     fill(groupEnergies_.begin(), groupEnergies_.end(), 0.0);
     fill(groupLigandEnergies_.begin(), groupLigandEnergies_.end(), 0.0);
+    outOfBoundsFlags_.assign((size_t)numParticleGroups * numAtoms, 0);
 
     runGroups(context, posData, forceData, includeForces, includeEnergy);
+
+    // One-time warning if any ligand atom fell outside the desolvation grid: those
+    // atoms received zero receptor screening, silently biasing the result.
+    if (!warnedOutOfBounds_) {
+        int nOut = 0;
+        for (int f : outOfBoundsFlags_) nOut += f;
+        if (nOut > 0) {
+            std::cerr << "WARNING: GBSAGridForce: " << nOut << " ligand atom(s) fell "
+                      << "outside the desolvation grid and received zero receptor "
+                      << "screening. Enlarge the grid to cover all ligand positions."
+                      << std::endl;
+            warnedOutOfBounds_ = true;
+        }
+    }
 
     // Deterministic, group-ordered reduction (matches serial Reference exactly).
     double totalEnergy = 0.0;
     for (int g = 0; g < numParticleGroups; g++)
         totalEnergy += groupEnergies_[g];
     return totalEnergy;
+}
+
+// ==================== generateDesolvationGrid ====================
+//
+// Builds the receptor desolvation grid (hct_probe + per-bin N/A/B corrections)
+// from the stored receptor parameters. Mirrors python/desolvation_grid_generator.py:
+// for each grid point, sum the HCT descreening of a water probe over receptor
+// atoms (hct_probe) and accumulate the radius-correction moments per bin. Grid
+// points are independent, so parallelFor runs this serially on Reference and
+// across the thread pool on the CPU platform.
+
+void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& context) {
+    const int nx = genCounts_[0], ny = genCounts_[1], nz = genCounts_[2];
+    const int nyz = ny * nz;
+    const int numPoints = nx * ny * nz;
+    const int nbins = (int)genRThresholds_.size();
+    const int nrec = (int)genReceptorRadii_.size();
+    const double sp = genSpacing_;
+    const double ox = genOrigin_[0], oy = genOrigin_[1], oz = genOrigin_[2];
+    const double R_probe_off = probeRadius - DIELECTRIC_OFFSET;
+
+    // Precompute receptor offset radii / scaled radii (matches the Python generator).
+    vector<double> recOff(nrec), recScale(nrec), recS(nrec);
+    for (int j = 0; j < nrec; j++) {
+        recOff[j] = std::max(genReceptorRadii_[j] - DIELECTRIC_OFFSET, 1e-6);
+        recScale[j] = genReceptorScales_[j];
+        recS[j] = recOff[j] * recScale[j];
+    }
+
+    vector<float> hctProbe((size_t)numPoints, 0.0f);
+    vector<float> corrN((size_t)nbins * numPoints, 0.0f);
+    vector<float> corrA((size_t)nbins * numPoints, 0.0f);
+    vector<float> corrB((size_t)nbins * numPoints, 0.0f);
+
+    parallelFor(context, numPoints, [&](int idx) {
+        int ix = idx / nyz;
+        int rem = idx % nyz;
+        int iy = rem / nz;
+        int iz = rem % nz;
+        double px = ox + ix * sp, py = oy + iy * sp, pz = oz + iz * sp;
+
+        double hp = 0.0;
+        vector<double> N(nbins, 0.0), A(nbins, 0.0), B(nbins, 0.0);
+        for (int j = 0; j < nrec; j++) {
+            double dx = px - genReceptorPositions_[3*j+0];
+            double dy = py - genReceptorPositions_[3*j+1];
+            double dz = pz - genReceptorPositions_[3*j+2];
+            double r = sqrt(dx*dx + dy*dy + dz*dz);
+            // Probe HCT descreening from receptor atom j (probe is the receiver).
+            hp += computeHCTTerm(r, R_probe_off, recOff[j], recScale[j]);
+            if (r <= 1e-6) continue;
+            double cross = fabs(r - recS[j]);
+            if (cross >= R_probe_off) continue;
+            for (int b = 0; b < nbins; b++) {
+                if (cross < genRThresholds_[b]) {
+                    N[b] += 1.0;
+                    A[b] += r - recS[j]*recS[j] / r;
+                    B[b] += 0.5 / r;
+                }
+            }
+        }
+        hctProbe[idx] = (float)hp;
+        for (int b = 0; b < nbins; b++) {
+            corrN[(size_t)b*numPoints + idx] = (float)N[b];
+            corrA[(size_t)b*numPoints + idx] = (float)A[b];
+            corrB[(size_t)b*numPoints + idx] = (float)B[b];
+        }
+    });
+
+    auto grid = std::make_shared<DesolvationGrid>(nx, ny, nz, sp, probeRadius, genRThresholds_);
+    grid->setOrigin(ox, oy, oz);
+    grid->setHctProbe(std::move(hctProbe));
+    grid->setCorrectionN(std::move(corrN));
+    grid->setCorrectionA(std::move(corrA));
+    grid->setCorrectionB(std::move(corrB));
+    desolvationGrid = grid;
 }
 
 // ==================== updateParametersInContext ====================

@@ -92,6 +92,12 @@ public:
 
     virtual void setSkipGroupEnergyDownload(bool) {}
     virtual void* getGroupEnergyDevicePointer() { return nullptr; }
+
+    /**
+     * Per-(group,atom) flags from the last execute(): 1 if the ligand atom fell
+     * outside the desolvation grid (zero receptor screening). Empty if untracked.
+     */
+    virtual std::vector<int> getParticleOutOfBoundsFlags() const { return {}; }
 };
 
 } // namespace GridForcePlugin

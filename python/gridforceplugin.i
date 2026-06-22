@@ -341,6 +341,7 @@ public:
     void computeHessian(OpenMM::Context& context) const;
     std::vector<double> getHessianBlocks(OpenMM::Context& context) const;
     std::vector<double> getFullHessian(OpenMM::Context& context) const;
+    std::vector<int> getParticleOutOfBoundsFlags(OpenMM::Context& context) const;
 
     %pythoncode %{
     def getHessianMatrix(self, context):

@@ -297,6 +297,10 @@ std::vector<double> GBSAGridForce::getFullHessian(Context& context) const {
     return dynamic_cast<GBSAGridForceImpl&>(getImplInContext(context)).getFullHessian();
 }
 
+std::vector<int> GBSAGridForce::getParticleOutOfBoundsFlags(Context& context) const {
+    return dynamic_cast<GBSAGridForceImpl&>(getImplInContext(context)).getParticleOutOfBoundsFlags();
+}
+
 ForceImpl* GBSAGridForce::createImpl() const {
     return new GBSAGridForceImpl(*this);
 }

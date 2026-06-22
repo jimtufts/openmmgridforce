@@ -448,6 +448,14 @@ public:
      */
     std::vector<double> getFullHessian(OpenMM::Context& context) const;
 
+    /**
+     * Per-(group,atom) out-of-bounds flags from the last energy/force evaluation:
+     * 1 if the ligand atom fell outside the desolvation grid (and so received zero
+     * receptor screening), else 0. Layout [numParticleGroups * numAtoms]. Empty on
+     * platforms that do not track it.
+     */
+    std::vector<int> getParticleOutOfBoundsFlags(OpenMM::Context& context) const;
+
     // ========== OpenMM Force Interface ==========
 
     bool usesPeriodicBoundaryConditions() const override { return false; }

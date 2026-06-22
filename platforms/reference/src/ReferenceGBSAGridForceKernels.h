@@ -43,7 +43,16 @@ public:
     std::vector<double> getHessianBlocks() const override;
     std::vector<double> getFullHessian() const override;
 
+    // Per-(group,atom) out-of-bounds flags from the last execute(): 1 if the
+    // ligand atom fell outside the desolvation grid (and so received zero
+    // receptor screening). Layout [numParticleGroups * numAtoms].
+    std::vector<int> getParticleOutOfBoundsFlags() const override { return outOfBoundsFlags_; }
+
 protected:
+    // Build the desolvation grid from the stored receptor parameters (auto-gen).
+    // Uses parallelFor over grid points, so it runs serially on Reference and
+    // multithreaded on the CPU platform.
+    void generateDesolvationGrid(OpenMM::ContextImpl& context);
     // Compute one particle group's contribution (forces into the context array,
     // energy into the per-[g] buffers). Groups are disjoint atom sets, so distinct
     // groups never write the same force entry — safe to run concurrently.
@@ -87,6 +96,22 @@ protected:
     // Grid data
     std::shared_ptr<DesolvationGrid> desolvationGrid;
 
+    // Auto-generation inputs (captured in initialize() when no grid is supplied
+    // and autoGenerateGrid is set; the grid is built lazily in the first
+    // execute(), where a Context — and thus the thread pool — is available).
+    bool autoGenerateGrid_ = false;
+    std::vector<double> genReceptorPositions_;   // flattened [x0,y0,z0,...]
+    std::vector<double> genReceptorRadii_;
+    std::vector<double> genReceptorScales_;
+    int genCounts_[3] = {0, 0, 0};
+    double genOrigin_[3] = {0.0, 0.0, 0.0};
+    double genSpacing_ = 0.0;
+    std::vector<double> genRThresholds_;
+
+    // Per-(group,atom) out-of-bounds flags from the last execute().
+    mutable std::vector<int> outOfBoundsFlags_;
+    mutable bool warnedOutOfBounds_ = false;
+
     // Per-group results from last execute()
     mutable std::vector<double> groupEnergies_;
     mutable std::vector<double> groupLigandEnergies_;
@@ -100,7 +125,8 @@ protected:
     double interpolateReceptorHCT(double x, double y, double z,
                                    double R_i_off, bool computeGradient,
                                    double& gradX, double& gradY, double& gradZ,
-                                   double* hess = nullptr) const;
+                                   double* hess = nullptr,
+                                   bool* outOfBounds = nullptr) const;
     bool isExcluded(int i, int j) const;
 };
 
