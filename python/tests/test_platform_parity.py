@@ -652,6 +652,47 @@ def gbsagrid_section(specs):
             hess[spec[0]] = ('EXC', repr(e))
     _compare_hessian(case + " Hessian", hess, specs)
 
+    # Triquintic regression: auto-generate a derivative grid and evaluate with
+    # triquintic Hermite. Guards against NaN-poisoned derivatives (atom-surface
+    # log singularity) silently collapsing the energy to ~0; the result must be
+    # finite and close to the trilinear baseline.
+    print(f"\n=== {case} triquintic (auto-gen derivatives) ===")
+    def build_triq():
+        f = gfp.GBSAGridForce()
+        f.setNumAtoms(n_lig); f.setIncludeSurfaceArea(False)
+        f.setInterpolationMethod(3)
+        f.setAutoGenerateGrid(True); f.setComputeGridDerivatives(True)
+        for i in range(n_lig):
+            f.setAtomParameters(i, float(lig_q[i]), float(lig_r[i]), float(lig_s[i]))
+        f.setReceptorPositions(rec_pos.flatten().tolist())
+        f.setReceptorRadii([0.17] * n_rec); f.setReceptorScaleFactors([0.72] * n_rec)
+        f.setGridOrigin(float(min_pos[0]), float(min_pos[1]), float(min_pos[2]))
+        f.setGridCounts(int(nx), int(ny), int(nz)); f.setGridSpacing(float(spacing))
+        f.setProbeRadius(0.14); f.setRThresholds(list(pg.r_thresholds))
+        f.setParticles(list(range(n_lig))); f.addParticleGroup('lig', list(range(n_lig)))
+        s = mm.System()
+        for _ in range(n_lig):
+            s.addParticle(12.0)
+        s.addForce(f); return s
+    e_trilinear, _ = eval_all(lambda: build()[0], lig_pos * unit.nanometers,
+                              [(REFERENCE, 'Reference', {}, 'double')])[REFERENCE]
+    for spec in specs:
+        try:
+            ctx, _ = _context(build_triq(), spec)
+            ctx.setPositions(lig_pos * unit.nanometers)
+            E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+                unit.kilojoules_per_mole)
+            del ctx
+            rel = abs(E - e_trilinear) / max(1.0, abs(e_trilinear))
+            ok = np.isfinite(E) and rel < 0.05
+            print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} E={E:.4f} "
+                  f"(trilinear {e_trilinear:.4f}, rel {rel:.2e})  [{case} triquintic]")
+            if not ok:
+                _failures.append((case + " triquintic", spec[0], 'energy', f"E={E:.4e}"))
+        except Exception as ex:
+            print(f"    EXC  {spec[0]:12s}: {repr(ex)[:70]}")
+            _failures.append((case + " triquintic", spec[0], 'energy', repr(ex)))
+
 
 # ------------------------------------------------------ BondedHessian class
 def bondedhessian_section(specs):
