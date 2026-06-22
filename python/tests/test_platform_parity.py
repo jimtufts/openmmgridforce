@@ -844,11 +844,13 @@ def gridgen_section(specs):
     c = int(round((hi - lo) / sp)) + 1
     thr = [0.12, 0.16]
 
-    def gbsa_autogen(method=0, derivs=False):
+    def gbsa_autogen(method=0, derivs=False, kde=False):
         f = gfp.GBSAGridForce(); f.setNumAtoms(n_lig); f.setIncludeSurfaceArea(False)
         f.setInterpolationMethod(method); f.setAutoGenerateGrid(True)
         if derivs:
             f.setComputeGridDerivatives(True)
+        if kde:
+            f.setUseKDEGeneration(True)
         for i in range(n_lig):
             f.setAtomParameters(i, float(lig_q[i]), float(lig_r[i]), float(lig_s[i]))
         f.setReceptorPositions(rec_pos.flatten().tolist())
@@ -926,6 +928,34 @@ def gridgen_section(specs):
         except Exception as ex:
             print(f"    EXC  {spec[0]:12s}: {repr(ex)[:60]}")
             _failures.append((case + " desolv", spec[0], 'energy', repr(ex)))
+
+    # (2b) KDE-smoothed generation. With setUseKDEGeneration the Reference/CPU
+    # generator uses the same sigmoid-weighted corrections as CUDA, so auto-gen
+    # matches CUDA (the default binned model differs by the generation-model gap).
+    e_binned, _ = gbsa_energy(gbsa_autogen(0), (REFERENCE, 'Reference', {}, 'double'))
+    e_ref_kde, _ = gbsa_energy(gbsa_autogen(0, kde=True), (REFERENCE, 'Reference', {}, 'double'))
+    ok = abs(e_ref_kde - e_binned) > 1e-6        # the flag actually changes the model
+    print(f"    {'OK' if ok else 'FAIL':4s} Reference    KDE-gen differs from binned "
+          f"(|d|={abs(e_ref_kde - e_binned):.2e})  [{case} kde]")
+    if not ok:
+        _failures.append((case + " kde", REFERENCE, 'energy', "KDE==binned"))
+    for spec in specs:
+        if spec[1] == 'Reference':
+            continue
+        try:
+            E, _ = gbsa_energy(gbsa_autogen(0, kde=True), spec)
+            d = abs(E - e_ref_kde)
+            # CPU delegates to Reference (bit-exact); CUDA uses the same KDE model
+            # but mixed/float arithmetic, so allow a small relative tolerance there.
+            tol = 1e-9 if spec[1] == 'CPU' else 5e-5 * abs(e_ref_kde)
+            ok = d < tol
+            print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} KDE-gen vs Reference "
+                  f"abs={d:.2e}  [{case} kde]")
+            if not ok:
+                _failures.append((case + " kde", spec[0], 'energy', f"abs={d:.2e}"))
+        except Exception as ex:
+            print(f"    EXC  {spec[0]:12s}: {repr(ex)[:60]}")
+            _failures.append((case + " kde", spec[0], 'energy', repr(ex)))
 
     # (3) Out-of-bounds ligand flag: an atom outside the grid is flagged.
     oob_pos = lig_pos.copy(); oob_pos[1] = [9.0, 9.0, 9.0]

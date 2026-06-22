@@ -34,6 +34,7 @@ GBSAGridForce::GBSAGridForce()
       kdeThreshold_(0.02),
       kdeBandwidth_(0.04),
       kdeEpsilonB_(0.03),
+      useKDEGeneration_(false),
       soluteDielectric(DEFAULT_SOLUTE_DIELECTRIC),
       solventDielectric(DEFAULT_SOLVENT_DIELECTRIC),
       includeSurfaceArea(true),
@@ -193,6 +194,10 @@ void GBSAGridForce::setKDEEpsilonB(double epsilon) {
         throw OpenMMException("GBSAGridForce: KDE epsilon_B must be non-negative");
     }
     kdeEpsilonB_ = epsilon;
+}
+
+void GBSAGridForce::setUseKDEGeneration(bool enable) {
+    useKDEGeneration_ = enable;
 }
 
 void GBSAGridForce::addExclusion(int atom1, int atom2) {

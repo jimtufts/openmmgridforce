@@ -446,6 +446,13 @@ static void requireFiniteDerivativeGrid(const std::vector<float>& hctProbe,
     }
 }
 
+// Numerically stable logistic sigmoid (matches the CUDA sigmoidKDE helper).
+static inline double sigmoidKDE(double u) {
+    if (u >= 0.0) return 1.0 / (1.0 + std::exp(-u));
+    double e = std::exp(u);
+    return e / (1.0 + e);
+}
+
 // ==================== initialize ====================
 
 void ReferenceCalcGBSAGridForceKernel::initialize(
@@ -531,6 +538,8 @@ void ReferenceCalcGBSAGridForceKernel::initialize(
         genSmoothingSigma_ = force.getCorrectionSmoothingSigma();
         genCullCutoff_ = force.getReceptorCullingCutoff();
         genBSplinePrefilterOrder_ = force.getBSplinePrefilterOrder();
+        genUseKDE_ = force.getUseKDEGeneration();
+        genKDEBandwidth_ = force.getKDEBandwidth();
         probeRadius = force.getProbeRadius();
         if (genReceptorPositions_.empty() || genReceptorRadii_.empty() ||
             genReceptorScales_.empty())
@@ -948,6 +957,23 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
                     if (!std::isfinite(d[k])) { finite = false; break; }
                 if (finite)
                     for (int k = 0; k < nderivs; k++) derivSum[k] += d[k];
+            }
+            if (genUseKDE_) {
+                // KDE-smoothed corrections: sigmoid-weighted soft cutoffs in place of
+                // the hard step below, matching the CUDA generateBinnedGridsWithKDE
+                // model. The HCT probe (and its derivatives) above are unchanged.
+                double invBw = 1.0 / genKDEBandwidth_;
+                double u_probe = (R_probe_off - cross) * invBw;
+                if (u_probe < -10.0) return;
+                double sigProbe = sigmoidKDE(u_probe);
+                for (int b = 0; b < nbins; b++) {
+                    double w = sigmoidKDE((genRThresholds_[b] - cross) * invBw) * sigProbe;
+                    if (w < 1e-6) continue;
+                    N[b] += w;
+                    A[b] += w * (r - recS[j]*recS[j] / r);
+                    B[b] += w * 0.5 / r;
+                }
+                return;
             }
             if (cross >= R_probe_off) return;
             for (int b = 0; b < nbins; b++) {

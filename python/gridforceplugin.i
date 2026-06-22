@@ -447,6 +447,8 @@ public:
     double getKDEBandwidth() const;
     void setKDEEpsilonB(double epsilon);
     double getKDEEpsilonB() const;
+    void setUseKDEGeneration(bool enable);
+    bool getUseKDEGeneration() const;
 
     bool usesPeriodicBoundaryConditions() const;
 };

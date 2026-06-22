@@ -294,6 +294,21 @@ public:
      */
     double getKDEEpsilonB() const { return kdeEpsilonB_; }
 
+    /**
+     * Select the desolvation generation model used when auto-generating the grid.
+     * false (default): exact binned-pairwise corrections (hard cutoffs; matches the
+     *   Python reference generator bit-for-bit on Reference/CPU).
+     * true: KDE-smoothed corrections (sigmoid-weighted cutoffs using getKDEBandwidth),
+     *   matching the CUDA generation model. The HCT-probe grid is identical either way;
+     *   only the N/A/B corrections differ.
+     */
+    void setUseKDEGeneration(bool enable);
+
+    /**
+     * Get whether KDE-smoothed generation is selected.
+     */
+    bool getUseKDEGeneration() const { return useKDEGeneration_; }
+
     // ========== Exclusions ==========
 
     /**
@@ -535,6 +550,7 @@ private:
     double kdeThreshold_;
     double kdeBandwidth_;
     double kdeEpsilonB_;
+    bool useKDEGeneration_;
 
     // Solvent parameters
     double soluteDielectric;
