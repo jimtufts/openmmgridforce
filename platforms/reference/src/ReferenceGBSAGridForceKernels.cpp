@@ -99,6 +99,26 @@ bool ReferenceCalcGBSAGridForceKernel::isExcluded(int i, int j) const {
     return exclusionSets[i].count(j) > 0;
 }
 
+// Cubic B-spline basis functions and first derivatives on [0,1] (4-point stencil).
+namespace {
+inline double bsplineBasis(int i, double t) {
+    switch (i) {
+        case 0: return (1.0 - t)*(1.0 - t)*(1.0 - t) / 6.0;
+        case 1: return (3.0*t*t*t - 6.0*t*t + 4.0) / 6.0;
+        case 2: return (-3.0*t*t*t + 3.0*t*t + 3.0*t + 1.0) / 6.0;
+        default: return t*t*t / 6.0;
+    }
+}
+inline double bsplineDeriv(int i, double t) {
+    switch (i) {
+        case 0: return -(1.0 - t)*(1.0 - t) / 2.0;
+        case 1: return (3.0*t*t - 4.0*t) / 2.0;
+        case 2: return (-3.0*t*t + 2.0*t + 1.0) / 2.0;
+        default: return t*t / 2.0;
+    }
+}
+}  // namespace
+
 // ==================== interpolateReceptorHCT ====================
 
 double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
@@ -169,6 +189,46 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
     const auto& corrN = desolvationGrid->getCorrectionN();
     const auto& corrA = desolvationGrid->getCorrectionA();
     const auto& corrB = desolvationGrid->getCorrectionB();
+
+    // Cubic B-spline (method 1): interpolate the COMBINED field hct_probe + the
+    // radius-weighted corrections over a 4x4x4 stencil. B-spline approximates (it
+    // does not pass through the samples), so it smooths the step-like correction
+    // grids to C2 — continuous forces through the receptor-surface shell, unlike
+    // the trilinear path which is only C0 there. Matches the CUDA method-1 path.
+    if (interpolationMethod == 1) {
+        double invRiB = 1.0 / R_i_off, invRpB = 1.0 / R_probe_off;
+        double deltaB = invRiB - invRpB, sigmaB = invRiB + invRpB;
+        double dN = deltaB, dA = -0.25 * deltaB * sigmaB, dB = log(R_i_off / R_probe_off);
+        double bxv[4], byv[4], bzv[4], dbxv[4], dbyv[4], dbzv[4];
+        for (int t = 0; t < 4; t++) {
+            bxv[t] = bsplineBasis(t, fx); byv[t] = bsplineBasis(t, fy); bzv[t] = bsplineBasis(t, fz);
+            dbxv[t] = bsplineDeriv(t, fx); dbyv[t] = bsplineDeriv(t, fy); dbzv[t] = bsplineDeriv(t, fz);
+        }
+        double val = 0.0, gx = 0.0, gy = 0.0, gz = 0.0;
+        for (int i = 0; i < 4; i++) {
+            int gxi = std::min(std::max(ix - 1 + i, 0), nx - 1);
+            for (int j = 0; j < 4; j++) {
+                int gyi = std::min(std::max(iy - 1 + j, 0), ny - 1);
+                for (int k = 0; k < 4; k++) {
+                    int gzi = std::min(std::max(iz - 1 + k, 0), nz - 1);
+                    int gi = gxi * nyz + gyi * nz + gzi;
+                    double combined = hctProbeData[gi]
+                        + dN * corrN[binOffset + gi]
+                        + dA * corrA[binOffset + gi]
+                        + dB * corrB[binOffset + gi];
+                    val += bxv[i] * byv[j] * bzv[k] * combined;
+                    gx  += dbxv[i] * byv[j] * bzv[k] * combined;
+                    gy  += bxv[i] * dbyv[j] * bzv[k] * combined;
+                    gz  += bxv[i] * byv[j] * dbzv[k] * combined;
+                }
+            }
+        }
+        if (computeGrad) {
+            double invSpacing = 1.0 / spacing;
+            gradX = gx * invSpacing; gradY = gy * invSpacing; gradZ = gz * invSpacing;
+        }
+        return val;
+    }
 
     // Trilinear interpolation for HCT probe
     double h000 = hctProbeData[c000], h001 = hctProbeData[c001];
