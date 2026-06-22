@@ -287,9 +287,10 @@ double ReferenceCalcGBSAGridForceKernel::interpolateReceptorHCT(
             if (j > 0) dhTri_dfy += coeff * j * sxp[i] * syp[j-1] * szp[k];
             if (k > 0) dhTri_dfz += coeff * k * sxp[i] * syp[j] * szp[k-1];
         }
-        // Guard against a non-finite triquintic result (e.g. a supplied grid with
-        // NaN derivatives baked in at an atom surface): fall back to the trilinear
-        // value/gradient for this point rather than poisoning the energy.
+        // Guard against a non-finite triquintic result (e.g. a supplied grid whose
+        // far-field derivatives overflowed to NaN/Inf during generation): fall back
+        // to the trilinear value/gradient for this point rather than poisoning the
+        // energy.
         triqOk = std::isfinite(hctTri) && std::isfinite(dhTri_dfx) &&
                  std::isfinite(dhTri_dfy) && std::isfinite(dhTri_dfz);
         if (triqOk) hct = hctTri;
@@ -899,11 +900,15 @@ void ReferenceCalcGBSAGridForceKernel::generateDesolvationGrid(ContextImpl& cont
             if (computeDerivs && R_probe_off < r + recS[j]) {
                 double d[27];
                 computeHctDerivsTriquintic(dx, dy, dz, recS[j], R_probe_off, d);
-                // The analytical derivative has a removable log singularity at the
-                // atom surface (r ~ S) that evaluates to NaN/Inf. Skip such an
-                // atom's derivative contribution so a single grid point on an atom
-                // cannot poison every triquintic stencil that touches it; the HCT
-                // value itself (computeHCTTerm) stays finite there.
+                // The symbolically-derived derivative closed form contains
+                // pow(base, polynomial-in-r exponent) terms that overflow to
+                // Inf/NaN at large r (here r >~ 1.4 nm) — precisely where the HCT
+                // descreening and its derivatives are already negligible (the value
+                // is <~3e-4 of the near-field there and decaying). Skip such a
+                // far-field atom's derivative contribution: dropping a negligible,
+                // decaying term is harmless and stops one Inf from poisoning every
+                // triquintic stencil that touches that grid corner. Near-field
+                // contributions (where they matter) all evaluate finite.
                 bool finite = true;
                 for (int k = 0; k < nderivs; k++)
                     if (!std::isfinite(d[k])) { finite = false; break; }
