@@ -52,6 +52,25 @@ public:
         PAIRWISE = 2  /**< Full pairwise receptor-ligand HCT */
     };
 
+    /**
+     * Storage precision for the analytical Hessian path.
+     *
+     * FLOAT matches GBSAGridForce and the production force kernels:
+     * ~1e-5 relative noise floor, faster, runs at full speed on all CUDA
+     * arches.
+     *
+     * DOUBLE eliminates float-summation noise (notably in J^T M J at
+     * Mpro-scale pairwise sums). Runs at native speed on sm_60+ (Pascal
+     * and newer: hardware atomicAdd(double*) available). On pre-sm_60
+     * hardware (Maxwell, Kepler) the kernel falls back to a software
+     * atomicCAS loop, which works but is ~50-100x slower than FLOAT —
+     * use FLOAT on those arches unless precision is critical.
+     */
+    enum HessianPrecision {
+        HESSIAN_FLOAT  = 0,
+        HESSIAN_DOUBLE = 1
+    };
+
     // OBC-II parameters
     static constexpr double OBC_ALPHA = 1.0;
     static constexpr double OBC_BETA = 0.8;
@@ -193,6 +212,25 @@ public:
      * Set the receptor mode. Default is NONE.
      */
     void setReceptorMode(ReceptorMode mode) { receptorMode = mode; }
+
+    // ========== Hessian Precision ==========
+
+    /**
+     * Get the storage precision used by computeHessian().
+     * Default DOUBLE; see HessianPrecision enum for trade-offs.
+     */
+    HessianPrecision getHessianPrecision() const { return hessianPrecision; }
+
+    /**
+     * Set the storage precision used by computeHessian(). Mostly for speed
+     * gains on platforms without hardware atomicAdd(double*, double) (pre-
+     * sm_60 Maxwell/Kepler), where the software CAS fallback dominates the
+     * Hessian wall time. For PAIRWISE this is storage-only: internal compute
+     * stays in double, only the final dim3N*dim3N hessian buffer is float-
+     * typed (hardware atomicAdd(float*, float)). For GRID it is full
+     * float-compute. Default DOUBLE preserves the legacy semantics.
+     */
+    void setHessianPrecision(HessianPrecision precision) { hessianPrecision = precision; }
 
     // ========== Receptor Configuration (GRID mode) ==========
 
@@ -498,6 +536,7 @@ private:
 
     // Receptor mode
     ReceptorMode receptorMode;
+    HessianPrecision hessianPrecision = HESSIAN_DOUBLE;
 
     // Grid mode configuration
     std::shared_ptr<DesolvationGrid> desolvationGrid;

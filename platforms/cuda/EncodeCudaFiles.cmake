@@ -8,6 +8,7 @@
 # with the kernels a Force actually uses, not with the full bundle.
 
 SET(HEADER_ORDER
+    "AtomicAddDouble.cuh"
     "InterpolationBasis.cuh"
     "HermiteBasis.cuh"
     "TricubicCoefficients.cuh"

@@ -826,10 +826,9 @@ extern "C" __global__ void computeGridForceTiled(
         int groupIdx = particleToGroupMap[particleIndex];
         if (groupIdx >= 0 && groupIdx < numGroups) {
             // Particle in a group - only add to group energy
-            atomicAdd(&groupEnergyBuffer[groupIdx], threadEnergy);
-            // Also track unscaled energy (without group scaling factor)
+            atomicAdd(&groupEnergyBuffer[groupIdx], (mixed)threadEnergy);
             if (groupUnscaledEnergyBuffer != 0) {
-                atomicAdd(&groupUnscaledEnergyBuffer[groupIdx], threadUnscaledEnergy);
+                atomicAdd(&groupUnscaledEnergyBuffer[groupIdx], (mixed)threadUnscaledEnergy);
             }
         } else {
             // Particle not in any group - add to total

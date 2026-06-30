@@ -18,6 +18,19 @@
 // #defined in gbsaGridForce.cu; the file-encoder bundles all .cu files
 // into one TU and gbsaGridForce.cu (G) precedes gbsaHessianDouble.cu (H).
 
+// atomicAdd(double*, double) fallback for pre-sm_60 GPUs lives in
+// kernels/include/AtomicAddDouble.cuh, included via commonHeaders.
+
+// Final-hessian-buffer storage type. Default double; host compiles this
+// source a second time with -DHBUF_T=float to get a float-storage
+// module (same kernel names, picked by which module getKernel() targets).
+// Compute stays in double throughout; only the dim3N*dim3N hessian
+// buffer atomicAdd is narrowed. Intended for speed on platforms without
+// hardware atomicAdd(double*, double) (e.g. pre-sm_60 Maxwell).
+#ifndef HBUF_T
+#define HBUF_T double
+#endif
+
 
 // Compute first and second r-derivatives of the HCT integrand in double.
 // Mirrors the case dispatch in HCTChainRule.cuh::computeHCT_rDerivs but
@@ -789,7 +802,7 @@ extern "C" __global__ void assembleGBSAHessianDouble(
     const double* __restrict__ dR_dPsi,
     const double* __restrict__ gridHCTHessian,
     int totalParticles,
-    double* __restrict__ hessian
+    HBUF_T* __restrict__ hessian
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int dim3N = 3 * totalParticles;
@@ -1411,7 +1424,7 @@ extern "C" __global__ void pairwiseCrossBornDeriv1Double(
     int totalParticles,
     double* __restrict__ dCrossDRL,              // [totalParticles]
     double* __restrict__ dCrossDRR,              // [K * Nr]  (atomicAdd)
-    double* __restrict__ hessian)                // [dim3N * dim3N] (atomicAdd)
+    HBUF_T* __restrict__ hessian)                // [dim3N * dim3N] (atomicAdd)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -1482,7 +1495,7 @@ extern "C" __global__ void pairwiseCrossBornDeriv1Double(
     // scatter the ligand-atom-i diagonal explicit-r block into hessian.
     for (int a=0;a<3;a++) for (int b=0;b<3;b++) {
         int row = 3*idx + a, col = 3*idx + b;
-        atomicAdd(&hessian[(size_t)row*dim3N + col], Hd[a][b]);
+        atomicAdd(&hessian[(size_t)row*dim3N + col], (HBUF_T)Hd[a][b]);
     }
 }
 
@@ -1517,7 +1530,7 @@ extern "C" __global__ void pairwiseBornGradHessianDouble(
     const double* __restrict__ dCrossDRR,        // [K*Nr]
     int numReceptorAtoms,
     int totalParticles,
-    double* __restrict__ hessian)
+    HBUF_T* __restrict__ hessian)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalParticles) return;
@@ -1565,10 +1578,10 @@ extern "C" __global__ void pairwiseBornGradHessianDouble(
             {Bc*rhx*rhz, Bc*rhy*rhz, A+Bc*rhz*rhz}};
         for (int a=0;a<3;a++) for (int b=0;b<3;b++) {
             double hv = wL*blk[a][b];
-            atomicAdd(&hessian[(size_t)(3*idx+a)*dim3N + 3*idx+b],  hv);
-            atomicAdd(&hessian[(size_t)(3*idx+a)*dim3N + 3*lAtom+b], -hv);
-            atomicAdd(&hessian[(size_t)(3*lAtom+a)*dim3N + 3*idx+b], -hv);
-            atomicAdd(&hessian[(size_t)(3*lAtom+a)*dim3N + 3*lAtom+b], hv);
+            atomicAdd(&hessian[(size_t)(3*idx+a)*dim3N + 3*idx+b],   (HBUF_T) hv);
+            atomicAdd(&hessian[(size_t)(3*idx+a)*dim3N + 3*lAtom+b], (HBUF_T)-hv);
+            atomicAdd(&hessian[(size_t)(3*lAtom+a)*dim3N + 3*idx+b], (HBUF_T)-hv);
+            atomicAdd(&hessian[(size_t)(3*lAtom+a)*dim3N + 3*lAtom+b],(HBUF_T)hv);
         }
     }
 
@@ -1614,7 +1627,7 @@ extern "C" __global__ void pairwiseBornGradHessianDouble(
         }
     }
     for (int a=0;a<3;a++) for (int b=0;b<3;b++)
-        atomicAdd(&hessian[(size_t)(3*idx+a)*dim3N + 3*idx+b], Hd[a][b]);
+        atomicAdd(&hessian[(size_t)(3*idx+a)*dim3N + 3*idx+b], (HBUF_T)Hd[a][b]);
 }
 
 
@@ -1652,7 +1665,7 @@ extern "C" __global__ void pairwiseOuterProductHessianDouble(
     int n3,                                       // 3 * groupSize
     float prefactor,
     int totalParticles,
-    double* __restrict__ hessian)
+    HBUF_T* __restrict__ hessian)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int dim3N = 3 * totalParticles;
@@ -1793,6 +1806,6 @@ extern "C" __global__ void pairwiseOuterProductHessianDouble(
         v += w * Jr * JR[jrBase + (size_t)j*n3 + lcol];
     }
 
-    atomicAdd(&hessian[(size_t)row*dim3N + col], v);
-    if (col > row) atomicAdd(&hessian[(size_t)col*dim3N + row], v);
+    atomicAdd(&hessian[(size_t)row*dim3N + col], (HBUF_T)v);
+    if (col > row) atomicAdd(&hessian[(size_t)col*dim3N + row], (HBUF_T)v);
 }

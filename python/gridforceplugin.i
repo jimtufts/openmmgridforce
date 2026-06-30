@@ -471,6 +471,12 @@ public:
         PAIRWISE = 2  // Full pairwise receptor-ligand HCT
     };
 
+    // Storage precision for the analytical Hessian
+    enum HessianPrecision {
+        HESSIAN_FLOAT  = 0,
+        HESSIAN_DOUBLE = 1
+    };
+
     // Constants
     static const double OBC_ALPHA;
     static const double OBC_BETA;
@@ -529,6 +535,8 @@ public:
     // Receptor mode
     ReceptorMode getReceptorMode() const;
     void setReceptorMode(ReceptorMode mode);
+    HessianPrecision getHessianPrecision() const;
+    void setHessianPrecision(HessianPrecision precision);
 
     // Grid mode configuration
     void setDesolvationGrid(std::shared_ptr<DesolvationGrid> grid);
@@ -693,6 +701,9 @@ public:
     bool hasDerivatives() const;
     const std::vector<double>& getDerivatives() const;
     void setDerivatives(const std::vector<double>& derivs);
+
+    bool getValuesPreTransformed() const;
+    void setValuesPreTransformed(bool flag);
 
     void setReceptorAtoms(const std::vector<int>& atomIndices);
     const std::vector<int>& getReceptorAtoms() const;

@@ -95,6 +95,7 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       numAtoms(0), numParticleGroups(0),
       gbMethod(IsolatedGBSAForce::OBC_II),
       receptorMode(IsolatedGBSAForce::NONE),
+      hessianPrecision(IsolatedGBSAForce::HESSIAN_DOUBLE),
       prefactor(0), includeSurfaceArea(false), surfaceTension(0), cutoffDistance(-1.0f),
       originX(0), originY(0), originZ(0), gridSpacing(0), probeRadius(0),
       numBins(0), interpolationMethod(0), hasHctDerivatives(false),
@@ -152,6 +153,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     // Store configuration
     gbMethod = force.getGBMethod();
     receptorMode = force.getReceptorMode();
+    hessianPrecision = force.getHessianPrecision();
     cutoffDistance = static_cast<float>(force.getCutoffDistance());
     receptorLocalityCutoff = static_cast<float>(force.getReceptorLocalityCutoff());
 
@@ -1447,6 +1449,24 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
         return std::vector<double>();
     }
 
+    // Precision toggle. GRID uses a full float-compute kernel set. PAIRWISE
+    // uses a storage-only downgrade: compute stays double, only the final
+    // dim3N*dim3N hessian buffer accumulates as float (hardware atomicAdd
+    // vs software-CAS double on pre-sm_60).
+    bool useFloatBufPair = false;
+    if (hessianPrecision == IsolatedGBSAForce::HESSIAN_FLOAT) {
+        if (receptorMode == IsolatedGBSAForce::GRID) {
+            return computeHessianGridFloat(context);
+        }
+        if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
+            useFloatBufPair = true;
+        } else {
+            throw OpenMMException(
+                "IsolatedGBSAForce: HESSIAN_FLOAT for receptorMode == NONE is "
+                "not implemented; use HESSIAN_DOUBLE.");
+        }
+    }
+
     // Lazy: allocate Hessian buffers (double precision) and load the
     // double-storage kernels on first call. The legacy float kernels
     // are loaded too so a future setHessianFloatStorage(true) debug
@@ -1479,6 +1499,8 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
         prepareHessianIntermediatesKernel        = cu.getKernel(module, "prepareHessianIntermediates");
         computeHCTJacobianPairwiseKernel         = cu.getKernel(module, "computeHCTJacobianPairwise");
         computeReceptorPairwiseHessianKernel     = cu.getKernel(module, "computeReceptorPairwiseHessian");
+        computeHCTJacobianGridKernel             = cu.getKernel(module, "computeHCTJacobian");
+        computeReceptorGridHessianKernel         = cu.getKernel(module, "computeReceptorGridHessian");
         computeBornCouplingMatrixKernel          = cu.getKernel(module, "computeBornCouplingMatrix");
         assembleGBSAHessianKernel                = cu.getKernel(module, "assembleGBSAHessian");
         computeLigandGBBornDerivDoubleKernel     = cu.getKernel(module, "computeLigandGBBornDerivDouble");
@@ -1500,6 +1522,34 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
 
         hessianBuffersInitialized = true;
         hessianNumAtomsCached = totalParticles;
+    }
+
+    // Lazy: float-storage variant of the four hessian-writing kernels +
+    // a float-typed dim3N*dim3N buffer. Same source as the double path,
+    // recompiled with -DHBUF_T=float; kernel names are unchanged.
+    if (useFloatBufPair && !hessianFloatBufModuleLoaded) {
+        std::map<std::string, std::string> floatDefines;
+        floatDefines["HBUF_T"] = "float";
+        CUmodule floatModule = cu.createModule(
+            CudaGridForceKernelSources::commonHeaders +
+            CudaGridForceKernelSources::gbsaGridForceKernel +
+            CudaGridForceKernelSources::isolatedGBSAKernel +
+            CudaGridForceKernelSources::gbsaHessianDoubleKernel,
+            floatDefines);
+        assembleGBSAHessianDoubleFloatBufKernel =
+            cu.getKernel(floatModule, "assembleGBSAHessianDouble");
+        pairwiseCrossBornDeriv1DoubleFloatBufKernel =
+            cu.getKernel(floatModule, "pairwiseCrossBornDeriv1Double");
+        pairwiseBornGradHessianDoubleFloatBufKernel =
+            cu.getKernel(floatModule, "pairwiseBornGradHessianDouble");
+        pairwiseOuterProductHessianDoubleFloatBufKernel =
+            cu.getKernel(floatModule, "pairwiseOuterProductHessianDouble");
+        hessianFloatBufModuleLoaded = true;
+    }
+    if (useFloatBufPair && !hessianFloatBufBuffersInitialized) {
+        hessianMatrixFloatBuf.initialize<float>(cu, dim3N * dim3N,
+                                                  "isolatedGbsaHessFullFB");
+        hessianFloatBufBuffersInitialized = true;
     }
 
     // PAIRWISE receptor-desolvation + cross-term Hessian working buffers.
@@ -1550,7 +1600,9 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
     CUdeviceptr jacobianPtr       = hessianJacobian.getDevicePointer();
     CUdeviceptr recD2PsiPtr       = hessianRecD2Psi.getDevicePointer();
     CUdeviceptr couplingPtr       = hessianCouplingMatrix.getDevicePointer();
-    CUdeviceptr hessianPtr        = hessianMatrix.getDevicePointer();
+    CUdeviceptr hessianPtr        = useFloatBufPair
+                                       ? hessianMatrixFloatBuf.getDevicePointer()
+                                       : hessianMatrix.getDevicePointer();
     CUdeviceptr exclStartPtr      = hessianDummyExclStart.getDevicePointer();
     CUdeviceptr exclAtomsPtr      = hessianDummyExclAtoms.getDevicePointer();
     CUdeviceptr receptorPosPtr    = (numReceptorAtoms > 0) ? receptorPositions.getDevicePointer() : 0;
@@ -1678,8 +1730,12 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
         &dRdPsiPtr, &recD2PsiPtr,
         &totalParticles, &hessianPtr
     };
-    cu.executeKernel(assembleGBSAHessianDoubleKernel, assembleArgs,
-                     numBlocksH * blockSize, blockSize);
+    if (useFloatBufPair) {
+        cu.clearBuffer(hessianMatrixFloatBuf);
+    }
+    cu.executeKernel(useFloatBufPair ? assembleGBSAHessianDoubleFloatBufKernel
+                                       : assembleGBSAHessianDoubleKernel,
+                     assembleArgs, numBlocksH * blockSize, blockSize);
 
     // === PAIRWISE: add receptor-desolvation + cross-term Hessian. ===
     // The assemble kernel above wrote only the ligand-ligand ("NONE core")
@@ -1746,8 +1802,9 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
             &numReceptorAtoms, &prefactorHessF, &totalParticles,
             &crossDRLPtr, &crossDRRPtr, &hessianPtr
         };
-        cu.executeKernel(pairwiseCrossBornDeriv1DoubleKernel, crossD1Args,
-                         numBlocksN * blockSize, blockSize);
+        cu.executeKernel(useFloatBufPair ? pairwiseCrossBornDeriv1DoubleFloatBufKernel
+                                           : pairwiseCrossBornDeriv1DoubleKernel,
+                         crossD1Args, numBlocksN * blockSize, blockSize);
 
         // R5: Born-gradient spatial Hessians (desolv self + cross ligand/rec).
         void* bornGradArgs[] = {
@@ -1757,8 +1814,9 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
             &recDeDRPtr, &recDRdPsiPtr, &crossDRLPtr, &crossDRRPtr,
             &numReceptorAtoms, &totalParticles, &hessianPtr
         };
-        cu.executeKernel(pairwiseBornGradHessianDoubleKernel, bornGradArgs,
-                         numBlocksN * blockSize, blockSize);
+        cu.executeKernel(useFloatBufPair ? pairwiseBornGradHessianDoubleFloatBufKernel
+                                           : pairwiseBornGradHessianDoubleKernel,
+                         bornGradArgs, numBlocksN * blockSize, blockSize);
 
         // R6: outer-product Hessian (JR^T MR JR + cross couplings + curvature).
         void* outerArgs[] = {
@@ -1771,11 +1829,151 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
             &numReceptorAtoms, &n3local, &prefactorHessF,
             &totalParticles, &hessianPtr
         };
-        cu.executeKernel(pairwiseOuterProductHessianDoubleKernel, outerArgs,
-                         numBlocksH * blockSize, blockSize);
+        cu.executeKernel(useFloatBufPair ? pairwiseOuterProductHessianDoubleFloatBufKernel
+                                           : pairwiseOuterProductHessianDoubleKernel,
+                         outerArgs, numBlocksH * blockSize, blockSize);
     }
 
+    if (useFloatBufPair) {
+        hessianFloatBufHost.resize(dim3N * dim3N);
+        hessianMatrixFloatBuf.download(hessianFloatBufHost);
+        hessianFullHost.assign(hessianFloatBufHost.begin(),
+                               hessianFloatBufHost.end());
+        return hessianFullHost;
+    }
     hessianFullHost.resize(dim3N * dim3N);
     hessianMatrix.download(hessianFullHost);
+    return hessianFullHost;
+}
+
+// Float-precision Hessian for receptorMode == GRID. Mirrors
+// GBSAGridForce::computeHessian: prepare -> HCT Jacobian (grid) ->
+// receptor grid Hessian -> Born coupling -> assemble. The float kernels
+// and grid-state device pointers (gridCounts, gridHctProbe, ...) are
+// shared with the energy/force GRID path.
+vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessianGridFloat(ContextImpl& context) {
+    cu.setAsCurrent();
+
+    int totalParticles = numParticleGroups * numAtoms;
+    int templateN = numAtoms;
+    int dim3N = 3 * totalParticles;
+    if (totalParticles == 0) {
+        return std::vector<double>();
+    }
+
+    if (!bornRadii.isInitialized() || !dE_dR.isInitialized() ||
+        !hctReceptor.isInitialized() || !hctLigand.isInitialized()) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: computeHessian() requires a prior "
+            "getState(getForces=True) to populate Born radii and dE/dR.");
+    }
+
+    if (!hessianGridFloatBuffersInitialized) {
+        hessianDRdPsiF.initialize<float>(cu, totalParticles, "isolatedGbsaHessDRdPsiF");
+        hessianD2RdPsi2F.initialize<float>(cu, totalParticles, "isolatedGbsaHessD2RdPsi2F");
+        hessianDEdHCTF.initialize<float>(cu, totalParticles, "isolatedGbsaHessDEdHCTF");
+        hessianJacobianF.initialize<float>(cu, (size_t)totalParticles * dim3N,
+                                            "isolatedGbsaHessJacobianF");
+        hessianGridHCTHessian.initialize<float>(cu, totalParticles * 6,
+                                                 "isolatedGbsaHessGridHCTHessian");
+        hessianCouplingMatrixF.initialize<float>(cu, (size_t)totalParticles * totalParticles,
+                                                  "isolatedGbsaHessCouplingF");
+        initMixedEnergyBuffer(cu, hessianMatrixF, dim3N * dim3N, "isolatedGbsaHessMatrixF");
+        hessianGridFloatBuffersInitialized = true;
+    }
+
+    int blockSize = 256;
+    int numBlocksN = (totalParticles + blockSize - 1) / blockSize;
+
+    CUdeviceptr posqPtr             = cu.getPosq().getDevicePointer();
+    CUdeviceptr particleIndicesPtr  = particleIndices.getDevicePointer();
+    CUdeviceptr radiiPtr            = radii.getDevicePointer();
+    CUdeviceptr scaleFactorsPtr     = scaleFactors.getDevicePointer();
+    CUdeviceptr chargesPtr          = charges.getDevicePointer();
+    CUdeviceptr bornRadiiPtr        = bornRadii.getDevicePointer();
+    CUdeviceptr hctReceptorPtr      = hctReceptor.getDevicePointer();
+    CUdeviceptr hctLigandPtr        = hctLigand.getDevicePointer();
+    CUdeviceptr dE_dRPtr            = dE_dR.getDevicePointer();
+    CUdeviceptr groupStartPtr       = groupStartIndex.getDevicePointer();
+    CUdeviceptr exclStartPtr        = hessianDummyExclStart.getDevicePointer();
+    CUdeviceptr exclAtomsPtr        = hessianDummyExclAtoms.getDevicePointer();
+    CUdeviceptr gridCountsPtr       = gridCounts.getDevicePointer();
+    CUdeviceptr gridHctProbePtr     = gridHctProbe.getDevicePointer();
+    CUdeviceptr gridHctDerivPtr     = hasHctDerivatives ? gridHctDerivatives.getDevicePointer() : 0;
+    CUdeviceptr gridCorrNPtr        = gridCorrectionN.getDevicePointer();
+    CUdeviceptr gridCorrAPtr        = gridCorrectionA.getDevicePointer();
+    CUdeviceptr gridCorrBPtr        = gridCorrectionB.getDevicePointer();
+    CUdeviceptr rThresholdsPtr      = rThresholds.getDevicePointer();
+    CUdeviceptr dRdPsiPtr           = hessianDRdPsiF.getDevicePointer();
+    CUdeviceptr d2RdPsi2Ptr         = hessianD2RdPsi2F.getDevicePointer();
+    CUdeviceptr dE_dHCTPtr          = hessianDEdHCTF.getDevicePointer();
+    CUdeviceptr jacobianPtr         = hessianJacobianF.getDevicePointer();
+    CUdeviceptr gridHCTHessianPtr   = hessianGridHCTHessian.getDevicePointer();
+    CUdeviceptr couplingPtr         = hessianCouplingMatrixF.getDevicePointer();
+    CUdeviceptr hessianPtr          = hessianMatrixF.getDevicePointer();
+
+    void* prepArgs[] = {
+        &radiiPtr, &bornRadiiPtr, &hctReceptorPtr, &hctLigandPtr,
+        &dE_dRPtr, &totalParticles, &templateN,
+        &dRdPsiPtr, &d2RdPsi2Ptr, &dE_dHCTPtr
+    };
+    cu.executeKernel(prepareHessianIntermediatesKernel, prepArgs,
+                     numBlocksN * blockSize, blockSize);
+
+    void* jacArgs[] = {
+        &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+        &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
+        &numParticleGroups, &templateN,
+        &gridCountsPtr, &gridHctProbePtr, &gridHctDerivPtr,
+        &gridCorrNPtr, &gridCorrAPtr, &gridCorrBPtr, &rThresholdsPtr,
+        &originX, &originY, &originZ, &gridSpacing, &probeRadius,
+        &numBins, &interpolationMethod,
+        &useKDECorrections, &hasBinnedKDEDerivatives,
+        &totalParticles, &jacobianPtr
+    };
+    cu.executeKernel(computeHCTJacobianGridKernel, jacArgs,
+                     numBlocksN * blockSize, blockSize);
+
+    void* gridHessArgs[] = {
+        &posqPtr, &particleIndicesPtr, &radiiPtr,
+        &groupStartPtr, &numParticleGroups, &templateN,
+        &gridCountsPtr, &gridHctProbePtr, &gridHctDerivPtr,
+        &gridCorrNPtr, &gridCorrAPtr, &gridCorrBPtr, &rThresholdsPtr,
+        &originX, &originY, &originZ, &gridSpacing, &probeRadius,
+        &numBins, &interpolationMethod,
+        &useKDECorrections, &hasBinnedKDEDerivatives,
+        &totalParticles, &gridHCTHessianPtr
+    };
+    cu.executeKernel(computeReceptorGridHessianKernel, gridHessArgs,
+                     numBlocksN * blockSize, blockSize);
+
+    int includeSAInt = includeSurfaceArea ? 1 : 0;
+    float prefactorF = (float)prefactor;
+    void* couplingArgs[] = {
+        &posqPtr, &particleIndicesPtr, &chargesPtr, &radiiPtr,
+        &bornRadiiPtr, &dRdPsiPtr, &d2RdPsi2Ptr, &dE_dRPtr,
+        &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
+        &numParticleGroups, &templateN, &prefactorF,
+        &includeSAInt, &surfaceTension, &probeRadius,
+        &totalParticles, &couplingPtr
+    };
+    cu.executeKernel(computeBornCouplingMatrixKernel, couplingArgs,
+                     numBlocksN * blockSize, blockSize);
+
+    int totalElements = dim3N * dim3N;
+    int numBlocksH = (totalElements + blockSize - 1) / blockSize;
+    void* assembleArgs[] = {
+        &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
+        &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
+        &numParticleGroups, &templateN, &prefactorF,
+        &jacobianPtr, &couplingPtr, &dE_dHCTPtr, &scaleFactorsPtr, &radiiPtr,
+        &dRdPsiPtr, &gridHCTHessianPtr,
+        &totalParticles, &hessianPtr
+    };
+    cu.executeKernel(assembleGBSAHessianKernel, assembleArgs,
+                     numBlocksH * blockSize, blockSize);
+
+    hessianFullHost.resize(dim3N * dim3N);
+    downloadMixedEnergy(cu, hessianMatrixF, hessianFullHost);
     return hessianFullHost;
 }
