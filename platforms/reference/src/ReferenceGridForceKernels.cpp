@@ -360,6 +360,19 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
             const_cast<GridForce&>(grid_force).setDerivatives(g_derivatives);
         }
     }
+
+    // For user-supplied grids (not auto-generated, not loaded from a file that
+    // already stored prefiltered coefficients), apply blur+B-spline prefilter
+    // here so B-spline interpolation passes through the raw samples. CUDA does
+    // the same in CudaGridForceKernels.cpp; auto-gen runs the same step lazily
+    // inside generateGrid() at first execute() (g_vals is empty here in that
+    // case, so this block is a no-op for the auto-gen path).
+    if (!grid_force.getAutoGenerateGrid() && !grid_force.getValuesPreTransformed() && !g_vals.empty()) {
+        if (g_blurSigma > 0.0)
+            gaussianBlur3D(g_vals, g_counts[0], g_counts[1], g_counts[2], g_blurSigma);
+        if (g_bsplinePrefilterOrder > 0)
+            bsplinePrefilter3DByOrder(g_vals, g_counts[0], g_counts[1], g_counts[2], g_bsplinePrefilterOrder);
+    }
 }
 
 std::vector<double> ReferenceCalcGridForceKernel::computeDerivativesAtPoint(
