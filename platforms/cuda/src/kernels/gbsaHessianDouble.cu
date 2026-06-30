@@ -1665,48 +1665,58 @@ extern "C" __global__ void pairwiseOuterProductHessianDouble(
     int n3,                                       // 3 * groupSize
     float prefactor,
     int totalParticles,
+    // Stage B precomputed per-pair scalars (each [K * templateN * Nr]):
+    const double* __restrict__ cRi_buf,
+    const double* __restrict__ cRiRj_buf,
+    const double* __restrict__ gri_buf,
+    const double* __restrict__ grj_buf,
+    const double* __restrict__ ir_dx_buf,        // (1/r) * dx for the pair
+    const double* __restrict__ ir_dy_buf,
+    const double* __restrict__ ir_dz_buf,
     HBUF_T* __restrict__ hessian)
 {
+    // Thread layout: one thread per (group, lrow, lcol) within each group's
+    // block-diagonal upper-tri (lcol >= lrow). We index as a full n3*n3 grid
+    // per group and drop the lower triangle with an early return — this is
+    // ~2x more threads than the minimum (upper triangle only) but keeps the
+    // indexing arithmetic O(1) instead of needing a triangular unpacker.
+    // Compared to the previous full dim3N*dim3N grid (228 M threads launched
+    // with 99.99% early-returning for our system), this cuts launch overhead
+    // by ~4 orders of magnitude. Survivor count per launch: numGroups * n3^2.
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int dim3N = 3 * totalParticles;
-    if (tid >= dim3N * dim3N) return;
-    int row = tid / dim3N;
-    int col = tid % dim3N;
-    if (col < row) return;
     int Nr = numReceptorAtoms;
-    double pf = (double)prefactor;
-    const double MIN_CROSS_R2 = 0.01;
+    int per_group = n3 * n3;
+    int total_threads = numGroups * per_group;
+    if (tid >= total_threads) return;
+    int g = tid / per_group;
+    int t_in_group = tid % per_group;
+    int lrow = t_in_group / n3;
+    int lcol = t_in_group % n3;
+    if (lcol < lrow) return;   // upper triangle only; mirror is written below
 
+    int gs = groupStart[g];
+    int ge = groupStart[g + 1];
+    int row = 3*gs + lrow;
+    int col = 3*gs + lcol;
     int atom_row = row / 3;
     int atom_col = col / 3;
 
-    // Find the group of atom_row; require atom_col in the same group.
-    int g = 0, gs = 0, ge = 0; bool found = false;
-    for (int gg = 0; gg < numGroups; gg++) {
-        gs = groupStart[gg]; ge = groupStart[gg + 1];
-        if (atom_row >= gs && atom_row < ge) { g = gg; found = true; break; }
-    }
-    if (!found) return;
-    if (atom_col < gs || atom_col >= ge) return;   // block diagonal only
+    double pf = (double)prefactor;
+    const double MIN_CROSS_R2 = 0.01;
 
-    // group-local row/col within [0, n3)
-    int lrow = row - 3*gs;
-    int lcol = col - 3*gs;
     size_t jrBase = (size_t)g * Nr * n3;
     size_t mrBase = (size_t)g * Nr * Nr;
 
     double v = 0.0;
 
     // ---- desolvation JR^T MR JR ----
-    for (int j = 0; j < Nr; j++) {
-        double Jjr = JR[jrBase + (size_t)j*n3 + lrow];
-        if (fabs(Jjr) < 1e-18) continue;
-        for (int m = 0; m < Nr; m++) {
-            double Mjm = MR[mrBase + (size_t)j*Nr + m];
-            if (fabs(Mjm) < 1e-18) continue;
-            v += Jjr * Mjm * JR[jrBase + (size_t)m*n3 + lcol];
-        }
-    }
+    // (Moved out of this kernel: a host-side cuBLAS dgemm cascade now
+    // computes H_des_local = JR^T MR JR per group and a separate
+    // scatterDesolvationHessianGemm kernel scatters it into the global
+    // Hessian. This kernel keeps only the cross-term Born contributions
+    // below, which have a per-receptor inner loop too small to benefit
+    // from a GEMM rewrite.)
 
     // ---- cross-term Born-Born + mixed r-Born couplings ----
     // For each (ligand i in group, receptor j): outer products of J[i]
@@ -1715,80 +1725,46 @@ extern "C" __global__ void pairwiseOuterProductHessianDouble(
     int groupSize = ge - gs;
     for (int iL = 0; iL < groupSize; iL++) {
         int gAtom = gs + iL;
-        int tIdx = iL % templateNumAtoms;
-        real4 pi = posq[particleIndices[gAtom]];
-        double q_i = (double)charges[tIdx];
-        double Ri = bornRadii[gAtom];
-        double dRi_dPsi = dRdPsi[gAtom];
-
         // Precompute J[i] entries for this row/col (global jacobian rows).
         double JLi_row = ligJacobian[(size_t)gAtom*dim3N + row];
         double JLi_col = ligJacobian[(size_t)gAtom*dim3N + col];
 
+        // Stage B: per-pair scalars (cRi, cRiRj, gri, grj, ir*dxyz) were
+        // computed ONCE per (g, iL, j) in pairwiseComputePerPairScalarsDouble.
+        // The inner loop now reads from those buffers — no exp/sqrt/div.
+        size_t pairBaseIL = (size_t)g * templateNumAtoms * Nr
+                          + (size_t)iL * Nr;
         for (int j = 0; j < Nr; j++) {
-            real4 pj = receptorPositions[j];
-            double dx = (double)pi.x - (double)pj.x;   // lig - rec
-            double dy = (double)pi.y - (double)pj.y;
-            double dz = (double)pi.z - (double)pj.z;
-            double r2 = dx*dx + dy*dy + dz*dz;
-            if (r2 < MIN_CROSS_R2) continue;
-            double r = sqrt(r2);
-            double Rj = recBorn[(size_t)g*Nr + j];
-            double dRj_dPsi = recDRdPsi[(size_t)g*Nr + j];
-            double RaRb = Ri*Rj;
-            double et = exp(-r2/(4.0*RaRb));
-            double f2 = r2 + RaRb*et;
-            double f = sqrt(f2);
-            double C = pf * q_i * (double)receptorCharges[j];
-
-            double df2_dRi = et*(Rj + 0.25*r2/Ri), df_dRi = df2_dRi/(2.0*f);
-            double df2_dRj = et*(Ri + 0.25*r2/Rj), df_dRj = df2_dRj/(2.0*f);
-            double df2_dr = 2.0*r*(1.0-0.25*et), df_dr = df2_dr/(2.0*f);
-
-            double dalpha_dRi = et*r2/(4.0*Ri*Ri*Rj);
-            double d2f2_dRi2 = dalpha_dRi*(Rj+0.25*r2/Ri) + et*(-0.25*r2/(Ri*Ri));
-            double d2f_dRi2 = d2f2_dRi2/(2.0*f) - df2_dRi*df2_dRi/(4.0*f*f*f);
-            double d2E_dRi2 = C*(2.0*df_dRi*df_dRi/(f*f*f) - d2f_dRi2/(f*f));
-            double dalpha_dRj = et*r2/(4.0*Ri*Rj*Rj);
-            double d2f2_dRj2 = dalpha_dRj*(Ri+0.25*r2/Rj) + et*(-0.25*r2/(Rj*Rj));
-            double d2f_dRj2 = d2f2_dRj2/(2.0*f) - df2_dRj*df2_dRj/(4.0*f*f*f);
-            double d2E_dRj2 = C*(2.0*df_dRj*df_dRj/(f*f*f) - d2f_dRj2/(f*f));
-            double d2f2_dRiRj = dalpha_dRj*(Rj+0.25*r2/Ri) + et;
-            double d2f_dRiRj = d2f2_dRiRj/(2.0*f) - df2_dRi*df2_dRj/(4.0*f*f*f);
-            double d2E_dRiRj = C*(2.0*df_dRi*df_dRj/(f*f*f) - d2f_dRiRj/(f*f));
-
-            double d2f2_dr_dRi = 2.0*r*(-0.25*dalpha_dRi);
-            double d2f_dr_dRi = d2f2_dr_dRi/(2.0*f) - df2_dr*df2_dRi/(4.0*f*f*f);
-            double d2E_dr_dRi = C*(2.0*df_dr*df_dRi/(f*f*f) - d2f_dr_dRi/(f*f));
-            double d2f2_dr_dRj = 2.0*r*(-0.25*dalpha_dRj);
-            double d2f_dr_dRj = d2f2_dr_dRj/(2.0*f) - df2_dr*df2_dRj/(4.0*f*f*f);
-            double d2E_dr_dRj = C*(2.0*df_dr*df_dRj/(f*f*f) - d2f_dr_dRj/(f*f));
-
-            double ir = 1.0/r;
-            double D[3] = {dx, dy, dz};
-            double cRi = d2E_dRi2 * dRi_dPsi*dRi_dPsi;
-            double cRj = d2E_dRj2 * dRj_dPsi*dRj_dPsi;
-            double cRiRj = d2E_dRiRj * dRi_dPsi*dRj_dPsi;
-            double gri = d2E_dr_dRi * dRi_dPsi;
-            double grj = d2E_dr_dRj * dRj_dPsi;
+            size_t pidx = pairBaseIL + j;
+            double cRi   = cRi_buf[pidx];
+            double cRiRj = cRiRj_buf[pidx];
+            double gri   = gri_buf[pidx];
+            double grj   = grj_buf[pidx];
+            double ir_dx = ir_dx_buf[pidx];
+            double ir_dy = ir_dy_buf[pidx];
+            double ir_dz = ir_dz_buf[pidx];
+            double ir_dxyz[3] = {ir_dx, ir_dy, ir_dz};
 
             double JRj_row = JR[jrBase + (size_t)j*n3 + lrow];
             double JRj_col = JR[jrBase + (size_t)j*n3 + lcol];
 
             // dr/dx is nonzero only for ligand atom i's rows/cols.
-            double dr_row = (atom_row == gAtom) ? D[row%3]*ir : 0.0;
-            double dr_col = (atom_col == gAtom) ? D[col%3]*ir : 0.0;
+            double dr_row = (atom_row == gAtom) ? ir_dxyz[row%3] : 0.0;
+            double dr_col = (atom_col == gAtom) ? ir_dxyz[col%3] : 0.0;
 
             v += cRi*JLi_row*JLi_col
-               + cRj*JRj_row*JRj_col
                + cRiRj*(JLi_row*JRj_col + JRj_row*JLi_col)
                + gri*(dr_row*JLi_col + JLi_row*dr_col)
                + grj*(dr_row*JRj_col + JRj_row*dr_col);
         }
     }
 
-    // ---- cross-term single-Born curvature ----
+    // ---- cross-term single-Born curvature (ligand only) ----
     // dCross_dRL[i] * d2R^L_i/dPsi2 routed through J[i] outer J[i].
+    // (The receptor counterpart `sum_j dCross_dRR(j) * d2R^R_j/dPsi2 *
+    //  JR[j,lrow] * JR[j,lcol]` and the cross-term cRj contribution were
+    //  folded into the host-side M_R diagonal in Stage A — they're now
+    //  covered by the existing JR^T M_R JR cuBLAS dgemm.)
     for (int iL = 0; iL < groupSize; iL++) {
         int gAtom = gs + iL;
         double w = dCrossDRL[gAtom] * d2RdPsi2[gAtom];
@@ -1797,15 +1773,208 @@ extern "C" __global__ void pairwiseOuterProductHessianDouble(
         if (fabs(Jr) < 1e-300) continue;
         v += w * Jr * ligJacobian[(size_t)gAtom*dim3N + col];
     }
-    // dCross_dRR[j] * d2R^R_j/dPsi2 routed through JR[j] outer JR[j].
-    for (int j = 0; j < Nr; j++) {
-        double w = dCrossDRR[(size_t)g*Nr + j] * recD2RdPsi2[(size_t)g*Nr + j];
-        if (fabs(w) < 1e-300) continue;
-        double Jr = JR[jrBase + (size_t)j*n3 + lrow];
-        if (fabs(Jr) < 1e-300) continue;
-        v += w * Jr * JR[jrBase + (size_t)j*n3 + lcol];
-    }
 
     atomicAdd(&hessian[(size_t)row*dim3N + col], (HBUF_T)v);
     if (col > row) atomicAdd(&hessian[(size_t)col*dim3N + row], (HBUF_T)v);
+}
+
+
+// Scatter the per-group desolvation block (H_local = J_R^T M_R J_R, n3 x n3,
+// produced by a host-side cuBLAS dgemm cascade) into the corresponding block-
+// diagonal slot of the global Hessian. One thread per local entry; writes
+// both H[grow,gcol] and H[gcol,grow] for off-diagonal entries to match the
+// symmetric atomic-add convention of pairwiseOuterProductHessianDouble.
+extern "C" __global__ void scatterDesolvationHessianGemm(
+    const double* __restrict__ H_local,   // (n3, n3) symmetric, row-major
+    HBUF_T* __restrict__ hessian,         // (dim3N, dim3N)
+    int n3,
+    int dim3N,
+    int gs3                                // 3 * groupStart for this group
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n3 * n3) return;
+    int lrow = tid / n3;
+    int lcol = tid % n3;
+    if (lcol < lrow) return;               // upper triangle only; mirror handled below
+    int grow = gs3 + lrow;
+    int gcol = gs3 + lcol;
+    double v = H_local[(size_t)lrow * n3 + lcol];
+    atomicAdd(&hessian[(size_t)grow * dim3N + gcol], (HBUF_T)v);
+    if (lcol > lrow) atomicAdd(&hessian[(size_t)gcol * dim3N + grow], (HBUF_T)v);
+}
+
+
+// Stage B — compute and cache ALL per-pair (g, iL, j) cross-term scalars.
+//
+// The cross-term inner loop in pairwiseOuterProductHessianDouble used to
+// recompute its per-pair coefficients (cRi, cRj, cRiRj, gri, grj, geometric
+// scalars) on every surviving (lrow, lcol) thread — i.e. 5000+ redundant
+// recomputations per (iL, j) pair, each requiring exp/sqrt/divisions in
+// emulated fp64 on Maxwell. That redundancy was 99% of the post-cuBLAS
+// 13-second cost.
+//
+// This kernel computes each per-pair quantity ONCE per (g, iL, j) triple and
+// stores them in caches that the cross-term consumer simply reads. It also
+// atomic-adds the cRj contribution into W_j (which Stage A's
+// addReceptorDiagToMRDouble folds into M_R diagonal so the existing dgemm
+// covers it).
+//
+// One thread per (g, iL, j); N_lig * N_r * K threads in total.
+extern "C" __global__ void pairwiseComputePerPairScalarsDouble(
+    const real4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const real* __restrict__ charges,
+    const double* __restrict__ bornRadii,        // ligand Born radii [totalParticles]
+    const double* __restrict__ dRdPsi,           // ligand dR/dPsi [totalParticles]
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int templateNumAtoms,
+    const real4* __restrict__ receptorPositions,
+    const real* __restrict__ receptorCharges,
+    const double* __restrict__ recBorn,          // [K*Nr]
+    const double* __restrict__ recDRdPsi,        // [K*Nr]
+    int numReceptorAtoms,
+    float prefactor,
+    // Outputs (each [K * templateN * Nr]):
+    double* __restrict__ cRi_out,
+    double* __restrict__ cRiRj_out,
+    double* __restrict__ gri_out,
+    double* __restrict__ grj_out,
+    double* __restrict__ ir_dx_out,             // inv_r * dx (== unit-vec x)
+    double* __restrict__ ir_dy_out,
+    double* __restrict__ ir_dz_out,
+    // Wj accumulator [K*Nr] (zero on entry; atomicAdd target)
+    double* __restrict__ Wj_out
+) {
+    int Nr = numReceptorAtoms;
+    int per_pair = templateNumAtoms * Nr;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= numGroups * per_pair) return;
+    int g = tid / per_pair;
+    int t_in_group = tid % per_pair;
+    int iL = t_in_group / Nr;
+    int j  = t_in_group % Nr;
+
+    int gs = groupStart[g];
+    int ge = groupStart[g + 1];
+    int groupSize = ge - gs;
+    size_t buf_idx = (size_t)g * per_pair + (size_t)iL * Nr + j;
+
+    // Default outputs to zero (so consumer can multiply-and-sum without
+    // conditionals — sub-min-distance or out-of-group pairs contribute 0).
+    if (iL >= groupSize) {
+        cRi_out[buf_idx] = 0.0;
+        cRiRj_out[buf_idx] = 0.0;
+        gri_out[buf_idx] = 0.0;
+        grj_out[buf_idx] = 0.0;
+        ir_dx_out[buf_idx] = 0.0;
+        ir_dy_out[buf_idx] = 0.0;
+        ir_dz_out[buf_idx] = 0.0;
+        return;
+    }
+
+    int gAtom = gs + iL;
+    int tIdx  = iL % templateNumAtoms;
+
+    real4 pi = posq[particleIndices[gAtom]];
+    real4 pj = receptorPositions[j];
+    double dx = (double)pi.x - (double)pj.x;
+    double dy = (double)pi.y - (double)pj.y;
+    double dz = (double)pi.z - (double)pj.z;
+    double r2 = dx*dx + dy*dy + dz*dz;
+    const double MIN_CROSS_R2 = 0.01;
+    if (r2 < MIN_CROSS_R2) {
+        cRi_out[buf_idx] = 0.0;
+        cRiRj_out[buf_idx] = 0.0;
+        gri_out[buf_idx] = 0.0;
+        grj_out[buf_idx] = 0.0;
+        ir_dx_out[buf_idx] = 0.0;
+        ir_dy_out[buf_idx] = 0.0;
+        ir_dz_out[buf_idx] = 0.0;
+        return;
+    }
+
+    double r = sqrt(r2);
+    double q_i = (double)charges[tIdx];
+    double Ri  = bornRadii[gAtom];
+    double dRi_dPsi = dRdPsi[gAtom];
+    double Rj  = recBorn[(size_t)g*Nr + j];
+    double dRj_dPsi = recDRdPsi[(size_t)g*Nr + j];
+    double RaRb = Ri * Rj;
+    double et = exp(-r2 / (4.0 * RaRb));
+    double f2 = r2 + RaRb * et;
+    double f  = sqrt(f2);
+    double C  = (double)prefactor * q_i * (double)receptorCharges[j];
+
+    double df2_dRi = et * (Rj + 0.25 * r2 / Ri);
+    double df_dRi  = df2_dRi / (2.0 * f);
+    double df2_dRj = et * (Ri + 0.25 * r2 / Rj);
+    double df_dRj  = df2_dRj / (2.0 * f);
+    double df2_dr  = 2.0 * r * (1.0 - 0.25 * et);
+    double df_dr   = df2_dr  / (2.0 * f);
+
+    double dalpha_dRi = et * r2 / (4.0 * Ri * Ri * Rj);
+    double dalpha_dRj = et * r2 / (4.0 * Ri * Rj * Rj);
+
+    double d2f2_dRi2 = dalpha_dRi * (Rj + 0.25 * r2 / Ri) + et * (-0.25 * r2 / (Ri * Ri));
+    double d2f_dRi2  = d2f2_dRi2 / (2.0 * f) - df2_dRi * df2_dRi / (4.0 * f * f * f);
+    double d2E_dRi2  = C * (2.0 * df_dRi * df_dRi / (f * f * f) - d2f_dRi2 / (f * f));
+
+    double d2f2_dRj2 = dalpha_dRj * (Ri + 0.25 * r2 / Rj) + et * (-0.25 * r2 / (Rj * Rj));
+    double d2f_dRj2  = d2f2_dRj2 / (2.0 * f) - df2_dRj * df2_dRj / (4.0 * f * f * f);
+    double d2E_dRj2  = C * (2.0 * df_dRj * df_dRj / (f * f * f) - d2f_dRj2 / (f * f));
+
+    double d2f2_dRiRj = dalpha_dRj * (Rj + 0.25 * r2 / Ri) + et;
+    double d2f_dRiRj  = d2f2_dRiRj / (2.0 * f) - df2_dRi * df2_dRj / (4.0 * f * f * f);
+    double d2E_dRiRj  = C * (2.0 * df_dRi * df_dRj / (f * f * f) - d2f_dRiRj / (f * f));
+
+    double d2f2_dr_dRi = 2.0 * r * (-0.25 * dalpha_dRi);
+    double d2f_dr_dRi  = d2f2_dr_dRi / (2.0 * f) - df2_dr * df2_dRi / (4.0 * f * f * f);
+    double d2E_dr_dRi  = C * (2.0 * df_dr * df_dRi / (f * f * f) - d2f_dr_dRi / (f * f));
+    double d2f2_dr_dRj = 2.0 * r * (-0.25 * dalpha_dRj);
+    double d2f_dr_dRj  = d2f2_dr_dRj / (2.0 * f) - df2_dr * df2_dRj / (4.0 * f * f * f);
+    double d2E_dr_dRj  = C * (2.0 * df_dr * df_dRj / (f * f * f) - d2f_dr_dRj / (f * f));
+
+    double cRi   = d2E_dRi2  * dRi_dPsi * dRi_dPsi;
+    double cRj   = d2E_dRj2  * dRj_dPsi * dRj_dPsi;
+    double cRiRj = d2E_dRiRj * dRi_dPsi * dRj_dPsi;
+    double gri   = d2E_dr_dRi * dRi_dPsi;
+    double grj   = d2E_dr_dRj * dRj_dPsi;
+
+    double ir = 1.0 / r;
+    cRi_out[buf_idx]   = cRi;
+    cRiRj_out[buf_idx] = cRiRj;
+    gri_out[buf_idx]   = gri;
+    grj_out[buf_idx]   = grj;
+    ir_dx_out[buf_idx] = dx * ir;
+    ir_dy_out[buf_idx] = dy * ir;
+    ir_dz_out[buf_idx] = dz * ir;
+
+    // Stage A: cRj contribution to W_j diagonal of M_R.
+    atomicAdd(&Wj_out[(size_t)g * Nr + j], cRj);
+}
+
+
+// Stage A — fold per-receptor diagonal weights into M_R[g, j, j]:
+//   delta_diag(g, j) = W_j(g, j)                                          (from pairwiseAccumWjDouble)
+//                    + dCrossDRR(g, j) * recD2RdPsi2(g, j)                (was a separate inner loop)
+// After this, the existing JR^T M_R JR cuBLAS dgemm computes both the
+// original desolvation outer product AND the cRj receptor-Born curvature
+// AND the cross-term receptor single-Born curvature in one pass.
+// One thread per (g, j).
+extern "C" __global__ void addReceptorDiagToMRDouble(
+    const double* __restrict__ Wj,             // [K*Nr]
+    const double* __restrict__ dCrossDRR,      // [K*Nr]
+    const double* __restrict__ recD2RdPsi2,    // [K*Nr]
+    double* __restrict__ MR,                   // [K*Nr*Nr], modified in place
+    int numGroups,
+    int Nr
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= numGroups * Nr) return;
+    int g = tid / Nr;
+    int j = tid % Nr;
+    size_t gNr = (size_t)g * Nr;
+    double add = Wj[gNr + j] + dCrossDRR[gNr + j] * recD2RdPsi2[gNr + j];
+    MR[gNr * Nr + (size_t)j * Nr + j] += add;
 }

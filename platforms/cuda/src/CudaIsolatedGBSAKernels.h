@@ -9,6 +9,7 @@
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
 #include <cuda.h>
+#include <cublas_v2.h>
 #include <vector>
 
 namespace GridForcePlugin {
@@ -231,6 +232,38 @@ private:
     CUfunction pairwiseCrossBornDeriv1DoubleFloatBufKernel = nullptr;
     CUfunction pairwiseBornGradHessianDoubleFloatBufKernel = nullptr;
     CUfunction pairwiseOuterProductHessianDoubleFloatBufKernel = nullptr;
+
+    // cuBLAS-accelerated J_R^T M_R J_R desolvation outer product.
+    // pairwiseOuterProductHessianDouble used to do this loop on-thread; it
+    // dominated the entire pairwise Hessian cost (99% of 66 sec on EA1).
+    // Replaced with a host-side cuBLAS dgemm cascade per group + a small
+    // scatter kernel. cublasHandle is lazy-init on the first PAIRWISE
+    // computeHessian call and torn down in the destructor.
+    cublasHandle_t cublasHandle = nullptr;
+    bool cublasInitialized = false;
+    OpenMM::CudaArray hessianGemmScratchX;       // [Nr * n3] reused across groups
+    OpenMM::CudaArray hessianGemmScratchH;       // [n3 * n3] reused across groups
+    bool hessianGemmScratchInitialized = false;
+    int hessianGemmCachedNr = 0;
+    int hessianGemmCachedN3 = 0;
+    CUfunction scatterDesolvationHessianGemmKernel = nullptr;
+    CUfunction scatterDesolvationHessianGemmFloatBufKernel = nullptr;
+    // Stage A: precompute receptor-diagonal weights, fold into M_R so the
+    // existing JR^T M_R JR dgemm absorbs the cRj outer product and the
+    // dCrossDRR*d2R^R single-Born curvature contribution.
+    OpenMM::CudaArray hessianWj;                 // [K * Nr] double
+    bool hessianWjInitialized = false;
+    int hessianWjCachedKxNr = 0;
+    CUfunction pairwiseAccumWjDoubleKernel = nullptr;       // deprecated; superseded by per-pair scalars kernel below
+    CUfunction addReceptorDiagToMRDoubleKernel = nullptr;
+    // Stage B: per-pair cross-term scalars (cRi, cRiRj, gri, grj, ir*dxyz)
+    // computed once per (g, iL, j) and read by the cross-term consumer in
+    // pairwiseOuterProductHessianDouble. Replaces 5000+ redundant
+    // recomputations per (iL, j) pair in the inner loop.
+    OpenMM::CudaArray hessianPairScalars;        // [K * templateN * Nr * 7] packed (7 doubles per pair)
+    int hessianPairScalarsCachedKxNxNr = 0;
+    bool hessianPairScalarsInitialized = false;
+    CUfunction pairwiseComputePerPairScalarsDoubleKernel = nullptr;
 
     // CUDA kernels
     CUfunction computeReceptorHCTGridKernel;      // Grid interpolation
