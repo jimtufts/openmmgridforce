@@ -78,6 +78,10 @@ double IsolatedGBSAForceImpl::calcForcesAndEnergy(ContextImpl& context,
             if (owner.getDownloadBornRadii()) {
                 owner.groupBornRadii[g] =
                     kernel.getAs<CalcIsolatedGBSAForceKernel>().getGroupBornRadii(g);
+                if (owner.getReceptorMode() == IsolatedGBSAForce::PAIRWISE) {
+                    owner.groupReceptorBornRadii[g] =
+                        kernel.getAs<CalcIsolatedGBSAForceKernel>().getReceptorBornRadii(g);
+                }
             }
         }
 

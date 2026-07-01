@@ -1287,9 +1287,11 @@ extern "C" __global__ void convertTiledHCTToFloat(
     real* __restrict__ hctFloat,
     int numAtoms
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numAtoms) return;
-    hctFloat[i] = (real)((long long)hctFixed[i] / (double)0x100000000);
+    const int stride = blockDim.x * gridDim.x;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < numAtoms; i += stride) {
+        hctFloat[i] = (real)((long long)hctFixed[i] / (double)0x100000000);
+    }
 }
 
 /**

@@ -1439,9 +1439,13 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::getReceptorBornRadii(int groupIn
         groupReceptorBornRadiiHost.resize(numParticleGroups);
     }
 
-    // Download receptor Born radii (always recompute - could cache based on group if needed)
-    vector<float> recBornRadii(numReceptorAtoms);
-    receptorBornRadii.download(recBornRadii);
+    // Download the full K*numReceptorAtoms buffer, then slice out the requested group.
+    size_t total = static_cast<size_t>(numReceptorAtoms) * numParticleGroups;
+    vector<float> allBorn(total);
+    receptorBornRadii.download(allBorn);
+    size_t offset = static_cast<size_t>(groupIndex) * numReceptorAtoms;
+    vector<float> recBornRadii(allBorn.begin() + offset,
+                                allBorn.begin() + offset + numReceptorAtoms);
     groupReceptorBornRadiiHost[groupIndex] = recBornRadii;
 
     vector<double> result(recBornRadii.begin(), recBornRadii.end());
