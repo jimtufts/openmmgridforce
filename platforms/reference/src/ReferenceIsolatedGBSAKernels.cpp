@@ -325,7 +325,19 @@ void ReferenceCalcIsolatedGBSAForceKernel::computeGroup(
         vector<double> hctReceptor(numAtoms, 0.0);
 
         if (receptorMode == IsolatedGBSAForce::GRID) {
-            // Grid-based receptor HCT
+            // Grid-based receptor HCT. The Reference kernel used to hard-code
+            // a 2x2x2 (trilinear) stencil regardless of interpolationMethod,
+            // silently masking bspline/hermite requests. Dispatch explicitly:
+            // method 0 is implemented; methods 1/2/3 throw with a clear
+            // message until their full Reference implementations land
+            // (basis + tensor-product Hermite assembly).
+            if (interpolationMethod != 0) {
+                throw OpenMMException(
+                    "IsolatedGBSAForce: interpolationMethod > 0 is not "
+                    "implemented on the Reference platform for GRID-mode "
+                    "receptor descreening. Use method=0 (trilinear) here, "
+                    "or run on CUDA where higher-order methods are supported.");
+            }
             double ox, oy, oz;
             desolvationGrid->getOrigin(ox, oy, oz);
             double spacing = desolvationGrid->getSpacing();
@@ -485,7 +497,10 @@ void ReferenceCalcIsolatedGBSAForceKernel::computeGroup(
         double gbEnergyLigOnly = computeGBEnergy(g, posData, bornRadiiLigOnly, dE_dR_ligOnly);
 
         groupEnergies_[g] = gbEnergyFull * scale;
-        groupLigandSelfEnergies_[g] = gbEnergyLigOnly * scale;
+        // ligself reports the ligand GB energy with receptor descreening
+        // already applied (matches CUDA semantics). The ligand-only GB
+        // energy is still accessible as (ligself - rec_contrib).
+        groupLigandSelfEnergies_[g] = gbEnergyFull * scale;
         groupReceptorContributions_[g] = (gbEnergyFull - gbEnergyLigOnly) * scale;
 
         // ---- Step 5: Surface area ----

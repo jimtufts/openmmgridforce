@@ -812,6 +812,301 @@ def gbsa_section(specs):
         _compare_hessian(case + " Hessian", hess, specs)
 
 
+# ----------------------------------------------- IsolatedGBSAForce[GRID]
+def gbsa_grid_section(specs):
+    """Big-picture anchor for IsolatedGBSAForce[GRID].
+
+    Structure mirrors grid_section for GridForce: enumerate the physical
+    components x interpolation methods x platform/precision. Every cell is
+    checked against an analytical (or transitively analytical) truth so it
+    is clear which combination is validated and which fails.
+
+    Components measured:
+      pure_GRID  = ligand self-GB whose Born radii used the receptor HCT
+                    interpolated from the desolvation grid.
+                    Truth: PAIRWISE.getGroupLigandSelfEnergy(0), which uses
+                    the exact pairwise HCT sum (no grid interpolation).
+      GRID_xterm = pure_GRID plus the pairwise cross-term augment (the
+                    receptor<->ligand Still term that plain GRID mode omits).
+                    Truth: PAIRWISE ligand_self + PAIRWISE cross_term
+                    (BOTH pairwise-exact). Deliberately excludes the
+                    receptor's own self-GB change from ligand descreening
+                    (~9 kJ/mol here) which the GRID production path does
+                    not model.
+
+    Note the anchor is *not* stock OpenMM's raw E(rec+lig) - E(rec) --
+    that quantity also contains the receptor desolvation delta which our
+    GRID + cross-term path omits by design. Anchoring against it would
+    have looked "OK at 3 %" via cancellation. Instead we anchor against
+    the exact analytic quantity the pipeline is actually computing.
+
+    Interpolation methods enumerated:
+      trilinear, tricubic_bspline, tricubic_hermite, triquintic_bspline,
+      triquintic_hermite. Hermite methods require a with-derivatives grid
+      (set setComputeGridDerivatives(True) on the auto-gen path).
+
+    Platforms: Reference (energy only; Hessian NOT implemented) + CUDA
+    single/mixed/double. CPU currently doesn't implement IsolatedGBSA GRID
+    mode. Reported clearly per row.
+
+    Cross-term augment is CUDA-only (the Reference kernel doesn't wire
+    the pairwise scalar-field cross term). We simply do not evaluate
+    GRID_xterm on Reference; that isn't a failure.
+    """
+    case = "IsolatedGBSAForce[GRID]"
+    print(f"\n=== {case} ===")
+    np.random.seed(42)
+    n_rec, n_lig = 40, 12
+    rec_pos = np.random.randn(n_rec, 3) * 0.4
+    lig_pos = np.random.randn(n_lig, 3) * 0.15 + np.array([0.9, 0.0, 0.0])
+    rec_q = np.random.randn(n_rec) * 0.3
+    lig_q = np.random.randn(n_lig) * 0.3
+    rec_r = 0.12 + np.random.rand(n_rec) * 0.06
+    lig_r = 0.12 + np.random.rand(n_lig) * 0.06
+    rec_s = 0.7 + np.random.rand(n_rec) * 0.2
+    lig_s = 0.7 + np.random.rand(n_lig) * 0.2
+
+    # Grid bounding box covers both receptor and ligand with margin.
+    all_pos = np.vstack([rec_pos, lig_pos])
+    lo = all_pos.min(axis=0) - 0.6
+    hi = all_pos.max(axis=0) + 0.6
+    sp = 0.15
+    counts = tuple(int(np.ceil((hi[d] - lo[d]) / sp)) + 1 for d in range(3))
+
+    # ---- Analytical anchor: PAIRWISE + stock OpenMM PAIRWISE quantity ----
+    def build_pairwise():
+        system = mm.System()
+        for _ in range(n_lig):
+            system.addParticle(12.0)
+        f = gfp.IsolatedGBSAForce()
+        f.setGBMethod(gfp.IsolatedGBSAForce.OBC_II)
+        f.setSoluteDielectric(1.0); f.setSolventDielectric(78.5)
+        f.setIncludeSurfaceArea(False)
+        f.setReceptorMode(gfp.IsolatedGBSAForce.PAIRWISE)
+        f.setNumAtoms(n_lig)
+        for i in range(n_lig):
+            f.setAtomParameters(i, float(lig_q[i]), float(lig_r[i]), float(lig_s[i]))
+        f.setNumReceptorAtoms(n_rec)
+        for i in range(n_rec):
+            f.setReceptorAtomParameters(i, float(rec_q[i]), float(rec_r[i]), float(rec_s[i]))
+        f.setReceptorPositions(rec_pos.flatten().tolist())
+        f.addParticleGroup("lig", list(range(n_lig)))
+        system.addForce(f); return system, f
+
+    # PAIRWISE anchor components on double Reference (validated separately)
+    try:
+        ref = (REFERENCE, 'Reference', {}, 'double')
+        sysp, fp = build_pairwise()
+        ctxp, _ = _context(sysp, ref)
+        ctxp.setPositions(lig_pos * unit.nanometer)
+        E_pair_total = ctxp.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+            unit.kilojoule_per_mole)
+        E_pair_ligself = fp.getGroupLigandSelfEnergy(0)
+        E_pair_cross = fp.getGroupCrossTermEnergy(0)
+        del ctxp
+        # Stock OpenMM double anchor: full E(rec+lig) − E(rec)
+        all_q = np.concatenate([rec_q, lig_q])
+        all_r = np.concatenate([rec_r, lig_r])
+        all_s = np.concatenate([rec_s, lig_s])
+        Ecx, _ = _gbsa_openmm_ef(all_q, all_r, all_s, np.vstack([rec_pos, lig_pos]))
+        Erec, _ = _gbsa_openmm_ef(rec_q, rec_r, rec_s, rec_pos)
+        E_stock_pairwise = Ecx - Erec
+        print(f"  anchors: PAIRWISE_total={E_pair_total:+.3f}  "
+              f"PAIRWISE_ligself={E_pair_ligself:+.3f}  "
+              f"cross={E_pair_cross:+.3f}  stock={E_stock_pairwise:+.3f} kJ/mol")
+    except Exception as e:
+        print(f"  SKIP: PAIRWISE anchor unavailable: {e!r}")
+        return
+
+    # ---- Baseline receptor Born radii (numpy: standard OBC2 HCT + tanh) ----
+    R = rec_r.astype(np.float64); S = rec_s.astype(np.float64)
+    p = rec_pos.astype(np.float64)
+    OFFSET = 0.009
+    R_off = R - OFFSET
+    hct = np.zeros(n_rec)
+    for i in range(n_rec):
+        for j in range(n_rec):
+            if i == j: continue
+            r = float(np.linalg.norm(p[i] - p[j]))
+            Sj = (R[j] - OFFSET) * S[j]
+            r_plus_Sj = r + Sj
+            if R_off[i] >= r_plus_Sj: continue
+            r_minus_Sj = abs(r - Sj)
+            l = 1.0 / R_off[i] if R_off[i] > r_minus_Sj else 1.0 / r_minus_Sj
+            u = 1.0 / r_plus_Sj
+            l2, u2 = l*l, u*u
+            term = (l - u + 0.25*r*(u2 - l2) + 0.5*(1.0/r)*np.log(u/l)
+                    + 0.25*Sj*Sj*(1.0/r)*(l2 - u2))
+            if R_off[i] < (Sj - r):
+                term += 2.0 * (1.0/R_off[i] - l)
+            hct[i] += term
+    A_, B_, G_ = 1.0, 0.8, 4.85
+    psi = 0.5 * R_off * hct
+    tanh_arg = A_*psi - B_*psi**2 + G_*psi**3
+    tanh_val = np.tanh(tanh_arg)
+    denom = 1.0/R_off - tanh_val / R
+    R_rec_baseline = np.minimum(np.where(denom > 0, 1.0/denom, R), 50.0)
+
+    # Truths and target components
+    E_pure_truth = E_pair_ligself                        # exact ligand self-GB
+    E_xterm_truth = E_pair_ligself + E_pair_cross        # pure + exact cross
+    receptor_desolv_delta = E_pair_total - E_xterm_truth
+    print(f"  truths:   pure_GRID = {E_pure_truth:+.3f}  "
+          f"GRID+xterm = {E_xterm_truth:+.3f}  (rec_desolv_omitted "
+          f"= {receptor_desolv_delta:+.3f})")
+
+    # ---- Grid generator (with derivatives if the method needs them) ----
+    def cuda_spec():
+        for cand in specs:
+            if cand[1] == 'CUDA': return cand
+        return None
+    gen_spec = cuda_spec()
+    if gen_spec is None:
+        print("  SKIP: KDE auto-gen requires CUDA; no CUDA spec available")
+        return
+
+    def autogen_grid(with_derivs):
+        f_gen = gfp.GBSAGridForce()
+        f_gen.setNumAtoms(1)
+        f_gen.setAtomParameters(0, 0.0, float(lig_r[0]), float(lig_s[0]))
+        f_gen.setInterpolationMethod(0)
+        f_gen.setAutoGenerateGrid(True)
+        f_gen.setUseKDEGeneration(True)
+        if with_derivs:
+            f_gen.setComputeGridDerivatives(True)
+        f_gen.setReceptorPositions(rec_pos.flatten().tolist())
+        f_gen.setReceptorRadii(rec_r.tolist())
+        f_gen.setReceptorScaleFactors(rec_s.tolist())
+        f_gen.setGridOrigin(float(lo[0]), float(lo[1]), float(lo[2]))
+        f_gen.setGridCounts(int(counts[0]), int(counts[1]), int(counts[2]))
+        f_gen.setGridSpacing(float(sp))
+        f_gen.setProbeRadius(0.14)
+        f_gen.setRThresholds([0.12, 0.16])
+        f_gen.setParticles([0]); f_gen.addParticleGroup('bootstrap', [0])
+        s = mm.System(); s.addParticle(12.0); s.addForce(f_gen)
+        ctxg, _ = _context(s, gen_spec)
+        ctxg.setPositions([[0.0, 0.0, 0.0]] * unit.nanometer)
+        ctxg.getState(getEnergy=True)
+        cg = f_gen.getDesolvationGrid()
+        del ctxg
+        return cg
+
+    HERMITE_METHODS = {gfp.INTERP_TRICUBIC_HERMITE, gfp.INTERP_TRIQUINTIC_HERMITE}
+    # IsolatedGBSAForce GRID mode rejects triquintic_bspline (method=4) at
+    # the API layer with an explicit "interpolationMethod must be 0..3"
+    # message. Deliberately skip it here; if support is added later, drop
+    # this comment and add ('triquintic_bspline', gfp.INTERP_TRIQUINTIC_BSPLINE).
+    methods = [
+        ('trilinear',          gfp.INTERP_TRILINEAR),
+        ('tricubic_bspline',   gfp.INTERP_TRICUBIC_BSPLINE),
+        ('tricubic_hermite',   gfp.INTERP_TRICUBIC_HERMITE),
+        ('triquintic_hermite', gfp.INTERP_TRIQUINTIC_HERMITE),
+    ]
+
+    grid_no_deriv = None
+    grid_with_deriv = None
+    try:
+        grid_no_deriv = autogen_grid(with_derivs=False)
+        print(f"  grid (no-derivs):     {counts[0]}x{counts[1]}x{counts[2]} @ {sp} nm  origin=({lo[0]:.2f},{lo[1]:.2f},{lo[2]:.2f})")
+    except Exception as e:
+        print(f"  grid auto-gen (no-derivs) FAILED: {e!r}")
+    try:
+        grid_with_deriv = autogen_grid(with_derivs=True)
+        print(f"  grid (with-derivs):   {counts[0]}x{counts[1]}x{counts[2]} @ {sp} nm  origin=({lo[0]:.2f},{lo[1]:.2f},{lo[2]:.2f})")
+    except Exception as e:
+        print(f"  grid auto-gen (with-derivs) FAILED: {e!r}")
+
+    def build_grid(cg, interp_method, with_cross_term):
+        system = mm.System()
+        for _ in range(n_lig):
+            system.addParticle(12.0)
+        f = gfp.IsolatedGBSAForce()
+        f.setGBMethod(gfp.IsolatedGBSAForce.OBC_II)
+        f.setSoluteDielectric(1.0); f.setSolventDielectric(78.5)
+        f.setIncludeSurfaceArea(False)
+        f.setReceptorMode(gfp.IsolatedGBSAForce.GRID)
+        f.setNumAtoms(n_lig)
+        for i in range(n_lig):
+            f.setAtomParameters(i, float(lig_q[i]), float(lig_r[i]), float(lig_s[i]))
+        f.setDesolvationGrid(cg)
+        f.setInterpolationMethod(interp_method)
+        f.setNumReceptorAtoms(n_rec)
+        for i in range(n_rec):
+            f.setReceptorAtomParameters(i, float(rec_q[i]), float(rec_r[i]),
+                                        float(rec_s[i]))
+        f.setReceptorPositions(rec_pos.flatten().tolist())
+        f.setReceptorBornRadiiBaseline([float(x) for x in R_rec_baseline])
+        if with_cross_term:
+            f.setCrossTermBinValues([float(lig_r[i]) for i in range(n_lig)])
+            f.setComputeCrossTermGrid(True)
+        f.addParticleGroup("lig", list(range(n_lig)))
+        system.addForce(f); return system
+
+    def report(component_label, method_name, spec_label, E, truth,
+               rel_tol=0.05, abs_tol=2.0):
+        if isinstance(E, tuple) and E[0] == 'EXC':
+            print(f"    EXC  {spec_label:12s} {component_label:12s} "
+                  f"{E[1][:60]}  [{case}/{method_name}]")
+            _failures.append((f"{case}/{method_name} {component_label}",
+                              spec_label, 'energy', E[1]))
+            return
+        d = abs(E - truth)
+        rel = d / max(1.0, abs(truth))
+        ok = np.isfinite(E) and (rel < rel_tol or d < abs_tol)
+        status = 'OK' if ok else 'FAIL'
+        print(f"    {status:4s} {spec_label:12s} {component_label:12s} "
+              f"E={E:+.3f}  |E−truth({truth:+.3f})|={d:.3f}  rel={rel:.2e}  "
+              f"[{case}/{method_name}]")
+        if not ok:
+            _failures.append((f"{case}/{method_name} {component_label}",
+                              spec_label, 'energy',
+                              f"E={E:.3f} truth={truth:+.3f} rel={rel:.2e}"))
+
+    # Reference implements only method=0 (trilinear) for GRID-mode HCT
+    # interpolation. Methods 1/2/3 throw at the kernel; skip them cleanly
+    # instead of recording an EXC failure.
+    REFERENCE_METHODS = {gfp.INTERP_TRILINEAR}
+
+    for mname, mval in methods:
+        cg = grid_with_deriv if mval in HERMITE_METHODS else grid_no_deriv
+        print(f"\n  --- interp={mname} ---")
+        if cg is None:
+            print(f"    SKIP {mname}: required grid unavailable")
+            continue
+        # component 1: pure GRID -- all specs implementing GRID mode
+        for spec in specs:
+            if spec[1] not in ('Reference', 'CUDA'):
+                continue
+            if spec[1] == 'Reference' and mval not in REFERENCE_METHODS:
+                print(f"    SKIP Reference    pure_GRID    "
+                      f"{mname} not implemented on Reference (dispatch guards it)")
+                continue
+            try:
+                sys_ = build_grid(cg, mval, with_cross_term=False)
+                ctx, _ = _context(sys_, spec)
+                ctx.setPositions(lig_pos * unit.nanometer)
+                E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+                    unit.kilojoule_per_mole)
+                del ctx
+            except Exception as e:
+                E = ('EXC', repr(e))
+            report('pure_GRID', mname, spec[0], E, E_pure_truth)
+        # component 2: GRID + cross-term augment -- CUDA only
+        for spec in specs:
+            if spec[1] != 'CUDA':
+                continue
+            try:
+                sys_ = build_grid(cg, mval, with_cross_term=True)
+                ctx, _ = _context(sys_, spec)
+                ctx.setPositions(lig_pos * unit.nanometer)
+                E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+                    unit.kilojoule_per_mole)
+                del ctx
+            except Exception as e:
+                E = ('EXC', repr(e))
+            report('GRID+xterm', mname, spec[0], E, E_xterm_truth)
+
+
 # --------------------------------------------------------- GBSAGridForce
 def gbsagrid_section(specs):
     case = "GBSAGridForce"
@@ -1417,6 +1712,7 @@ SECTIONS = {
     'bonded': bonded_section,
     'site': site_section,
     'gbsa': gbsa_section,
+    'gbsagrid_iso': gbsa_grid_section,
     'gbsagrid': gbsagrid_section,
     'gridgen': gridgen_section,
     'bondedhessian': bondedhessian_section,

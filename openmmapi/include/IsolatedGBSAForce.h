@@ -395,13 +395,25 @@ public:
     std::vector<double> getParticleGroupEnergies() const;
 
     /**
-     * Get the ligand self-solvation energy (ligand-ligand GB only).
+     * Get the ligand self-solvation GB energy for this group.
+     *
+     * Semantics: this is the Still self+pair GB energy over ligand atoms
+     * computed with the Born radii that were actually used to produce
+     * getGroupEnergy() -- i.e., WITH receptor descreening applied when
+     * receptorMode is PAIRWISE or GRID, and without it in NONE mode.
+     * Does not include the SA term (SA lives in getGroupEnergy() only).
+     *
+     * To recover the ligand-only GB energy (Born radii from ligand HCT
+     * alone), subtract getGroupReceptorContribution():
+     *   E_lig_only_GB = getGroupLigandSelfEnergy() - getGroupReceptorContribution()
      */
     double getGroupLigandSelfEnergy(int groupIndex) const;
 
     /**
-     * Get the receptor contribution to ligand solvation.
-     * (Change in ligand GB energy due to receptor screening)
+     * Get the receptor descreening contribution to the ligand GB energy.
+     * Equals (E_lig_with_receptor - E_lig_alone) for the GB Still energy
+     * computed with the two respective Born radii. Populated by Reference;
+     * the CUDA path currently returns 0.0 (TODO to populate).
      */
     double getGroupReceptorContribution(int groupIndex) const;
 
