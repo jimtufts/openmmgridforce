@@ -918,6 +918,27 @@ def gbsa_grid_section(specs):
         print(f"  SKIP: PAIRWISE anchor unavailable: {e!r}")
         return
 
+    # PAIRWISE Hessian, used as an approximate anchor for pure-GRID
+    # Hessian below. PAIRWISE full Hessian includes rec-lig cross-term
+    # chain rule; pure-GRID does not, so this is not a true reference.
+    pairwise_hess = {}
+    for spec in specs:
+        if spec[1] != 'CUDA':
+            continue
+        try:
+            sysp2, fp2 = build_pairwise()
+            ctxp2, _ = _context(sysp2, spec)
+            ctxp2.setPositions(lig_pos * unit.nanometer)
+            ctxp2.getState(getEnergy=True)
+            pairwise_hess[spec[3]] = np.array(fp2.computeHessian(ctxp2))
+            del ctxp2
+        except Exception as e:
+            print(f"  PAIRWISE anchor Hessian ({spec[0]}) failed: {e!r}")
+    if 'double' in pairwise_hess:
+        Hp = pairwise_hess['double']
+        print(f"  PAIRWISE analytical Hessian (CUDA/double): shape={Hp.shape}  "
+              f"||H||_F={np.linalg.norm(Hp):.3e}  max|H|={np.abs(Hp).max():.3e}")
+
     # ---- Baseline receptor Born radii (numpy: standard OBC2 HCT + tanh) ----
     R = rec_r.astype(np.float64); S = rec_s.astype(np.float64)
     p = rec_pos.astype(np.float64)
@@ -1040,7 +1061,7 @@ def gbsa_grid_section(specs):
             f.setCrossTermBinValues([float(lig_r[i]) for i in range(n_lig)])
             f.setComputeCrossTermGrid(True)
         f.addParticleGroup("lig", list(range(n_lig)))
-        system.addForce(f); return system
+        system.addForce(f); return system, f
 
     def report(component_label, method_name, spec_label, E, truth,
                rel_tol=0.05, abs_tol=2.0):
@@ -1082,7 +1103,7 @@ def gbsa_grid_section(specs):
                       f"{mname} not implemented on Reference (dispatch guards it)")
                 continue
             try:
-                sys_ = build_grid(cg, mval, with_cross_term=False)
+                sys_, _f = build_grid(cg, mval, with_cross_term=False)
                 ctx, _ = _context(sys_, spec)
                 ctx.setPositions(lig_pos * unit.nanometer)
                 E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
@@ -1096,7 +1117,7 @@ def gbsa_grid_section(specs):
             if spec[1] != 'CUDA':
                 continue
             try:
-                sys_ = build_grid(cg, mval, with_cross_term=True)
+                sys_, _f = build_grid(cg, mval, with_cross_term=True)
                 ctx, _ = _context(sys_, spec)
                 ctx.setPositions(lig_pos * unit.nanometer)
                 E = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
@@ -1105,6 +1126,59 @@ def gbsa_grid_section(specs):
             except Exception as e:
                 E = ('EXC', repr(e))
             report('GRID+xterm', mname, spec[0], E, E_xterm_truth)
+
+        # component 3: Hessian. Anchor is full PAIRWISE Hessian; it
+        # includes the rec-lig cross-term chain rule that pure-GRID lacks,
+        # so it is an approximate anchor, not a true reference (TODO).
+        # C^2 filter: trilinear (C^0) and tricubic_hermite (C^1) have no
+        # meaningful Hessian; skip.
+        C2_METHODS = {gfp.INTERP_TRICUBIC_BSPLINE, gfp.INTERP_TRIQUINTIC_HERMITE}
+        if mval not in C2_METHODS:
+            print(f"    SKIP Hessian: {mname} is not C^2-continuous; "
+                  f"Hessian only meaningful for tricubic_bspline / "
+                  f"triquintic_hermite")
+            continue
+        # Reference GRID-mode Hessian throws by design; skip explicitly.
+        print(f"    SKIP Reference    Hessian     "
+              f"GRID Hessian throws on Reference (not implemented)")
+        cuda_specs = [s for s in specs if s[1] == 'CUDA']
+        H_anchor = pairwise_hess.get('double')  # CUDA/double PAIRWISE
+        H_norm = np.linalg.norm(H_anchor) if H_anchor is not None else 0.0
+        if H_anchor is None:
+            print(f"    SKIP Hessian: PAIRWISE anchor unavailable")
+            continue
+        for spec in cuda_specs:
+            try:
+                sys_, gbsa_force = build_grid(cg, mval, with_cross_term=False)
+                ctx, _ = _context(sys_, spec)
+                ctx.setPositions(lig_pos * unit.nanometer)
+                ctx.getState(getEnergy=True)
+                H = np.array(gbsa_force.computeHessian(ctx))
+                del ctx
+            except Exception as e:
+                print(f"    EXC  {spec[0]:12s} Hessian     {repr(e)[:60]}  "
+                      f"[{case}/{mname}]")
+                _failures.append((f"{case}/{mname} Hessian", spec[0],
+                                  'hessian', repr(e)))
+                continue
+            diff = H - H_anchor
+            fro = float(np.linalg.norm(diff))
+            max_ = float(np.max(np.abs(diff)))
+            rel = fro / max(1.0, H_norm)
+            # Tolerance driven by grid interpolation, not FP precision:
+            # allow up to 3 % rel Frobenius delta (energy anchor was
+            # ~0.5 % at the same grid; Hessian carries second derivatives
+            # so a few-x larger tolerance is expected).
+            ok = np.isfinite(fro) and rel < 0.03
+            status = 'OK' if ok else 'FAIL'
+            print(f"    {status:4s} {spec[0]:12s} Hessian     "
+                  f"|H_grid - H_pair|_F/|H_pair|_F={rel:.2e}  "
+                  f"max|Δ|={max_:.2e}  ||H_grid||_F={np.linalg.norm(H):.2e}  "
+                  f"[{case}/{mname} vs PAIRWISE_analytical]")
+            if not ok:
+                _failures.append((f"{case}/{mname} Hessian vs PAIRWISE",
+                                  spec[0], 'hessian',
+                                  f"rel={rel:.2e} max={max_:.2e}"))
 
 
 # --------------------------------------------------------- GBSAGridForce
