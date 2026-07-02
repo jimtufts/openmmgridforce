@@ -82,12 +82,14 @@ def compute_receptor_baseline():
     return np.minimum(np.where(denom > 0, 1.0/denom, R), BORN_MAX)
 
 
-def autogen_grid():
+def autogen_grid(with_derivs=False):
     f_gen = gfp.GBSAGridForce()
     f_gen.setNumAtoms(1)
     f_gen.setAtomParameters(0, 0.0, float(lig_r[0]), float(lig_s[0]))
     f_gen.setInterpolationMethod(0)
     f_gen.setAutoGenerateGrid(True); f_gen.setUseKDEGeneration(True)
+    if with_derivs:
+        f_gen.setComputeGridDerivatives(True)
     f_gen.setReceptorPositions(rec_pos.flatten().tolist())
     f_gen.setReceptorRadii(rec_r.tolist())
     f_gen.setReceptorScaleFactors(rec_s.tolist())
@@ -108,10 +110,183 @@ def autogen_grid():
 
 
 R_rec_baseline = compute_receptor_baseline()
-grid = autogen_grid()
-
+grid = autogen_grid(with_derivs=False)
+grid_wd = autogen_grid(with_derivs=True)
 nx, ny, nz = counts
 origin = np.array([lo[0], lo[1], lo[2]], dtype=np.float64)
+
+# --- Triquintic hermite reference (JAX) -----------------------------------
+# Matrix parsed once from TriquinticCoefficients.cuh via
+# _extract_triquintic_matrix.py.
+TQM = np.load(
+    "/home/jtufts/src/p312/openmmgridforce/python/tests/triquintic_matrix.npy"
+).astype(np.float64)  # (216, 216)
+
+# Extract with-derivs grid buffers, reshape to (nDerivs, nx, ny, nz).
+def _reshape_grid(buf_flat, n_derivs, nx, ny, nz):
+    a = np.asarray(buf_flat, dtype=np.float64)
+    assert a.size == n_derivs * nx * ny * nz, (
+        f"grid buffer size {a.size} != {n_derivs}*{nx}*{ny}*{nz}")
+    return a.reshape(n_derivs, nx, ny, nz)
+
+hct_derivs_np = _reshape_grid(grid_wd.getHctProbe(), 27, nx, ny, nz)
+_corrN = np.asarray(grid_wd.getCorrectionN(), dtype=np.float64)
+_corrA = np.asarray(grid_wd.getCorrectionA(), dtype=np.float64)
+_corrB = np.asarray(grid_wd.getCorrectionB(), dtype=np.float64)
+_numPoints = nx * ny * nz
+_numBins = len(R_THRESHOLDS)
+# Layout classification mirrors CudaGBSAGridForceKernels.cpp:250-320.
+if _corrN.size == _numBins * 27 * _numPoints:
+    corr_mode = "binned_kde"                 # method=3 KDE path with bins
+    shape5 = (_numBins, 27, nx, ny, nz)
+    corrN_bkde = _corrN.reshape(shape5)
+    corrA_bkde = _corrA.reshape(shape5)
+    corrB_bkde = _corrB.reshape(shape5)
+elif _corrN.size == 27 * _numPoints:
+    corr_mode = "pure_kde"                   # method=3 KDE path, no bins
+    corrN_wd = _reshape_grid(_corrN, 27, nx, ny, nz)
+    corrA_wd = _reshape_grid(_corrA, 27, nx, ny, nz)
+    corrB_wd = _reshape_grid(_corrB, 27, nx, ny, nz)
+else:
+    corr_mode = "trilinear"
+    numBins_g = _corrN.size // _numPoints
+    corrN_tl = _corrN.reshape(numBins_g, nx, ny, nz)
+    corrA_tl = _corrA.reshape(numBins_g, nx, ny, nz)
+    corrB_tl = _corrB.reshape(numBins_g, nx, ny, nz)
+print(f"triquintic ref: corr_mode={corr_mode}  corrN.size={_corrN.size}")
+
+TQM_j = jnp.array(TQM)
+hct_derivs_j = jnp.array(hct_derivs_np)
+if corr_mode == "binned_kde":
+    corrN_bkde_j = jnp.array(corrN_bkde)
+    corrA_bkde_j = jnp.array(corrA_bkde)
+    corrB_bkde_j = jnp.array(corrB_bkde)
+elif corr_mode == "pure_kde":
+    corrN_wd_j = jnp.array(corrN_wd)
+    corrA_wd_j = jnp.array(corrA_wd)
+    corrB_wd_j = jnp.array(corrB_wd)
+else:
+    corrN_tl_j = jnp.array(corrN_tl)
+    corrA_tl_j = jnp.array(corrA_tl)
+    corrB_tl_j = jnp.array(corrB_tl)
+
+
+def _corner_stencil(grid_derivs_4d, ix, iy, iz):
+    """Return X[d,c] where c enumerates the 8 corners in CUDA order:
+    c=0..7 → (cx,cy,cz) = (0,0,0),(1,0,0),(0,1,0),(1,1,0),(0,0,1),
+                          (1,0,1),(0,1,1),(1,1,1).
+    Then flatten to X[d*8 + c] to match TRIQUINTIC_COEFFICIENTS layout.
+    """
+    cx = jnp.array([0, 1, 0, 1, 0, 1, 0, 1])
+    cy = jnp.array([0, 0, 1, 1, 0, 0, 1, 1])
+    cz = jnp.array([0, 0, 0, 0, 1, 1, 1, 1])
+    gxi = jnp.clip(ix + cx, 0, nx - 1)
+    gyi = jnp.clip(iy + cy, 0, ny - 1)
+    gzi = jnp.clip(iz + cz, 0, nz - 1)
+    # gather grid_derivs[:, gxi, gyi, gzi]  → shape (27, 8)
+    Xdc = grid_derivs_4d[:, gxi, gyi, gzi]
+    return Xdc.reshape(-1)  # (216,)
+
+
+def _poly_value(a216, ffx, ffy, ffz):
+    """Σ_ijk a[i + 6j + 36k] * ffx^i * ffy^j * ffz^k, i,j,k ∈ [0..5]."""
+    px = jnp.array([ffx**p for p in range(6)])
+    py = jnp.array([ffy**p for p in range(6)])
+    pz = jnp.array([ffz**p for p in range(6)])
+    # outer product of powers, contract with a reshaped to (k,j,i) axes
+    a_kji = a216.reshape(6, 6, 6)  # k in axis 0, j in axis 1, i in axis 2
+    return jnp.einsum('kji,i,j,k->', a_kji, px, py, pz)
+
+
+def _trilinear_value(grid_bin_4d, bin_idx, ix, iy, iz, ffx, ffy, ffz):
+    """Trilinear interpolation on a single-bin selected 3D grid slice."""
+    g = grid_bin_4d[bin_idx]  # (nx, ny, nz)
+    ix1 = jnp.clip(ix + 1, 0, nx - 1)
+    iy1 = jnp.clip(iy + 1, 0, ny - 1)
+    iz1 = jnp.clip(iz + 1, 0, nz - 1)
+    c000 = g[ix, iy, iz]
+    c100 = g[ix1, iy, iz]
+    c010 = g[ix, iy1, iz]
+    c110 = g[ix1, iy1, iz]
+    c001 = g[ix, iy, iz1]
+    c101 = g[ix1, iy, iz1]
+    c011 = g[ix, iy1, iz1]
+    c111 = g[ix1, iy1, iz1]
+    return ((1-ffx)*(1-ffy)*(1-ffz)*c000 + ffx*(1-ffy)*(1-ffz)*c100 +
+            (1-ffx)*ffy*(1-ffz)*c010 + ffx*ffy*(1-ffz)*c110 +
+            (1-ffx)*(1-ffy)*ffz*c001 + ffx*(1-ffy)*ffz*c101 +
+            (1-ffx)*ffy*ffz*c011 + ffx*ffy*ffz*c111)
+
+
+def grid_hct_triquintic(pos, R_i_off):
+    """JAX-differentiable triquintic hermite eval of the HCT probe grid +
+    correction grids at pos, matching gbsaGridForce.cu:681-953 for
+    method=3 (triquintic_hermite)."""
+    R_probe_off = PROBE_RADIUS - DIELECTRIC_OFFSET
+    inv_Ri = 1.0 / R_i_off
+    inv_Rp = 1.0 / R_probe_off
+    delta = inv_Ri - inv_Rp
+    sigma = inv_Ri + inv_Rp
+    logTerm = jnp.log(R_i_off / R_probe_off)
+    dCorr_dN = delta
+    dCorr_dA = -0.25 * delta * sigma
+    dCorr_dB = logTerm
+
+    invSp = 1.0 / SP
+    fx_r = (pos[0] - origin[0]) * invSp
+    fy_r = (pos[1] - origin[1]) * invSp
+    fz_r = (pos[2] - origin[2]) * invSp
+    ix = jnp.floor(fx_r).astype(jnp.int32)
+    iy = jnp.floor(fy_r).astype(jnp.int32)
+    iz = jnp.floor(fz_r).astype(jnp.int32)
+    ffx = fx_r - ix
+    ffy = fy_r - iy
+    ffz = fz_r - iz
+
+    # HCT probe via triquintic hermite
+    X_hct = _corner_stencil(hct_derivs_j, ix, iy, iz)
+    a_hct = 0.125 * (TQM_j @ X_hct)
+    hct_val = _poly_value(a_hct, ffx, ffy, ffz)
+
+    if corr_mode == "binned_kde":
+        # Bin selection: first b with rThresholds[b] >= R_i_off; else last.
+        R_thr = jnp.array(R_THRESHOLDS)
+        cond = (R_thr >= R_i_off).astype(jnp.int32)
+        # index of first True; if none, use last (numBins-1)
+        any_hit = jnp.sum(cond) > 0
+        first_true = jnp.argmax(cond)  # 0 if none, else first True
+        binIdx = jnp.where(any_hit, first_true, len(R_THRESHOLDS) - 1)
+        X_N = _corner_stencil(corrN_bkde_j[binIdx], ix, iy, iz)
+        X_A = _corner_stencil(corrA_bkde_j[binIdx], ix, iy, iz)
+        X_B = _corner_stencil(corrB_bkde_j[binIdx], ix, iy, iz)
+        a_N = 0.125 * (TQM_j @ X_N)
+        a_A = 0.125 * (TQM_j @ X_A)
+        a_B = 0.125 * (TQM_j @ X_B)
+        corr_val = (dCorr_dN * _poly_value(a_N, ffx, ffy, ffz) +
+                    dCorr_dA * _poly_value(a_A, ffx, ffy, ffz) +
+                    dCorr_dB * _poly_value(a_B, ffx, ffy, ffz))
+    elif corr_mode == "pure_kde":
+        X_N = _corner_stencil(corrN_wd_j, ix, iy, iz)
+        X_A = _corner_stencil(corrA_wd_j, ix, iy, iz)
+        X_B = _corner_stencil(corrB_wd_j, ix, iy, iz)
+        a_N = 0.125 * (TQM_j @ X_N)
+        a_A = 0.125 * (TQM_j @ X_A)
+        a_B = 0.125 * (TQM_j @ X_B)
+        corr_val = (dCorr_dN * _poly_value(a_N, ffx, ffy, ffz) +
+                    dCorr_dA * _poly_value(a_A, ffx, ffy, ffz) +
+                    dCorr_dB * _poly_value(a_B, ffx, ffy, ffz))
+    else:
+        R_thr = jnp.array(R_THRESHOLDS)
+        cond = (R_thr >= R_i_off).astype(jnp.int32)
+        any_hit = jnp.sum(cond) > 0
+        first_true = jnp.argmax(cond)
+        binIdx = jnp.where(any_hit, first_true, corrN_tl_j.shape[0] - 1)
+        n = _trilinear_value(corrN_tl_j, binIdx, ix, iy, iz, ffx, ffy, ffz)
+        a = _trilinear_value(corrA_tl_j, binIdx, ix, iy, iz, ffx, ffy, ffz)
+        b = _trilinear_value(corrB_tl_j, binIdx, ix, iy, iz, ffx, ffy, ffz)
+        corr_val = dCorr_dN * n + dCorr_dA * a + dCorr_dB * b
+
+    return hct_val + corr_val
 
 hctProbe_np    = np.array(grid.getHctProbe(),    dtype=np.float64)
 correctionN_np = np.array(grid.getCorrectionN(), dtype=np.float64)
@@ -231,6 +406,41 @@ def still_energy_pair(q_i, q_j, R_i, R_j, r2):
     return PREFACTOR * q_i * q_j / f_gb
 
 
+def pure_grid_energy_hermite(lig_pos_flat, lig_q, lig_r_arr, lig_s_arr,
+                              include_sa=True):
+    """Same as pure_grid_energy but uses triquintic hermite for the receptor
+    HCT lookup. JAX reference for the plugin's method=3 path."""
+    N_l = lig_q.shape[0]
+    lig_pos = lig_pos_flat.reshape(N_l, 3)
+    lig_R_off = lig_r_arr - DIELECTRIC_OFFSET
+    lig_S = lig_R_off * lig_s_arr
+
+    lig_born_list = []
+    for i in range(N_l):
+        hct = 0.0
+        for j in range(N_l):
+            if j == i: continue
+            hct += hct_term(lig_R_off[i], lig_pos[i], lig_pos[j], lig_S[j])
+        hct += grid_hct_triquintic(lig_pos[i], lig_R_off[i])
+        lig_born_list.append(born_obc(lig_r_arr[i], hct))
+    lig_born = jnp.stack(lig_born_list)
+
+    E = 0.0
+    for i in range(N_l):
+        E += 0.5 * PREFACTOR * lig_q[i]**2 / lig_born[i]
+        for j in range(i+1, N_l):
+            dx = lig_pos[i] - lig_pos[j]
+            r2 = jnp.dot(dx, dx)
+            E += still_energy_pair(lig_q[i], lig_q[j],
+                                   lig_born[i], lig_born[j], r2)
+    if include_sa:
+        for i in range(N_l):
+            Rsolv = lig_r_arr[i] + PROBE_RADIUS
+            ratio = lig_r_arr[i] / lig_born[i]
+            E += SURFACE_TENSION * 4.0 * jnp.pi * Rsolv**2 * ratio**6
+    return E
+
+
 def pure_grid_energy(lig_pos_flat, lig_q, lig_r_arr, lig_s_arr,
                     include_sa=True):
     N_l = lig_q.shape[0]
@@ -269,7 +479,12 @@ def pure_grid_energy(lig_pos_flat, lig_q, lig_r_arr, lig_s_arr,
 
 
 # ---- Plugin pure-GRID system --------------------------------------------
-def build_plugin_pure_grid(include_sa=True, use_charges=True):
+HERMITE_METHODS = {gfp.INTERP_TRICUBIC_HERMITE, gfp.INTERP_TRIQUINTIC_HERMITE}
+
+def build_plugin_pure_grid(include_sa=True, use_charges=True,
+                            interp_method=None):
+    if interp_method is None:
+        interp_method = gfp.INTERP_TRICUBIC_BSPLINE
     q_use = lig_q if use_charges else np.zeros_like(lig_q)
     system = mm.System()
     for _ in range(n_lig):
@@ -283,8 +498,9 @@ def build_plugin_pure_grid(include_sa=True, use_charges=True):
     for i in range(n_lig):
         f.setAtomParameters(i, float(q_use[i]), float(lig_r[i]),
                             float(lig_s[i]))
-    f.setDesolvationGrid(grid)
-    f.setInterpolationMethod(gfp.INTERP_TRICUBIC_BSPLINE)
+    grid_used = grid_wd if interp_method in HERMITE_METHODS else grid
+    f.setDesolvationGrid(grid_used)
+    f.setInterpolationMethod(interp_method)
     f.setNumReceptorAtoms(n_rec)
     for i in range(n_rec):
         f.setReceptorAtomParameters(i, float(rec_q[i]), float(rec_r[i]),
@@ -297,11 +513,16 @@ def build_plugin_pure_grid(include_sa=True, use_charges=True):
 
 
 # ---- Run cross-check ----------------------------------------------------
-def run_case(include_sa, use_charges, label):
-    print(f"\n############# case: {label} "
+def run_case(include_sa, use_charges, label, interp_method=None):
+    interp_name = {
+        gfp.INTERP_TRICUBIC_BSPLINE:   "tricubic_bspline",
+        gfp.INTERP_TRIQUINTIC_HERMITE: "triquintic_hermite",
+    }.get(interp_method or gfp.INTERP_TRICUBIC_BSPLINE, str(interp_method))
+    print(f"\n############# case: {label}  interp={interp_name} "
           f"(include_sa={include_sa}, use_charges={use_charges}) ############")
     sys_, force = build_plugin_pure_grid(include_sa=include_sa,
-                                          use_charges=use_charges)
+                                          use_charges=use_charges,
+                                          interp_method=interp_method)
     ctx = mm.Context(sys_, mm.VerletIntegrator(0.001),
                      mm.Platform.getPlatformByName('CUDA'),
                      {'Precision': 'double'})
@@ -323,12 +544,15 @@ def run_case(include_sa, use_charges, label):
     lr_ = jnp.array(lig_r, dtype=jnp.float64)
     ls_ = jnp.array(lig_s, dtype=jnp.float64)
 
-    E_jax = float(pure_grid_energy(lp, lq_, lr_, ls_, include_sa=include_sa))
-    grad_jax = jax.grad(pure_grid_energy, argnums=0)(lp, lq_, lr_, ls_,
-                                                     include_sa)
+    jax_energy_fn = (pure_grid_energy_hermite
+                     if interp_method == gfp.INTERP_TRIQUINTIC_HERMITE
+                     else pure_grid_energy)
+    E_jax = float(jax_energy_fn(lp, lq_, lr_, ls_, include_sa=include_sa))
+    grad_jax = jax.grad(jax_energy_fn, argnums=0)(lp, lq_, lr_, ls_,
+                                                   include_sa)
     F_jax = -np.array(grad_jax)
-    H_jax = np.array(jax.hessian(pure_grid_energy, argnums=0)(lp, lq_, lr_, ls_,
-                                                              include_sa))
+    H_jax = np.array(jax.hessian(jax_energy_fn, argnums=0)(lp, lq_, lr_, ls_,
+                                                            include_sa))
 
     frob_p = float(np.linalg.norm(H_plugin))
     frob_j = float(np.linalg.norm(H_jax))
@@ -344,17 +568,13 @@ def run_case(include_sa, use_charges, label):
           f"||dH||={frob_d:.4e}  max|dH|={max_d:.4e}  rel={rel:.2e}")
     return H_plugin, H_jax
 
-# Full case: SA on, charges on
-H_plugin, H_jax = run_case(include_sa=True, use_charges=True,
-                            label="SA_on__q_on")
-# SA off, charges on: isolates GB self+pair chain from SA Hessian bug
-run_case(include_sa=False, use_charges=True, label="SA_off_q_on")
-# SA on, charges off: kills GB self+pair (all E terms with q*q vanish).
-# What remains: SA + all HCT chain-rule via dE/dHCT (grid + ligand-ligand).
-run_case(include_sa=True, use_charges=False, label="SA_on__q_off")
-# SA off, charges off: only dE/dHCT terms with dE/dR from SA gone,
-# should give H=0 (nothing left to differentiate). Sanity check.
-run_case(include_sa=False, use_charges=False, label="SA_off_q_off")
+for interp in (gfp.INTERP_TRICUBIC_BSPLINE, gfp.INTERP_TRIQUINTIC_HERMITE):
+    run_case(True,  True,  "SA_on__q_on",  interp_method=interp)
+    run_case(False, True,  "SA_off_q_on",  interp_method=interp)
+    run_case(True,  False, "SA_on__q_off", interp_method=interp)
+    run_case(False, False, "SA_off_q_off", interp_method=interp)
+H_plugin, H_jax = run_case(True, True, "SA_on__q_on",
+                            interp_method=gfp.INTERP_TRICUBIC_BSPLINE)
 
 
 
