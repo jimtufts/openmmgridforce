@@ -1978,3 +1978,272 @@ extern "C" __global__ void addReceptorDiagToMRDouble(
     double add = Wj[gNr + j] + dCrossDRR[gNr + j] * recD2RdPsi2[gNr + j];
     MR[gNr * Nr + (size_t)j * Nr + j] += add;
 }
+
+
+// ==================================================================
+// Double-storage GRID mode Hessian populators.
+//
+// Replace the pairwise-receptor kernels 0a / 2 / 2b in the GRID mode
+// branch of computeHessian. Internal compute is `real` (context
+// precision); outputs are double. J^T M J accumulation in
+// assembleGBSAHessianDouble runs in double regardless, so this matches
+// the compute-vs-storage split used by the pairwise double kernels.
+//
+// The grid helpers interpolateGBSAGrids / interpolateGBSAGridsWithHessian
+// live in gbsaGridForce.cu; all .cu files are bundled into one module,
+// so they are callable directly from here.
+// ==================================================================
+
+extern "C" __global__ void computeHctReceptorGridDouble(
+    const real4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const real* __restrict__ radii,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridHctProbe,
+    const float* __restrict__ gridHctDerivatives,
+    const float* __restrict__ gridCorrectionN,
+    const float* __restrict__ gridCorrectionA,
+    const float* __restrict__ gridCorrectionB,
+    const float* __restrict__ rThresholdsBuf,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    float originX, float originY, float originZ,
+    float gridSpacing,
+    float probeRadius,
+    int numBins,
+    int interpolationMethod,
+    bool useKDECorrections,
+    bool hasBinnedKDEDerivatives,
+    int totalParticles,
+    int templateNumAtoms,
+    double* __restrict__ hctReceptor
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= totalParticles) return;
+
+    int atomInGroup = idx;
+    for (int g = 0; g < numGroups; g++) {
+        int gs = groupStart[g];
+        int ge = groupStart[g + 1];
+        if (idx >= gs && idx < ge) { atomInGroup = idx - gs; break; }
+    }
+
+    int particleIdx = particleIndices[idx];
+    int templateIdx = atomInGroup % templateNumAtoms;
+    real4 pos = posq[particleIdx];
+    real3 position = make_real3(pos.x, pos.y, pos.z);
+
+    real R_i = radii[templateIdx];
+    real R_i_off = R_i - (real)DIELECTRIC_OFFSET;
+    real R_probe_off = probeRadius - (real)DIELECTRIC_OFFSET;
+
+    int nx = gridCounts[0], ny = gridCounts[1], nz = gridCounts[2];
+    int numPoints = nx * ny * nz;
+    int binIdx = numBins - 1;
+    for (int b = 0; b < numBins; b++) {
+        if (rThresholdsBuf[b] >= R_i_off) { binIdx = b; break; }
+    }
+    int binOffset = binIdx * numPoints;
+
+    GBSAInterpolationResult r = interpolateGBSAGrids(
+        position, R_i_off, R_probe_off,
+        gridCounts, gridSpacing, originX, originY, originZ,
+        gridHctProbe, gridHctDerivatives,
+        gridCorrectionN, gridCorrectionA, gridCorrectionB,
+        binOffset, interpolationMethod, false,
+        useKDECorrections, hasBinnedKDEDerivatives);
+    hctReceptor[idx] = r.isInside ? (double)r.hct : 0.0;
+}
+
+
+extern "C" __global__ void computeHCTJacobianGridDouble(
+    const real4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const real* __restrict__ radii,
+    const real* __restrict__ scaleFactors,
+    const int* __restrict__ exclusionAtoms,
+    const int* __restrict__ exclusionStart,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int templateNumAtoms,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridHctProbe,
+    const float* __restrict__ gridHctDerivatives,
+    const float* __restrict__ gridCorrectionN,
+    const float* __restrict__ gridCorrectionA,
+    const float* __restrict__ gridCorrectionB,
+    const float* __restrict__ rThresholdsBuf,
+    float originX, float originY, float originZ,
+    float gridSpacing,
+    float probeRadius,
+    int numBins,
+    int interpolationMethod,
+    bool useKDECorrections,
+    bool hasBinnedKDEDerivatives,
+    int totalParticles,
+    double* __restrict__ jacobian
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int atomInGroup = idx;
+    int groupStartIdx = 0, groupEndIdx = 0;
+    for (int g = 0; g < numGroups; g++) {
+        groupStartIdx = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= groupStartIdx && idx < groupEndIdx) {
+            atomInGroup = idx - groupStartIdx; break;
+        }
+    }
+    if (idx >= groupEndIdx) return;
+
+    int dim3N = 3 * totalParticles;
+    for (int c = 0; c < dim3N; c++)
+        jacobian[idx * dim3N + c] = 0.0;
+
+    int particleIdx = particleIndices[idx];
+    int templateIdx = atomInGroup % templateNumAtoms;
+    real4 pos_f = posq[particleIdx];
+    double pk_x = (double)pos_f.x;
+    double pk_y = (double)pos_f.y;
+    double pk_z = (double)pos_f.z;
+    real R_k = radii[templateIdx];
+    real R_k_off = R_k - (real)DIELECTRIC_OFFSET;
+    real R_probe_off = probeRadius - (real)DIELECTRIC_OFFSET;
+
+    double jx_self = 0.0, jy_self = 0.0, jz_self = 0.0;
+
+    // Grid gradient at atom's own position.
+    int nx = gridCounts[0], ny = gridCounts[1], nz = gridCounts[2];
+    int numPoints = nx * ny * nz;
+    int binIdx = numBins - 1;
+    for (int b = 0; b < numBins; b++) {
+        if (rThresholdsBuf[b] >= R_k_off) { binIdx = b; break; }
+    }
+    int binOffset = binIdx * numPoints;
+
+    real3 position = make_real3(pos_f.x, pos_f.y, pos_f.z);
+    GBSAInterpolationResult gres = interpolateGBSAGrids(
+        position, R_k_off, R_probe_off,
+        gridCounts, gridSpacing, originX, originY, originZ,
+        gridHctProbe, gridHctDerivatives,
+        gridCorrectionN, gridCorrectionA, gridCorrectionB,
+        binOffset, interpolationMethod, true,
+        useKDECorrections, hasBinnedKDEDerivatives);
+    if (gres.isInside) {
+        jx_self += (double)gres.gradient.x;
+        jy_self += (double)gres.gradient.y;
+        jz_self += (double)gres.gradient.z;
+    }
+
+    // Ligand-ligand pairwise HCT gradient.
+    int exclStart = exclusionStart[templateIdx];
+    int exclEnd = exclusionStart[templateIdx + 1];
+    int groupSize = groupEndIdx - groupStartIdx;
+    for (int jLocal = 0; jLocal < groupSize; jLocal++) {
+        if (jLocal == atomInGroup) continue;
+        int j = groupStartIdx + jLocal;
+        int templateIdx_j = jLocal % templateNumAtoms;
+
+        bool excluded = false;
+        for (int e = exclStart; e < exclEnd; e++)
+            if (exclusionAtoms[e] == templateIdx_j) { excluded = true; break; }
+        if (excluded) continue;
+
+        real4 pos_j_f = posq[particleIndices[j]];
+        double pj_x = (double)pos_j_f.x;
+        double pj_y = (double)pos_j_f.y;
+        double pj_z = (double)pos_j_f.z;
+        double R_j = (double)radii[templateIdx_j];
+        double R_j_off = R_j - (double)DIELECTRIC_OFFSET;
+        double S_j = R_j_off * (double)scaleFactors[templateIdx_j];
+
+        double dx = pk_x - pj_x;
+        double dy = pk_y - pj_y;
+        double dz = pk_z - pj_z;
+        double r2 = dx*dx + dy*dy + dz*dz;
+        double r = sqrt(r2);
+        if (r < 1e-9) continue;
+        double R_k_off_d = (double)R_k_off;
+        if (R_k_off_d >= r + S_j) continue;
+
+        double I1, I2;
+        computeHCT_r12_double(r, S_j, R_k_off_d, I1, I2);
+        double invr = 1.0 / r;
+        jx_self += I1 * dx * invr;
+        jy_self += I1 * dy * invr;
+        jz_self += I1 * dz * invr;
+        jacobian[idx * dim3N + 3 * j + 0] = -I1 * dx * invr;
+        jacobian[idx * dim3N + 3 * j + 1] = -I1 * dy * invr;
+        jacobian[idx * dim3N + 3 * j + 2] = -I1 * dz * invr;
+    }
+
+    jacobian[idx * dim3N + 3 * idx + 0] = jx_self;
+    jacobian[idx * dim3N + 3 * idx + 1] = jy_self;
+    jacobian[idx * dim3N + 3 * idx + 2] = jz_self;
+}
+
+
+extern "C" __global__ void computeReceptorGridHessianDouble(
+    const real4* __restrict__ posq,
+    const int* __restrict__ particleIndices,
+    const real* __restrict__ radii,
+    const int* __restrict__ groupStart,
+    int numGroups,
+    int templateNumAtoms,
+    const int* __restrict__ gridCounts,
+    const float* __restrict__ gridHctProbe,
+    const float* __restrict__ gridHctDerivatives,
+    const float* __restrict__ gridCorrectionN,
+    const float* __restrict__ gridCorrectionA,
+    const float* __restrict__ gridCorrectionB,
+    const float* __restrict__ rThresholdsBuf,
+    float originX, float originY, float originZ,
+    float gridSpacing,
+    float probeRadius,
+    int numBins,
+    int interpolationMethod,
+    bool useKDECorrections,
+    bool hasBinnedKDEDerivatives,
+    int totalParticles,
+    double* __restrict__ hessianOut       // [N * 6]: xx, yy, zz, xy, xz, yz
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int atomInGroup = idx;
+    int groupEndIdx = 0;
+    for (int g = 0; g < numGroups; g++) {
+        int gs = groupStart[g];
+        groupEndIdx = groupStart[g + 1];
+        if (idx >= gs && idx < groupEndIdx) {
+            atomInGroup = idx - gs; break;
+        }
+    }
+    if (idx >= groupEndIdx) return;
+
+    int templateIdx = atomInGroup % templateNumAtoms;
+    int particleIdx = particleIndices[idx];
+    real4 pos = posq[particleIdx];
+    real3 position = make_real3(pos.x, pos.y, pos.z);
+    real R_k = radii[templateIdx];
+    real R_k_off = R_k - (real)DIELECTRIC_OFFSET;
+    real R_probe_off = probeRadius - (real)DIELECTRIC_OFFSET;
+
+    int nx = gridCounts[0], ny = gridCounts[1], nz = gridCounts[2];
+    int numPoints = nx * ny * nz;
+    int binIdx = numBins - 1;
+    for (int b = 0; b < numBins; b++) {
+        if (rThresholdsBuf[b] >= R_k_off) { binIdx = b; break; }
+    }
+    int binOffset = binIdx * numPoints;
+
+    GBSAHessianResult h = interpolateGBSAGridsWithHessian(
+        position, R_k_off, R_probe_off,
+        gridCounts, gridSpacing, originX, originY, originZ,
+        gridHctProbe, gridHctDerivatives,
+        gridCorrectionN, gridCorrectionA, gridCorrectionB,
+        binOffset, interpolationMethod,
+        useKDECorrections, hasBinnedKDEDerivatives);
+
+    for (int i = 0; i < 6; i++)
+        hessianOut[idx * 6 + i] = h.isInside ? (double)h.hessian[i] : 0.0;
+}

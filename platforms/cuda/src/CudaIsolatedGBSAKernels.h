@@ -329,6 +329,10 @@ private:
     CUfunction computeBornRadiiOBCDoubleKernel;             // OBC2 transform (double)
     CUfunction computeHctReceptorPairwiseDoubleKernel;      // receptor->ligand HCT in double
     CUfunction computeHctLigandPairwiseDoubleKernel;
+    // GRID mode double-storage variants of the receptor-descreening chain.
+    CUfunction computeHctReceptorGridDoubleKernel;          // receptor->ligand HCT via grid (double)
+    CUfunction computeHCTJacobianGridDoubleKernel;          // dPsi/dx via grid (double)
+    CUfunction computeReceptorGridHessianDoubleKernel;      // d2Psi/dx2 via grid (double)
     // PAIRWISE receptor-desolvation + cross-term Hessian kernels (double).
     CUfunction pairwiseRecBornDoubleKernel;                 // recBorn + transform derivs
     CUfunction pairwiseRecCouplingDoubleKernel;             // recDeDR + MR

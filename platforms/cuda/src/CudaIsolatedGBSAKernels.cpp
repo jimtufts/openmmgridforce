@@ -1531,6 +1531,9 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
         computeBornRadiiOBCDoubleKernel          = cu.getKernel(module, "computeBornRadiiOBCDouble");
         computeHctReceptorPairwiseDoubleKernel   = cu.getKernel(module, "computeHctReceptorPairwiseDouble");
         computeHctLigandPairwiseDoubleKernel     = cu.getKernel(module, "computeHctLigandPairwiseDouble");
+        computeHctReceptorGridDoubleKernel       = cu.getKernel(module, "computeHctReceptorGridDouble");
+        computeHCTJacobianGridDoubleKernel       = cu.getKernel(module, "computeHCTJacobianGridDouble");
+        computeReceptorGridHessianDoubleKernel   = cu.getKernel(module, "computeReceptorGridHessianDouble");
         pairwiseRecBornDoubleKernel              = cu.getKernel(module, "pairwiseRecBornDouble");
         pairwiseRecCouplingDoubleKernel          = cu.getKernel(module, "pairwiseRecCouplingDouble");
         pairwiseRecJacobianDoubleKernel          = cu.getKernel(module, "pairwiseRecJacobianDouble");
@@ -1635,10 +1638,41 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
     CUdeviceptr hctLigandDoublePtr   = hessianHctLigandDouble.getDevicePointer();
     CUdeviceptr bornRadiiDoublePtr   = hessianBornRadiiDouble.getDevicePointer();
 
-    // === Kernel 0a: receptor->ligand HCT in double (pair-loop, no tiling).
-    // Slower than the production float-tiled kernel but only runs once per
-    // Hessian eval and gives JAX-equivalent precision in the HCT sum. ===
-    if (numReceptorAtoms > 0) {
+    bool useGridReceptorHess = (receptorMode == IsolatedGBSAForce::GRID);
+    CUdeviceptr gridCountsPtr        = 0;
+    CUdeviceptr gridHctProbePtr      = 0;
+    CUdeviceptr gridHctDerivPtr      = 0;
+    CUdeviceptr gridCorrNPtr         = 0;
+    CUdeviceptr gridCorrAPtr         = 0;
+    CUdeviceptr gridCorrBPtr         = 0;
+    CUdeviceptr rThresholdsGridPtr   = 0;
+    if (useGridReceptorHess) {
+        gridCountsPtr      = gridCounts.getDevicePointer();
+        gridHctProbePtr    = gridHctProbe.getDevicePointer();
+        gridHctDerivPtr    = hasHctDerivatives ? gridHctDerivatives.getDevicePointer() : 0;
+        gridCorrNPtr       = gridCorrectionN.getDevicePointer();
+        gridCorrAPtr       = gridCorrectionA.getDevicePointer();
+        gridCorrBPtr       = gridCorrectionB.getDevicePointer();
+        rThresholdsGridPtr = rThresholds.getDevicePointer();
+    }
+
+    // === Kernel 0a: receptor->ligand HCT in double.
+    // GRID mode: grid interp into hctReceptorDouble.
+    // PAIRWISE mode: pair-loop sum.
+    if (useGridReceptorHess) {
+        void* hctRecArgs[] = {
+            &posqPtr, &particleIndicesPtr, &radiiPtr,
+            &gridCountsPtr, &gridHctProbePtr, &gridHctDerivPtr,
+            &gridCorrNPtr, &gridCorrAPtr, &gridCorrBPtr,
+            &rThresholdsGridPtr, &groupStartPtr, &numParticleGroups,
+            &originX, &originY, &originZ, &gridSpacing, &probeRadius,
+            &numBins, &interpolationMethod,
+            &useKDECorrections, &hasBinnedKDEDerivatives,
+            &totalParticles, &templateN, &hctReceptorDoublePtr
+        };
+        cu.executeKernel(computeHctReceptorGridDoubleKernel, hctRecArgs,
+                         numBlocksN * blockSize, blockSize);
+    } else if (numReceptorAtoms > 0) {
         void* hctRecArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr,
             &groupStartPtr, &numParticleGroups, &templateN,
@@ -1696,19 +1730,50 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
     cu.executeKernel(prepareHessianIntermediatesDoubleKernel, prepArgs,
                      numBlocksN * blockSize, blockSize);
 
-    // === Kernel 2: computeHCTJacobianPairwiseDouble ===
-    void* jacArgs[] = {
-        &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
-        &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
-        &numParticleGroups, &templateN,
-        &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
-        &numReceptorAtoms, &totalParticles, &jacobianPtr
-    };
-    cu.executeKernel(computeHCTJacobianPairwiseDoubleKernel, jacArgs,
-                     numBlocksN * blockSize, blockSize);
+    // === Kernel 2: dPsi/dx Jacobian.
+    if (useGridReceptorHess) {
+        void* jacArgs[] = {
+            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+            &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
+            &numParticleGroups, &templateN,
+            &gridCountsPtr, &gridHctProbePtr, &gridHctDerivPtr,
+            &gridCorrNPtr, &gridCorrAPtr, &gridCorrBPtr,
+            &rThresholdsGridPtr,
+            &originX, &originY, &originZ, &gridSpacing, &probeRadius,
+            &numBins, &interpolationMethod,
+            &useKDECorrections, &hasBinnedKDEDerivatives,
+            &totalParticles, &jacobianPtr
+        };
+        cu.executeKernel(computeHCTJacobianGridDoubleKernel, jacArgs,
+                         numBlocksN * blockSize, blockSize);
+    } else {
+        void* jacArgs[] = {
+            &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+            &exclAtomsPtr, &exclStartPtr, &groupStartPtr,
+            &numParticleGroups, &templateN,
+            &receptorPosPtr, &receptorRadiiPtr, &receptorScalesPtr,
+            &numReceptorAtoms, &totalParticles, &jacobianPtr
+        };
+        cu.executeKernel(computeHCTJacobianPairwiseDoubleKernel, jacArgs,
+                         numBlocksN * blockSize, blockSize);
+    }
 
-    // === Kernel 2b: computeReceptorPairwiseHessianDouble ===
-    if (numReceptorAtoms > 0) {
+    // === Kernel 2b: d2Psi/dx2 receptor Hessian.
+    if (useGridReceptorHess) {
+        void* recHessArgs[] = {
+            &posqPtr, &particleIndicesPtr, &radiiPtr,
+            &groupStartPtr, &numParticleGroups, &templateN,
+            &gridCountsPtr, &gridHctProbePtr, &gridHctDerivPtr,
+            &gridCorrNPtr, &gridCorrAPtr, &gridCorrBPtr,
+            &rThresholdsGridPtr,
+            &originX, &originY, &originZ, &gridSpacing, &probeRadius,
+            &numBins, &interpolationMethod,
+            &useKDECorrections, &hasBinnedKDEDerivatives,
+            &totalParticles, &recD2PsiPtr
+        };
+        cu.executeKernel(computeReceptorGridHessianDoubleKernel, recHessArgs,
+                         numBlocksN * blockSize, blockSize);
+    } else if (numReceptorAtoms > 0) {
         void* recHessArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr,
             &groupStartPtr, &numParticleGroups, &templateN,
