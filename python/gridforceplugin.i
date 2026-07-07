@@ -48,6 +48,7 @@ namespace std {
 #include "IsolatedGBSAForceKernels.h"
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
+#include "RFOMinimizer.h"
 #include "BATTopology.h"
 #ifdef GRIDFORCE_BUILD_CUDA
 #include "CudaBATConverter.h"
@@ -1629,6 +1630,24 @@ public:
 };
 
 /**
+ * RFOMinimizer performs P-RFO minimization using the plugin's analytical
+ * Hessian machinery. Handles indefinite Hessians (saddle regions, small
+ * or negative eigenvalues) cleanly via a shifted-Newton step chosen from
+ * the RFO secular equation.
+ */
+class RFOMinimizer {
+public:
+    RFOMinimizer();
+    ~RFOMinimizer();
+
+    bool minimize(OpenMM::Context& context, double tolerance = 1.0, int maxIterations = 100);
+    int getNumIterations() const;
+    double getFinalRMSForce() const;
+    void setMaxStep(double s);
+    void setLineSearch(bool enable);
+};
+
+/**
  * BAT (Bond/Angle/Torsion) coordinate topology for smart darting.
  *
  * Mirror of the Python AlGDock/mwe/bat_coords.BATTopology class. Build
@@ -2145,3 +2164,55 @@ size_t getGridCacheMaxHostMemory() {
     return GridForcePlugin::GridDataCache::getMaxHostMemory();
 }
 %}
+
+// LocalEnergyMinimizer dispatch: pure Python, four backends.
+%pythoncode %{
+
+class LocalEnergyMinimizer:
+    """Backend-dispatching wrapper around stock and plugin-owned minimizers.
+
+    Backends
+    --------
+    stock  : openmm.LocalEnergyMinimizer.minimize(context, tol, maxIter).
+             When the gridforceplugin is loaded, the CUDA MinimizeKernel
+             factory is transparently replaced by PluginCompatMinimizeKernel,
+             which is byte-for-byte equivalent to OpenMM's CommonMinimizeKernel
+             on sm>=60 and adds a software atomicAdd(double*) fallback on
+             pre-Pascal (Maxwell sm_52, Kepler sm_35/37). No user-visible
+             behavior change on Pascal+; on Maxwell mixed/double it just works.
+    newton : NewtonMinimizer — Newton-Raphson via analytical Hessian.
+    rfo    : RFOMinimizer     — P-RFO via analytical Hessian; robust near
+             saddle-like regions where the Hessian is indefinite.
+    auto   : same as 'stock' — the compat fix means stock always works now,
+             so there is no separate 'compat' backend to fall back to.
+    """
+
+    _VALID_BACKENDS = ('stock', 'newton', 'rfo', 'auto')
+
+    @staticmethod
+    def minimize(context, tolerance=10.0, maxIterations=0,
+                 reporter=None, backend='auto'):
+        if backend not in LocalEnergyMinimizer._VALID_BACKENDS:
+            raise ValueError(
+                f"backend={backend!r} not one of {LocalEnergyMinimizer._VALID_BACKENDS}")
+        if backend in ('auto', 'stock'):
+            import openmm as _mm
+            if reporter is None:
+                _mm.LocalEnergyMinimizer.minimize(
+                    context, tolerance, maxIterations)
+            else:
+                _mm.LocalEnergyMinimizer.minimize(
+                    context, tolerance, maxIterations, reporter)
+            return 'stock'
+        if backend == 'newton':
+            nm = NewtonMinimizer()
+            iters = maxIterations if maxIterations > 0 else 100
+            nm.minimize(context, tolerance, iters)
+            return 'newton'
+        if backend == 'rfo':
+            rm = RFOMinimizer()
+            iters = maxIterations if maxIterations > 0 else 100
+            rm.minimize(context, tolerance, iters)
+            return 'rfo'
+%}
+

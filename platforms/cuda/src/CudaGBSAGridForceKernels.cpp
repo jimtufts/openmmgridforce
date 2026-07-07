@@ -245,31 +245,15 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
     }
 
     // Upload correction grids - detect mode by size
-    // Pure KDE mode: [27 * numPoints] - not binned, deprecated
     // Binned mode: [numBins * numPoints] for trilinear lookup by radius bin
     // Binned+KDE derivatives mode: [numBins * 27 * numPoints] for tricubic/triquintic per bin
     const auto& corrNData = grid->getCorrectionN();
-    size_t expectedKDESize = static_cast<size_t>(27) * numPoints;
     size_t expectedBinnedSize = static_cast<size_t>(numBins) * numPoints;
     size_t expectedBinnedKDESize = static_cast<size_t>(numBins) * 27 * numPoints;
 
     if (corrNData.size() == expectedBinnedKDESize) {
-        // Binned+KDE derivatives mode - correction grids have 27 derivatives per bin
-        // Layout: [bin * 27 * numPoints + deriv * numPoints + point]
-        useKDECorrections = true;  // Use high-order interpolation for corrections
-        hasBinnedKDEDerivatives = true;  // Binned format with derivatives
-        gridCorrectionN.initialize<float>(cu, corrNData.size(), "gbsaGridCorrectionN");
-        gridCorrectionN.upload(corrNData);
-
-        gridCorrectionA.initialize<float>(cu, grid->getCorrectionA().size(), "gbsaGridCorrectionA");
-        gridCorrectionA.upload(grid->getCorrectionA());
-
-        gridCorrectionB.initialize<float>(cu, grid->getCorrectionB().size(), "gbsaGridCorrectionB");
-        gridCorrectionB.upload(grid->getCorrectionB());
-    } else if (corrNData.size() == expectedKDESize) {
-        // Pure KDE mode (deprecated) - correction grids have 27 derivatives, no bins
         useKDECorrections = true;
-        hasBinnedKDEDerivatives = false;
+        hasBinnedKDEDerivatives = true;
         gridCorrectionN.initialize<float>(cu, corrNData.size(), "gbsaGridCorrectionN");
         gridCorrectionN.upload(corrNData);
 
@@ -279,11 +263,10 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
         gridCorrectionB.initialize<float>(cu, grid->getCorrectionB().size(), "gbsaGridCorrectionB");
         gridCorrectionB.upload(grid->getCorrectionB());
     } else if (corrNData.size() == expectedBinnedSize || numBins == 0) {
-        // Binned mode - correction grids indexed by radius bin (trilinear only)
         useKDECorrections = false;
         hasBinnedKDEDerivatives = false;
         int corrSize = numBins * numPoints;
-        if (corrSize == 0) corrSize = numPoints;  // Handle single-bin case
+        if (corrSize == 0) corrSize = numPoints;
         gridCorrectionN.initialize<float>(cu, corrSize, "gbsaGridCorrectionN");
         gridCorrectionN.upload(corrNData);
 
@@ -295,7 +278,6 @@ void CudaCalcGBSAGridForceKernel::initialize(const System& system, const GBSAGri
     } else {
         throw OpenMMException("GBSAGridForce: correction grid size mismatch. Expected " +
             std::to_string(expectedBinnedKDESize) + " (binned+KDE) or " +
-            std::to_string(expectedKDESize) + " (KDE) or " +
             std::to_string(expectedBinnedSize) + " (binned) but got " +
             std::to_string(corrNData.size()));
     }

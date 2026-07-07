@@ -40,6 +40,7 @@ namespace GridForcePlugin {
 
 namespace CommonGridForceKernelSources {
     extern const char* gridForceSource;
+    extern const char* pluginCompatMinimizeSource;
 }
 
 } // namespace GridForcePlugin

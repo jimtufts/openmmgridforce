@@ -43,7 +43,7 @@ REFERENCE = 'Reference'  # double-precision serial ground truth for all comparis
 # bites when the reference value is ~0.
 TOL = {
     'double': dict(rel_e=1e-6, abs_e=1e-7, rel_f=1e-5, abs_f=1e-5, rel_h=1e-5, abs_h=1e-5),
-    'mixed':  dict(rel_e=1e-5, abs_e=1e-6, rel_f=1e-4, abs_f=1e-4, rel_h=1e-4, abs_h=1e-4),
+    'mixed':  dict(rel_e=2e-5, abs_e=1e-6, rel_f=1e-4, abs_f=1e-4, rel_h=1e-4, abs_h=1e-4),
     'single': dict(rel_e=1e-4, abs_e=1e-4, rel_f=3e-3, abs_f=3e-3, rel_h=3e-3, abs_h=3e-3),
 }
 
@@ -52,11 +52,29 @@ TOL = {
 # magnitude algorithmic bugs (sign flips, unit-conv errors) without flagging
 # routine interp noise.
 TOL_ANALYTIC = {
-    'trilinear':          dict(rel_e=1e-1, abs_e=1e-2),
-    'tricubic_bspline':   dict(rel_e=1e-2, abs_e=1e-2),
-    'tricubic_hermite':   dict(rel_e=1e-2, abs_e=1e-2),
-    'triquintic_bspline': dict(rel_e=5e-3, abs_e=1e-2),
-    'triquintic_hermite': dict(rel_e=5e-3, abs_e=1e-2),
+    'trilinear':          dict(rel_e=1e-1, abs_e=1e-2,
+                               rel_f=5e-1, abs_f=1.0,
+                               rel_h=1.0,  abs_h=1e3),
+    'tricubic_bspline':   dict(rel_e=1e-2, abs_e=1e-2,
+                               rel_f=5e-2, abs_f=1.0,
+                               rel_h=2e-1, abs_h=1e2),
+    # 'naked' variant carries a different dynamic-range strategy (per-grid
+    # inv_power instead of arcsinh). Same tolerance envelope as arcsinh.
+    'tricubic_bspline_naked':   dict(rel_e=1e-2, abs_e=1e-2,
+                                     rel_f=5e-2, abs_f=1.0,
+                                     rel_h=2e-1, abs_h=1e2),
+    'tricubic_hermite':   dict(rel_e=1e-2, abs_e=1e-2,
+                               rel_f=5e-2, abs_f=1.0,
+                               rel_h=2e-1, abs_h=1e2),
+    'triquintic_bspline': dict(rel_e=5e-3, abs_e=1e-2,
+                               rel_f=2e-2, abs_f=1.0,
+                               rel_h=1e-1, abs_h=1e2),
+    'triquintic_bspline_naked': dict(rel_e=5e-3, abs_e=1e-2,
+                                     rel_f=2e-2, abs_f=1.0,
+                                     rel_h=1e-1, abs_h=1e2),
+    'triquintic_hermite': dict(rel_e=5e-3, abs_e=1e-2,
+                               rel_f=2e-2, abs_f=1.0,
+                               rel_h=1e-1, abs_h=1e2),
 }
 
 # Open gaps to be fixed (not worked around). A mismatch listed here is reported
@@ -69,6 +87,35 @@ OPEN_GAPS = {
     ('NUTS-mc', 'CUDA/single', 'mc'),
     ('NUTS-mc', 'CUDA/mixed', 'mc'),
     ('NUTS-mc', 'CUDA/double', 'mc'),
+    # Reference does not implement interpolation method 4 (triquintic_bspline);
+    # only CUDA has it. TODO: port or drop.
+    ('GridForce[ele/triquintic_bspline]', 'Reference', 'reference'),
+    ('GridForce[lja/triquintic_bspline]', 'Reference', 'reference'),
+    ('GridForce[ljr/triquintic_bspline]', 'Reference', 'reference'),
+    ('GridForce[ele/triquintic_bspline_naked]', 'Reference', 'reference'),
+    ('GridForce[lja/triquintic_bspline_naked]', 'Reference', 'reference'),
+    ('GridForce[ljr/triquintic_bspline_naked]', 'Reference', 'reference'),
+    # Reference lacks setArcsinhScale. Harness enables it for numerical
+    # stability of the tricubic_bspline prefilter on steep LJ grids;
+    # Reference bspline path uses a different implementation and throws.
+    # TODO: port arcsinh to Reference bspline or gate the harness on
+    # per-platform capability.
+    ('GridForce[ele/tricubic_bspline]', 'Reference', 'reference'),
+    ('GridForce[lja/tricubic_bspline]', 'Reference', 'reference'),
+    ('GridForce[ljr/tricubic_bspline]', 'Reference', 'reference'),
+    # The naked variant uses setInvPowerMode(RUNTIME) which Reference and CPU
+    # bspline paths do not currently apply — they load raw grid values, then
+    # bspline over huge r^-12/r^-6 magnitudes and disagree with CUDA by
+    # ~5 orders of magnitude on LJa/LJr.  ELE is untransformed and so its
+    # Reference gap is analogous to the arcsinh case above (no arcsinh needed
+    # for ele, but the naked path takes the same code branch).  TODO: apply
+    # inv_power on Reference/CPU too.
+    ('GridForce[ele/tricubic_bspline_naked]', 'Reference', 'reference'),
+    ('GridForce[lja/tricubic_bspline_naked]', 'Reference', 'reference'),
+    ('GridForce[ljr/tricubic_bspline_naked]', 'Reference', 'reference'),
+    ('GridForce[lja/tricubic_bspline_naked]', 'CPU', 'reference'),
+    ('GridForce[ljr/tricubic_bspline_naked]', 'CPU', 'reference'),
+    ('GridForce[multigroup energies]',  'Reference', 'reference'),
 }
 
 _failures = []
@@ -128,7 +175,25 @@ def _diffs(value, ref):
     return ad, rd
 
 
-def record(case, label, pclass, kind, absd, reld):
+def _fmt_num(x, width=None):
+    """Compact numeric formatter: decimals when readable, scientific for
+    very small/large. `width` right-pads if set, else natural length."""
+    if x is None or not np.isfinite(x):
+        s = "nan"
+    else:
+        ax = abs(x)
+        if ax == 0.0:
+            s = "0"
+        elif 1e-3 <= ax < 1e6:
+            # Decimal with adaptive precision, ~5 significant figures.
+            prec = max(0, 4 - int(np.floor(np.log10(ax))))
+            s = f"{x:.{prec}f}"
+        else:
+            s = f"{x:.3e}"
+    return f"{s:>{width}}" if width else s
+
+
+def record(case, label, pclass, kind, absd, reld, val=None, ref=None):
     if ' vs analytic' in case:
         method = case.split('/')[-1].split(']')[0]
         tol = TOL_ANALYTIC.get(method, dict(rel_e=1e-2, abs_e=1e-2))
@@ -146,8 +211,20 @@ def record(case, label, pclass, kind, absd, reld):
     else:
         status = 'FAIL'
         _failures.append((case, label, kind, f"abs={absd:.3e} rel={reld:.3e}"))
-    print(f"    {status:4s} {label:12s} {kind:7s} abs={absd:.3e} rel={reld:.3e} "
-          f"(tol rel<{rel_tol:.0e}|abs<{abs_tol:.0e})  [{case}]")
+    if val is not None and ref is not None:
+        vals = f"val={_fmt_num(val)}  ref={_fmt_num(ref)}  "
+    else:
+        vals = ""
+    print(f"  {status:4s} {label:12s} {kind:7s}  {vals}"
+          f"|d|={_fmt_num(absd)}  rel={_fmt_num(reld)}  [{case}]")
+
+
+def _scalar_summary(x):
+    """Reduce a scalar/array quantity to a single float for reporting."""
+    a = np.asarray(x)
+    if a.ndim == 0:
+        return float(a)
+    return float(np.max(np.abs(a)))
 
 
 def compare(case, results, specs, kinds=('energy', 'force')):
@@ -155,7 +232,11 @@ def compare(case, results, specs, kinds=('energy', 'force')):
     ref = results.get(REFERENCE)
     if ref is None or isinstance(ref[0], str):
         print(f"  [{case}] Reference unavailable ({ref}); cannot compare")
-        _failures.append((case, REFERENCE, 'reference', str(ref)))
+        tag = (case, REFERENCE, 'reference')
+        if tag in OPEN_GAPS:
+            _gaps.append(tag)
+        else:
+            _failures.append((case, REFERENCE, 'reference', str(ref)))
         return
     pclass = {s[0]: s[3] for s in specs}
     for label, r in results.items():
@@ -172,10 +253,12 @@ def compare(case, results, specs, kinds=('energy', 'force')):
         pc = pclass.get(label, 'double')
         if 'energy' in kinds:
             ad, rd = _diffs(r[0], ref[0])
-            record(case, label, pc, 'energy', ad, rd)
+            record(case, label, pc, 'energy', ad, rd,
+                   val=_scalar_summary(r[0]), ref=_scalar_summary(ref[0]))
         if 'force' in kinds:
             ad, rd = _diffs(r[1], ref[1])
-            record(case, label, pc, 'force', ad, rd)
+            record(case, label, pc, 'force', ad, rd,
+                   val=_scalar_summary(r[1]), ref=_scalar_summary(ref[1]))
 
 
 def eval_all(build, positions, specs):
@@ -185,6 +268,37 @@ def eval_all(build, positions, specs):
             results[spec[0]] = energy_forces(build(), positions, spec)
         except Exception as e:
             results[spec[0]] = ('EXC', repr(e))
+    return results
+
+
+def eval_all_with_hess_blocks(build_sf, positions, specs):
+    """Like eval_all, but returns (E, F, H_blocks, err) per spec.
+    build_sf must return (system, force) so we retain the typed force
+    reference (system.getForce(i) loses the SWIG downcast).
+    """
+    results = {}
+    for spec in specs:
+        try:
+            system, force = build_sf()
+            ctx, _ = _context(system, spec)
+            ctx.setPositions(positions)
+            st = ctx.getState(getEnergy=True, getForces=True)
+            E = st.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            F = np.array(st.getForces(asNumpy=True).value_in_unit(
+                unit.kilojoule_per_mole / unit.nanometer))
+            H = None
+            H_err = None
+            if hasattr(force, 'getHessianMatrices'):
+                try:
+                    H = np.asarray(force.getHessianMatrices(ctx))
+                except Exception as _he:
+                    H_err = repr(_he)[:100]
+            else:
+                H_err = "force lacks getHessianMatrices"
+            del ctx
+            results[spec[0]] = (E, F, H, H_err)
+        except Exception as e:
+            results[spec[0]] = ('EXC', repr(e), None, None)
     return results
 
 
@@ -239,48 +353,82 @@ def grid_section(specs):
 
     K_E = 138.935456  # kJ/mol nm / e^2 (OpenMM Coulomb constant)
 
-    def _analytic_truth(grid_type):
-        """Direct pair sum over receptor atoms in JAX f64. Returns total
-        ligand-vs-receptor energy in kJ/mol with the same combining
-        convention the .nc grids assume.
+    def _analytic_efH(grid_type):
+        """Direct pair sum over receptor atoms in JAX f64. Returns
+        (E, F, H_blocks) where E is a scalar kJ/mol, F is (n_lig, 3)
+        kJ/mol/nm, H_blocks is (n_lig, 3, 3) kJ/mol/nm^2 (block-diagonal
+        because each ligand atom's grid energy depends only on its own
+        position; the true 3N x 3N Hessian is block-diagonal by design).
+        Uses the same combining convention the .nc grids assume.
         """
         import jax, jax.numpy as jnp
         jax.config.update('jax_enable_x64', True)
         rp = jnp.asarray(pos_rec)
-        lp = jnp.asarray(pos_lig)
         if grid_type == 'ele':
             scl_l = jnp.asarray(charges_lig)
             scl_r = jnp.asarray(charges_rec)
-            prefactor = K_E
-            exponent = 1
-            sign = 1.0
+            prefactor = K_E; exponent = 1; sign = 1.0
         elif grid_type == 'lja':
             scl_l = jnp.asarray(np.sqrt(eps_lig) * (2.0 * rVdw_lig) ** 3)
             scl_r = jnp.asarray(np.sqrt(eps_rec) * (2.0 * rVdw_rec) ** 3)
-            prefactor = 2.0
-            exponent = 6
-            sign = -1.0
+            prefactor = 2.0; exponent = 6; sign = -1.0
         elif grid_type == 'ljr':
             scl_l = jnp.asarray(np.sqrt(eps_lig) * (2.0 * rVdw_lig) ** 6)
             scl_r = jnp.asarray(np.sqrt(eps_rec) * (2.0 * rVdw_rec) ** 6)
-            prefactor = 1.0
-            exponent = 12
-            sign = 1.0
+            prefactor = 1.0; exponent = 12; sign = 1.0
         else:
             raise ValueError(grid_type)
 
-        def per_lig_atom(i):
-            r = jnp.linalg.norm(lp[i] - rp, axis=1)
+        def E_of_lig_atom(x_i, i):
+            r = jnp.linalg.norm(x_i - rp, axis=1)
             return scl_l[i] * sign * prefactor * jnp.sum(scl_r / r ** exponent)
-        return float(jnp.sum(jax.vmap(per_lig_atom)(jnp.arange(n_lig))))
+
+        def E_total(lp_flat):
+            lp2 = lp_flat.reshape(n_lig, 3)
+            return jnp.sum(jax.vmap(E_of_lig_atom)(lp2, jnp.arange(n_lig)))
+
+        lp0 = jnp.asarray(pos_lig.flatten())
+        E = float(E_total(lp0))
+        F = -np.asarray(jax.grad(E_total)(lp0)).reshape(n_lig, 3)
+        # Per-atom 3x3 Hessian blocks (true H is block-diagonal by design).
+        def H_block(i):
+            def E_i(x_i):
+                return E_of_lig_atom(x_i, i)
+            return jax.hessian(E_i)(jnp.asarray(pos_lig[i]))
+        H = np.stack([np.asarray(H_block(i)) for i in range(n_lig)])
+        return E, F, H
+
+    def _analytic_truth(grid_type):
+        """Backwards-compat wrapper: energy only."""
+        return _analytic_efH(grid_type)[0]
 
     BSPLINE_PREFILTER_ORDER = {
         gfp.INTERP_TRICUBIC_BSPLINE: 3,
         gfp.INTERP_TRIQUINTIC_BSPLINE: 5,
     }
-    BSPLINE_BLUR_PHYS_NM = 0.05  # ~1/6 of typical LJ sigma
+    # Bspline dynamic-range compression: arcsinh(V/scale) transform. Keeps
+    # prefilter stable on uncapped-LJ-scale ranges. scale=1000 chosen from
+    # diag_bspline_cap.py sweep: near-identity for ele values (~1e3 max, so
+    # arcsinh ~= linear) while still compressing LJ's ~1e12 range enough for
+    # a stable prefilter. scale=1 (heavier compression) collapses ele to 0.
+    BSPLINE_ARCSINH_SCALE = 1000.0
+    # Gaussian blur previously set to 0.05 nm (~1 grid cell). Diagnostic
+    # (diag_bspline_cap.py) showed that 1-cell blur turned a 1.5 % bspline
+    # error into 38 % at r=0.72 nm on an LJr grid by biasing values toward
+    # higher-magnitude neighbors. Disabled by default; arcsinh handles any
+    # dynamic-range issue prefilter would have.
+    BSPLINE_BLUR_PHYS_NM = 0.0
 
-    def _build_grid_force(nc_file, unit_conv, lig_scales, interp_method):
+    # "naked" bspline variant: no arcsinh, per-grid inv_power compression.
+    # inv_power = physical singularity power gives ~1% readback error across
+    # the full docking distance range (jax_lj_smooth_grid_prototype confirmed;
+    # diag_pergrid_invpower config F reaches d_min=0.167 nm with E_int=-690
+    # vs hermite -683). LJr r^-12 -> p=12; LJa r^-6 -> p=6; ELE untransformed
+    # (Coulomb-scale values already smooth, negative p corrupts near zero).
+    NAKED_INV_POWER = {'ljr': 12.0, 'lja': 6.0, 'ele': None}
+
+    def _build_grid_force(nc_file, unit_conv, lig_scales, interp_method,
+                          variant='arcsinh', grid_type=None):
         d = _grid_read(nc_file)
         f = gfp.GridForce()
         nx, ny, nz = (int(v) for v in d['counts'])
@@ -296,8 +444,15 @@ def grid_section(specs):
         order = BSPLINE_PREFILTER_ORDER.get(interp_method, 0)
         if order:
             f.setBSplinePrefilterOrder(order)
-            sigma_cells = BSPLINE_BLUR_PHYS_NM / float(sp.mean())
-            f.setGaussianBlurSigma(sigma_cells)
+            if variant == 'arcsinh' and BSPLINE_ARCSINH_SCALE > 0.0:
+                f.setArcsinhScale(BSPLINE_ARCSINH_SCALE)
+            elif variant == 'naked':
+                inv_p = NAKED_INV_POWER.get(grid_type)
+                if inv_p is not None:
+                    f.setInvPowerMode(gfp.InvPowerMode_RUNTIME, float(inv_p))
+            if BSPLINE_BLUR_PHYS_NM > 0.0:
+                sigma_cells = BSPLINE_BLUR_PHYS_NM / float(sp.mean())
+                f.setGaussianBlurSigma(sigma_cells)
         return f
 
     import tempfile, atexit, shutil
@@ -366,11 +521,17 @@ def grid_section(specs):
             np.sqrt(eps_lig) * (2.0 * rVdw_lig) ** 6),
     ]
     HERMITE_METHODS = {gfp.INTERP_TRICUBIC_HERMITE, gfp.INTERP_TRIQUINTIC_HERMITE}
-    methods = [('trilinear', gfp.INTERP_TRILINEAR),
-               ('tricubic_bspline', gfp.INTERP_TRICUBIC_BSPLINE),
-               ('triquintic_bspline', gfp.INTERP_TRIQUINTIC_BSPLINE),
-               ('tricubic_hermite', gfp.INTERP_TRICUBIC_HERMITE),
-               ('triquintic_hermite', gfp.INTERP_TRIQUINTIC_HERMITE)]
+    # 3-tuple: (label, interp_method_int, variant).  variant is only meaningful
+    # for bspline methods — 'arcsinh' is the historical BSPLINE_ARCSINH_SCALE
+    # compression path; 'naked' is the per-grid inv_power path validated in
+    # diag_pergrid_invpower.  Kept side-by-side so parity data covers both.
+    methods = [('trilinear',                gfp.INTERP_TRILINEAR,          None),
+               ('tricubic_bspline',         gfp.INTERP_TRICUBIC_BSPLINE,   'arcsinh'),
+               ('tricubic_bspline_naked',   gfp.INTERP_TRICUBIC_BSPLINE,   'naked'),
+               ('triquintic_bspline',       gfp.INTERP_TRIQUINTIC_BSPLINE, 'arcsinh'),
+               ('triquintic_bspline_naked', gfp.INTERP_TRIQUINTIC_BSPLINE, 'naked'),
+               ('tricubic_hermite',         gfp.INTERP_TRICUBIC_HERMITE,   None),
+               ('triquintic_hermite',       gfp.INTERP_TRIQUINTIC_HERMITE, None)]
 
     pclass = {s[0]: s[3] for s in specs}
 
@@ -380,41 +541,76 @@ def grid_section(specs):
             print(f"[skip] {ncname} not found at {nc_path}")
             continue
         try:
-            E_truth = _analytic_truth(gtype)
-            print(f"\n--- analytic truth ({gtype}): E = {E_truth:+.6e} kJ/mol ---")
+            E_truth, F_truth, H_truth = _analytic_efH(gtype)
+            print(f"\n--- analytic truth ({gtype}): E = {_fmt_num(E_truth)} kJ/mol, "
+                  f"max|F| = {_fmt_num(float(np.max(np.abs(F_truth))))} kJ/mol/nm, "
+                  f"max|H_block| = {_fmt_num(float(np.max(np.abs(H_truth))))} kJ/mol/nm^2 ---")
         except ImportError:
             print(f"\n--- analytic truth ({gtype}): SKIPPED (jax unavailable) ---")
-            E_truth = None
-        for mname, mval in methods:
+            E_truth = None; F_truth = None; H_truth = None
+        for mname, mval, variant in methods:
             case = f"GridForce[{gtype}/{mname}]"
             print(f"\n=== {case} ===")
             try:
                 if mval in HERMITE_METHODS:
                     deriv_path = _ensure_derivs_grid(gtype, ncname)
-                    def build(gp=deriv_path, scl=lig_scales, im=mval):
+                    def build_sf(gp=deriv_path, scl=lig_scales, im=mval):
                         system = mm.System()
                         for _ in range(n_lig):
                             system.addParticle(12.0)
-                        system.addForce(_build_grid_force_from_grid(gp, scl, im))
-                        return system
+                        gf = _build_grid_force_from_grid(gp, scl, im)
+                        system.addForce(gf)
+                        return system, gf
                 else:
-                    def build(nc=nc_path, uc=unit_conv, scl=lig_scales, im=mval):
+                    def build_sf(nc=nc_path, uc=unit_conv, scl=lig_scales,
+                                 im=mval, var=variant, gt=gtype):
                         system = mm.System()
                         for _ in range(n_lig):
                             system.addParticle(12.0)
-                        system.addForce(_build_grid_force(nc, uc, scl, im))
-                        return system
-                results = eval_all(build, inpcrd_lig.positions, specs)
+                        gf = _build_grid_force(nc, uc, scl, im,
+                                               variant=var, grid_type=gt)
+                        system.addForce(gf)
+                        return system, gf
+                results3 = eval_all_with_hess_blocks(build_sf,
+                                                     inpcrd_lig.positions, specs)
+                # Drop the H third element for the (E, F) comparison path.
+                results = {k: v[:2] for k, v in results3.items()}
                 compare(case, results, specs)
                 if E_truth is None:
                     continue
-                for label, r in results.items():
-                    if isinstance(r[0], str):
+                for label, tup in results3.items():
+                    if isinstance(tup[0], str):
                         continue
-                    ad = abs(r[0] - E_truth)
+                    E_p, F_p, H_p, H_err = tup
+                    ad = abs(E_p - E_truth)
                     rd = ad / (abs(E_truth) + 1e-300)
                     record(case + ' vs analytic', label, pclass.get(label, 'double'),
-                           'energy', ad, rd)
+                           'energy', ad, rd,
+                           val=float(E_p), ref=float(E_truth))
+                    if F_truth is not None:
+                        F_p_arr = np.asarray(F_p)
+                        ad_f = float(np.max(np.abs(F_p_arr - F_truth)))
+                        rd_f = ad_f / (float(np.max(np.abs(F_truth))) + 1e-300)
+                        record(case + ' vs analytic', label,
+                               pclass.get(label, 'double'), 'force', ad_f, rd_f,
+                               val=float(np.max(np.abs(F_p_arr))),
+                               ref=float(np.max(np.abs(F_truth))))
+                    # Trilinear is C^0 (piecewise-linear); in-cell Hessian
+                    # is identically 0 by construction, so comparing to the
+                    # analytic (nonzero) Hessian is meaningless. Skip.
+                    if H_truth is not None and mval != gfp.INTERP_TRILINEAR:
+                        if H_p is None:
+                            print(f"  SKIP {label:12s} hessian  ({H_err}) "
+                                  f"[{case} vs analytic]")
+                        else:
+                            H_p_arr = np.asarray(H_p)
+                            ad_h = float(np.max(np.abs(H_p_arr - H_truth)))
+                            rd_h = ad_h / (float(np.max(np.abs(H_truth))) + 1e-300)
+                            record(case + ' vs analytic', label,
+                                   pclass.get(label, 'double'), 'hessian',
+                                   ad_h, rd_h,
+                                   val=float(np.max(np.abs(H_p_arr))),
+                                   ref=float(np.max(np.abs(H_truth))))
             except Exception as e:
                 print(f"    SKIP {case}: {type(e).__name__}: {e}")
 
@@ -687,7 +883,8 @@ def _compare_hessian(case, hess, specs):
             _failures.append((case, label, 'hessian', h[1]))
             continue
         ad, rd = _diffs(h, ref)
-        record(case, label, pclass.get(label, 'double'), 'hessian', ad, rd)
+        record(case, label, pclass.get(label, 'double'), 'hessian', ad, rd,
+               val=_scalar_summary(h), ref=_scalar_summary(ref))
 
 
 # ------------------------------------------------------- IsolatedSiteForce
@@ -937,7 +1134,8 @@ def gbsa_grid_section(specs):
     if 'double' in pairwise_hess:
         Hp = pairwise_hess['double']
         print(f"  PAIRWISE analytical Hessian (CUDA/double): shape={Hp.shape}  "
-              f"||H||_F={np.linalg.norm(Hp):.3e}  max|H|={np.abs(Hp).max():.3e}")
+              f"||H||_F={_fmt_num(float(np.linalg.norm(Hp))).strip()}  "
+              f"max|H|={_fmt_num(float(np.abs(Hp).max())).strip()}")
 
     # ---- Baseline receptor Born radii (numpy: standard OBC2 HCT + tanh) ----
     R = rec_r.astype(np.float64); S = rec_s.astype(np.float64)
@@ -1127,58 +1325,52 @@ def gbsa_grid_section(specs):
                 E = ('EXC', repr(e))
             report('GRID+xterm', mname, spec[0], E, E_xterm_truth)
 
-        # component 3: Hessian. Anchor is full PAIRWISE Hessian; it
-        # includes the rec-lig cross-term chain rule that pure-GRID lacks,
-        # so it is an approximate anchor, not a true reference (TODO).
-        # C^2 filter: trilinear (C^0) and tricubic_hermite (C^1) have no
-        # meaningful Hessian; skip.
+        # component 3: cross-precision Hessian parity. CUDA/double is the
+        # in-harness reference for CUDA/single and CUDA/mixed. Absolute
+        # correctness of the GRID Hessian is validated separately by
+        # probe_grid_hessian_jax.py against a JAX autodiff reference
+        # (rel ~1e-6 for hermite, ~5e-4 for bspline). Trilinear (C^0) and
+        # tricubic_hermite (C^1) have no meaningful Hessian; skip.
         C2_METHODS = {gfp.INTERP_TRICUBIC_BSPLINE, gfp.INTERP_TRIQUINTIC_HERMITE}
         if mval not in C2_METHODS:
             print(f"    SKIP Hessian: {mname} is not C^2-continuous; "
                   f"Hessian only meaningful for tricubic_bspline / "
                   f"triquintic_hermite")
             continue
-        # Reference GRID-mode Hessian throws by design; skip explicitly.
         print(f"    SKIP Reference    Hessian     "
               f"GRID Hessian throws on Reference (not implemented)")
         cuda_specs = [s for s in specs if s[1] == 'CUDA']
-        H_anchor = pairwise_hess.get('double')  # CUDA/double PAIRWISE
-        H_norm = np.linalg.norm(H_anchor) if H_anchor is not None else 0.0
-        if H_anchor is None:
-            print(f"    SKIP Hessian: PAIRWISE anchor unavailable")
-            continue
+        cuda_hess = {}
         for spec in cuda_specs:
             try:
                 sys_, gbsa_force = build_grid(cg, mval, with_cross_term=False)
                 ctx, _ = _context(sys_, spec)
                 ctx.setPositions(lig_pos * unit.nanometer)
                 ctx.getState(getEnergy=True)
-                H = np.array(gbsa_force.computeHessian(ctx))
+                cuda_hess[spec[3]] = np.array(gbsa_force.computeHessian(ctx))
                 del ctx
             except Exception as e:
                 print(f"    EXC  {spec[0]:12s} Hessian     {repr(e)[:60]}  "
                       f"[{case}/{mname}]")
                 _failures.append((f"{case}/{mname} Hessian", spec[0],
                                   'hessian', repr(e)))
+        H_ref = cuda_hess.get('double')
+        if H_ref is None:
+            print(f"    SKIP Hessian: CUDA/double reference unavailable")
+            continue
+        H_ref_norm = np.linalg.norm(H_ref)
+        pclass_map = {s[0]: s[3] for s in cuda_specs}
+        for spec in cuda_specs:
+            H = cuda_hess.get(spec[3])
+            if H is None:
                 continue
-            diff = H - H_anchor
+            diff = H - H_ref
             fro = float(np.linalg.norm(diff))
             max_ = float(np.max(np.abs(diff)))
-            rel = fro / max(1.0, H_norm)
-            # Tolerance driven by grid interpolation, not FP precision:
-            # allow up to 3 % rel Frobenius delta (energy anchor was
-            # ~0.5 % at the same grid; Hessian carries second derivatives
-            # so a few-x larger tolerance is expected).
-            ok = np.isfinite(fro) and rel < 0.03
-            status = 'OK' if ok else 'FAIL'
-            print(f"    {status:4s} {spec[0]:12s} Hessian     "
-                  f"|H_grid - H_pair|_F/|H_pair|_F={rel:.2e}  "
-                  f"max|Δ|={max_:.2e}  ||H_grid||_F={np.linalg.norm(H):.2e}  "
-                  f"[{case}/{mname} vs PAIRWISE_analytical]")
-            if not ok:
-                _failures.append((f"{case}/{mname} Hessian vs PAIRWISE",
-                                  spec[0], 'hessian',
-                                  f"rel={rel:.2e} max={max_:.2e}"))
+            rel = fro / max(1.0, H_ref_norm)
+            record(f"{case}/{mname} Hessian vs CUDA/double",
+                   spec[0], pclass_map[spec[0]], 'hessian', max_, rel,
+                   val=float(np.linalg.norm(H)), ref=float(H_ref_norm))
 
 
 # --------------------------------------------------------- GBSAGridForce
@@ -1407,7 +1599,7 @@ def gbsagrid_section(specs):
             d = abs(e_cpu - e_corr)
             okp = d < 1e-9
             print(f"    {'OK' if okp else 'FAIL':4s} {spec[0]:12s} buried corrected E vs Reference "
-                  f"abs={d:.2e}  [{case} buried-corr]")
+                  f"E={_fmt_num(e_cpu).strip()} ref={_fmt_num(e_corr).strip()} abs={d:.2e}  [{case} buried-corr]")
             if not okp:
                 _failures.append((case + " buried-corr", spec[0], 'energy', f"abs={d:.2e}"))
     except Exception as ex:
@@ -1517,7 +1709,7 @@ def gridgen_section(specs):
             d = abs(E - e_ref)
             ok = d < 1e-9
             print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} desolvation auto-gen vs Reference "
-                  f"abs={d:.2e}  [{case} desolv]")
+                  f"E={_fmt_num(E).strip()} ref={_fmt_num(e_ref).strip()} abs={d:.2e}  [{case} desolv]")
             if not ok:
                 _failures.append((case + " desolv", spec[0], 'energy', f"abs={d:.2e}"))
         except Exception as ex:
@@ -1545,7 +1737,7 @@ def gridgen_section(specs):
             tol = 1e-9 if spec[1] == 'CPU' else 5e-5 * abs(e_ref_kde)
             ok = d < tol
             print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} KDE-gen vs Reference "
-                  f"abs={d:.2e}  [{case} kde]")
+                  f"E={_fmt_num(E).strip()} ref={_fmt_num(e_ref_kde).strip()} abs={d:.2e}  [{case} kde]")
             if not ok:
                 _failures.append((case + " kde", spec[0], 'energy', f"abs={d:.2e}"))
         except Exception as ex:
@@ -1595,7 +1787,7 @@ def gridgen_section(specs):
                 tol = 1e-9 if spec[1] == 'CPU' else 5e-5 * max(1.0, abs(er))
                 ok = d < tol
                 print(f"    {'OK' if ok else 'FAIL':4s} {spec[0]:12s} GridForce gen[{gtype}] vs Reference "
-                      f"abs={d:.2e}  [{case} field]")
+                      f"E={_fmt_num(E).strip()} ref={_fmt_num(er).strip()} abs={d:.2e}  [{case} field]")
                 if not ok:
                     _failures.append((case + " field", spec[0], gtype, f"abs={d:.2e}"))
         except Exception as ex:

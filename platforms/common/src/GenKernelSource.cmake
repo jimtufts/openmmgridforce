@@ -9,5 +9,13 @@ FILE(APPEND "${OUTPUT_FILE}" "const char* gridForceSource = R\"__kernel(\n")
 FILE(APPEND "${OUTPUT_FILE}" "${GRID_FORCE_SOURCE}")
 FILE(APPEND "${OUTPUT_FILE}" ")__kernel\";\n\n")
 
+# Read and embed the pluginCompatMinimize.cc kernel source (verbatim copy
+# of OpenMM's platforms/common/src/kernels/minimize.cc plus a pre-sm_60
+# software fallback for atomicAdd(double*)).
+FILE(READ "${INPUT_DIR}/pluginCompatMinimize.cc" PLUGIN_COMPAT_MIN_SOURCE)
+FILE(APPEND "${OUTPUT_FILE}" "const char* pluginCompatMinimizeSource = R\"__kernel(\n")
+FILE(APPEND "${OUTPUT_FILE}" "${PLUGIN_COMPAT_MIN_SOURCE}")
+FILE(APPEND "${OUTPUT_FILE}" ")__kernel\";\n\n")
+
 FILE(APPEND "${OUTPUT_FILE}" "}\n")
 FILE(APPEND "${OUTPUT_FILE}" "}\n")

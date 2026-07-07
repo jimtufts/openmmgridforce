@@ -128,8 +128,6 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
             int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
             int binIdx = binOffset / numPoints;
             corrOffset = binIdx * 27 * numPoints;  // Values are at deriv=0
-        } else if (useKDECorrections) {
-            corrOffset = 0;
         } else {
             corrOffset = binOffset;
         }
@@ -357,20 +355,14 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
     if (method == 0) {
         // Trilinear interpolation (default, optimized version)
         // Compute correction offset based on format:
-        // - Pure KDE [27*numPoints]: offset=0
         // - Binned [numBins*numPoints]: offset=binOffset
         // - Binned+KDE [numBins*27*numPoints]: offset=binIdx*27*numPoints (values at deriv=0)
         int corrOffset;
         if (hasBinnedKDEDerivatives) {
-            // Binned+KDE: binOffset was computed as binIdx*numPoints, need binIdx*27*numPoints
             int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
             int binIdx = binOffset / numPoints;
-            corrOffset = binIdx * 27 * numPoints;  // Values are at deriv=0
-        } else if (useKDECorrections) {
-            // Pure KDE: no binning
-            corrOffset = 0;
+            corrOffset = binIdx * 27 * numPoints;
         } else {
-            // Standard binned: use binOffset directly
             corrOffset = binOffset;
         }
 
@@ -577,8 +569,6 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
             int numPoints = gridCounts[0] * nyz;
             int binIdx = binOffset / numPoints;
             corrOffset = binIdx * 27 * numPoints;
-        } else if (useKDECorrections) {
-            corrOffset = 0;
         } else {
             corrOffset = binOffset;
         }
@@ -938,8 +928,6 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
             int numPoints = gridCounts[0] * nyz;
             int binIdx = binOffset / numPoints;
             corrOffset = binIdx * 27 * numPoints;
-        } else if (useKDECorrections) {
-            corrOffset = 0;
         } else {
             corrOffset = binOffset;
         }

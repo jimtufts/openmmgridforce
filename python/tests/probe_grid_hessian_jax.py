@@ -135,18 +135,12 @@ _corrA = np.asarray(grid_wd.getCorrectionA(), dtype=np.float64)
 _corrB = np.asarray(grid_wd.getCorrectionB(), dtype=np.float64)
 _numPoints = nx * ny * nz
 _numBins = len(R_THRESHOLDS)
-# Layout classification mirrors CudaGBSAGridForceKernels.cpp:250-320.
 if _corrN.size == _numBins * 27 * _numPoints:
-    corr_mode = "binned_kde"                 # method=3 KDE path with bins
+    corr_mode = "binned_kde"
     shape5 = (_numBins, 27, nx, ny, nz)
     corrN_bkde = _corrN.reshape(shape5)
     corrA_bkde = _corrA.reshape(shape5)
     corrB_bkde = _corrB.reshape(shape5)
-elif _corrN.size == 27 * _numPoints:
-    corr_mode = "pure_kde"                   # method=3 KDE path, no bins
-    corrN_wd = _reshape_grid(_corrN, 27, nx, ny, nz)
-    corrA_wd = _reshape_grid(_corrA, 27, nx, ny, nz)
-    corrB_wd = _reshape_grid(_corrB, 27, nx, ny, nz)
 else:
     corr_mode = "trilinear"
     numBins_g = _corrN.size // _numPoints
@@ -161,10 +155,6 @@ if corr_mode == "binned_kde":
     corrN_bkde_j = jnp.array(corrN_bkde)
     corrA_bkde_j = jnp.array(corrA_bkde)
     corrB_bkde_j = jnp.array(corrB_bkde)
-elif corr_mode == "pure_kde":
-    corrN_wd_j = jnp.array(corrN_wd)
-    corrA_wd_j = jnp.array(corrA_wd)
-    corrB_wd_j = jnp.array(corrB_wd)
 else:
     corrN_tl_j = jnp.array(corrN_tl)
     corrA_tl_j = jnp.array(corrA_tl)
@@ -259,16 +249,6 @@ def grid_hct_triquintic(pos, R_i_off):
         X_N = _corner_stencil(corrN_bkde_j[binIdx], ix, iy, iz)
         X_A = _corner_stencil(corrA_bkde_j[binIdx], ix, iy, iz)
         X_B = _corner_stencil(corrB_bkde_j[binIdx], ix, iy, iz)
-        a_N = 0.125 * (TQM_j @ X_N)
-        a_A = 0.125 * (TQM_j @ X_A)
-        a_B = 0.125 * (TQM_j @ X_B)
-        corr_val = (dCorr_dN * _poly_value(a_N, ffx, ffy, ffz) +
-                    dCorr_dA * _poly_value(a_A, ffx, ffy, ffz) +
-                    dCorr_dB * _poly_value(a_B, ffx, ffy, ffz))
-    elif corr_mode == "pure_kde":
-        X_N = _corner_stencil(corrN_wd_j, ix, iy, iz)
-        X_A = _corner_stencil(corrA_wd_j, ix, iy, iz)
-        X_B = _corner_stencil(corrB_wd_j, ix, iy, iz)
         a_N = 0.125 * (TQM_j @ X_N)
         a_A = 0.125 * (TQM_j @ X_A)
         a_B = 0.125 * (TQM_j @ X_B)

@@ -12,6 +12,8 @@
 #include "CudaMultiGroupNUTSKernels.h"
 #include "MultiGroupHMCKernels.h"
 #include "MultiGroupNUTSKernels.h"
+#include "PluginCompatMinimizeKernel.h"
+#include "openmm/kernels.h"
 #include "GridForce.h"
 #include "IsolatedNonbondedForce.h"
 #include "IsolatedBondedForce.h"
@@ -39,6 +41,11 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
         platform.registerKernelFactory(CalcIsolatedSiteForceKernel::Name(), factory);
         platform.registerKernelFactory(IntegrateMultiGroupHMCStepKernel::Name(), factory);
         platform.registerKernelFactory(IntegrateMultiGroupNUTSStepKernel::Name(), factory);
+        // Replace stock CUDA MinimizeKernel factory with our compat version
+        // (byte-identical on sm >= 60; carries a software atomicAdd(double*)
+        // fallback for pre-Pascal). openmm.LocalEnergyMinimizer.minimize()
+        // automatically routes through this whenever the plugin is loaded.
+        platform.registerKernelFactory(MinimizeKernel::Name(), factory);
     }
     catch (...) {
     }
@@ -67,5 +74,7 @@ KernelImpl* CudaGridForceKernelFactory::createKernelImpl(std::string name, const
         return new CudaIntegrateMultiGroupHMCStepKernel(name, platform, cu);
     if (name == IntegrateMultiGroupNUTSStepKernel::Name())
         return new CudaIntegrateMultiGroupNUTSStepKernel(name, platform, cu);
+    if (name == MinimizeKernel::Name())
+        return new PluginCompatMinimizeKernel(name, platform, cu);
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

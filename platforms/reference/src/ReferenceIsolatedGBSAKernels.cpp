@@ -8,6 +8,7 @@
 
 #include "ReferenceIsolatedGBSAKernels.h"
 #include "ReferenceGridInterpolation.h"
+#include "ReferenceDesolvationInterp.h"
 #include "openmm/OpenMMException.h"
 #include "openmm/internal/ContextImpl.h"
 
@@ -325,112 +326,17 @@ void ReferenceCalcIsolatedGBSAForceKernel::computeGroup(
         vector<double> hctReceptor(numAtoms, 0.0);
 
         if (receptorMode == IsolatedGBSAForce::GRID) {
-            // Grid-based receptor HCT. The Reference kernel used to hard-code
-            // a 2x2x2 (trilinear) stencil regardless of interpolationMethod,
-            // silently masking bspline/hermite requests. Dispatch explicitly:
-            // method 0 is implemented; methods 1/2/3 throw with a clear
-            // message until their full Reference implementations land
-            // (basis + tensor-product Hermite assembly).
-            if (interpolationMethod != 0) {
-                throw OpenMMException(
-                    "IsolatedGBSAForce: interpolationMethod > 0 is not "
-                    "implemented on the Reference platform for GRID-mode "
-                    "receptor descreening. Use method=0 (trilinear) here, "
-                    "or run on CUDA where higher-order methods are supported.");
-            }
-            double ox, oy, oz;
-            desolvationGrid->getOrigin(ox, oy, oz);
-            double spacing = desolvationGrid->getSpacing();
             double probeRadius = desolvationGrid->getProbeRadius();
-            int nx, ny, nz;
-            desolvationGrid->getCounts(nx, ny, nz);
-            int numBins = desolvationGrid->getNumBins();
-
-            const auto& hctProbeData = desolvationGrid->getHctProbe();
-            const auto& corrN = desolvationGrid->getCorrectionN();
-            const auto& corrA = desolvationGrid->getCorrectionA();
-            const auto& corrB = desolvationGrid->getCorrectionB();
-            const auto& rThresholds = desolvationGrid->getRThresholds();
-
-            int nyz = ny * nz;
-            int numPoints = nx * ny * nz;
-
             for (int i = 0; i < numAtoms; i++) {
                 int pi = particles[i];
-                double x = posData[pi][0];
-                double y = posData[pi][1];
-                double z = posData[pi][2];
-
-                // Fractional grid coordinates
-                double fx = (x - ox) / spacing;
-                double fy = (y - oy) / spacing;
-                double fz = (z - oz) / spacing;
-
-                int ix = (int)floor(fx);
-                int iy = (int)floor(fy);
-                int iz = (int)floor(fz);
-
-                // Bounds check
-                if (ix < 0 || ix >= nx - 1 || iy < 0 || iy >= ny - 1 ||
-                    iz < 0 || iz >= nz - 1) {
-                    hctReceptor[i] = 0.0;
-                    continue;
-                }
-
-                double wx = fx - ix;
-                double wy = fy - iy;
-                double wz = fz - iz;
-
-                // Trilinear interpolation of HCT_probe
-                double hctProbe = 0.0;
-                for (int di = 0; di < 2; di++) {
-                    double wi = (di == 0) ? (1.0 - wx) : wx;
-                    for (int dj = 0; dj < 2; dj++) {
-                        double wj = (dj == 0) ? (1.0 - wy) : wy;
-                        for (int dk = 0; dk < 2; dk++) {
-                            double wk = (dk == 0) ? (1.0 - wz) : wz;
-                            int idx = (ix + di) * nyz + (iy + dj) * nz + (iz + dk);
-                            hctProbe += wi * wj * wk * hctProbeData[idx];
-                        }
-                    }
-                }
-
-                // Determine radius bin for this atom
                 double R_i_off = radii[i] - DIELECTRIC_OFFSET;
-                int bin = numBins - 1;
-                for (int b = 0; b < numBins; b++) {
-                    if (R_i_off <= rThresholds[b]) {
-                        bin = b;
-                        break;
-                    }
-                }
-
-                // Trilinear interpolation of correction terms
-                double interpN = 0.0, interpA = 0.0, interpB = 0.0;
-                for (int di = 0; di < 2; di++) {
-                    double wi = (di == 0) ? (1.0 - wx) : wx;
-                    for (int dj = 0; dj < 2; dj++) {
-                        double wj = (dj == 0) ? (1.0 - wy) : wy;
-                        for (int dk = 0; dk < 2; dk++) {
-                            double wk = (dk == 0) ? (1.0 - wz) : wz;
-                            int idx = (ix + di) * nyz + (iy + dj) * nz + (iz + dk);
-                            int offset = bin * numPoints + idx;
-                            interpN += wi * wj * wk * corrN[offset];
-                            interpA += wi * wj * wk * corrA[offset];
-                            interpB += wi * wj * wk * corrB[offset];
-                        }
-                    }
-                }
-
-                // Apply radius correction
-                double R_probe_off = probeRadius - DIELECTRIC_OFFSET;
-                double invRi = (R_i_off > 0.0) ? 1.0 / R_i_off : 0.0;
-                double invRp = (R_probe_off > 0.0) ? 1.0 / R_probe_off : 0.0;
-                double correction = (invRi - invRp)
-                                    * (interpN - 0.25 * interpA * (invRi + invRp))
-                                    + interpB * log(R_i_off / R_probe_off);
-
-                hctReceptor[i] = hctProbe + correction;
+                double gx, gy, gz;
+                bool oob = false;
+                hctReceptor[i] = interpolateDesolvationGridHCT(
+                    desolvationGrid.get(),
+                    posData[pi][0], posData[pi][1], posData[pi][2],
+                    R_i_off, interpolationMethod, probeRadius,
+                    false, gx, gy, gz, nullptr, &oob);
             }
 
         } else if (receptorMode == IsolatedGBSAForce::PAIRWISE) {

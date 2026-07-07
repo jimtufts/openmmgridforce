@@ -237,15 +237,10 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         // Detect correction grid mode by size (same logic as GBSAGridForce)
         const auto& corrNData = grid->getCorrectionN();
         size_t expectedBinnedKDESize = static_cast<size_t>(numBins) * 27 * numPoints;
-        size_t expectedKDESize = static_cast<size_t>(27) * numPoints;
-        size_t expectedBinnedSize = static_cast<size_t>(numBins) * numPoints;
 
         if (corrNData.size() == expectedBinnedKDESize) {
             useKDECorrections = true;
             hasBinnedKDEDerivatives = true;
-        } else if (corrNData.size() == expectedKDESize) {
-            useKDECorrections = true;
-            hasBinnedKDEDerivatives = false;
         } else {
             useKDECorrections = false;
             hasBinnedKDEDerivatives = false;

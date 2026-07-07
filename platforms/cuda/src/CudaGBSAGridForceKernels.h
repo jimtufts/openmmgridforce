@@ -98,9 +98,9 @@ private:
     // - useKDECorrections: True when using high-order interpolation for corrections
     // - hasBinnedKDEDerivatives: True when corrections are binned with 27 derivs per bin
     //   Layout: [bin * 27 * numPoints + deriv * numPoints + point]
-    //   When false but useKDECorrections=true: pure KDE format [27 * numPoints] (deprecated)
+    // Since pure-KDE was removed, useKDECorrections implies hasBinnedKDEDerivatives.
     bool useKDECorrections;
-    bool hasBinnedKDEDerivatives;  // New: binned corrections with derivatives
+    bool hasBinnedKDEDerivatives;
 
     // Device arrays - grid data
     OpenMM::CudaArray gridCounts;
