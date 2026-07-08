@@ -105,28 +105,6 @@ void BondedHessian::initialize(const System& system, Context& context) {
         }
     }
 
-    // Warn if the System has plugin IsolatedBondedForce but no stock bonded
-    // forces.  BondedHessian only reads stock Harmonic* / PeriodicTorsionForce;
-    // silently returning a zero-filled H when the caller expected the plugin's
-    // bonded terms was the root cause of previous minimizer stalls.
-    if (impl->numBonds == 0 && impl->numAngles == 0) {
-        bool hasIsolatedBonded = false;
-        for (int i = 0; i < system.getNumForces(); i++) {
-            if (dynamic_cast<const IsolatedBondedForce*>(&system.getForce(i)) != nullptr) {
-                hasIsolatedBonded = true;
-                break;
-            }
-        }
-        if (hasIsolatedBonded) {
-            std::fprintf(stderr,
-                "[BondedHessian] WARNING: System has IsolatedBondedForce but "
-                "no stock HarmonicBondForce/HarmonicAngleForce/"
-                "PeriodicTorsionForce.  BondedHessian only reads stock "
-                "forces; call IsolatedBondedForce::computeHessian(ctx, "
-                "groupIndex) directly (per K-group) instead.\n");
-        }
-    }
-
     // Extract PeriodicTorsionForce parameters
     for (int i = 0; i < system.getNumForces(); i++) {
         const PeriodicTorsionForce* torsionForce = dynamic_cast<const PeriodicTorsionForce*>(&system.getForce(i));

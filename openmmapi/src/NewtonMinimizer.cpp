@@ -46,6 +46,9 @@
 #include "IsolatedBondedForce.h"
 #include "IsolatedGBSAForce.h"
 #include "IsolatedNonbondedForce.h"
+#include "openmm/HarmonicAngleForce.h"
+#include "openmm/HarmonicBondForce.h"
+#include "openmm/PeriodicTorsionForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
 #include <cmath>
@@ -559,19 +562,22 @@ void NewtonMinimizer::solveDamped(const vector<double>& H, const vector<double>&
 }
 
 bool NewtonMinimizer::minimizeBondedOnly(Context& context, double tolerance, int maxIterations) {
-    // Initialize BondedHessian for stock OpenMM Harmonic* forces.
-    BondedHessian hessianCalc;
-    hessianCalc.initialize(context.getSystem(), context);
-
-    // Also pick up plugin's IsolatedBondedForce (bonded terms live there when
-    // the system was built with K-replica containers).
+    // Discover bonded sources.  BondedHessian reads stock OpenMM forces;
+    // IsolatedBondedForce holds the plugin's K-replica bonded terms.
     const System& sys = context.getSystem();
     vector<IsolatedBondedForce*> isoBondedForces;
+    bool hasStockBonded = false;
     for (int i = 0; i < sys.getNumForces(); i++) {
         Force& force = const_cast<Force&>(sys.getForce(i));
         if (auto* ibf = dynamic_cast<IsolatedBondedForce*>(&force))
             isoBondedForces.push_back(ibf);
+        if (dynamic_cast<const HarmonicBondForce*>(&force)   != nullptr ||
+            dynamic_cast<const HarmonicAngleForce*>(&force)  != nullptr ||
+            dynamic_cast<const PeriodicTorsionForce*>(&force) != nullptr)
+            hasStockBonded = true;
     }
+    BondedHessian hessianCalc;
+    if (hasStockBonded) hessianCalc.initialize(sys, context);
 
     int numAtoms = sys.getNumParticles();
     int n = 3 * numAtoms;
@@ -600,7 +606,9 @@ bool NewtonMinimizer::minimizeBondedOnly(Context& context, double tolerance, int
         }
 
         // Compute Hessian (stock + isolated bonded)
-        vector<double> H = hessianCalc.computeHessian(context);
+        vector<double> H = hasStockBonded
+            ? hessianCalc.computeHessian(context)
+            : vector<double>(n * n, 0.0);
         for (IsolatedBondedForce* ibf : isoBondedForces) {
             vector<double> iH = ibf->computeHessian(context, 0);
             if (iH.size() == H.size())
@@ -670,13 +678,12 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
     // Discover force types providing Hessians.  Systems built with either
     // (a) stock OpenMM HarmonicBond/Angle/Torsion, or (b) plugin
     // IsolatedBondedForce need different bonded-Hessian dispatch.
-    BondedHessian bondedHessian;
-    bondedHessian.initialize(system, context);
     vector<IsolatedBondedForce*> isoBondedForces;
     vector<GridForce*> gridForces;
     vector<IsolatedNonbondedForce*> isoNBForces;
     vector<IsolatedGBSAForce*> isoGBSAForces;
     vector<GBSAGridForce*> gbsaForces;
+    bool hasStockBonded = false;
     for (int i = 0; i < system.getNumForces(); i++) {
         Force& force = const_cast<Force&>(system.getForce(i));
         if (auto* ibf = dynamic_cast<IsolatedBondedForce*>(&force)) isoBondedForces.push_back(ibf);
@@ -684,7 +691,15 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
         if (auto* inb = dynamic_cast<IsolatedNonbondedForce*>(&force)) isoNBForces.push_back(inb);
         if (auto* igbsa = dynamic_cast<IsolatedGBSAForce*>(&force)) isoGBSAForces.push_back(igbsa);
         if (auto* gbsa = dynamic_cast<GBSAGridForce*>(&force)) gbsaForces.push_back(gbsa);
+        if (dynamic_cast<const HarmonicBondForce*>(&force)   != nullptr ||
+            dynamic_cast<const HarmonicAngleForce*>(&force)  != nullptr ||
+            dynamic_cast<const PeriodicTorsionForce*>(&force) != nullptr)
+            hasStockBonded = true;
     }
+    // BondedHessian only reads stock Harmonic*/PeriodicTorsion; skip its
+    // (guaranteed-zero) call entirely when the System has none.
+    BondedHessian bondedHessian;
+    if (hasStockBonded) bondedHessian.initialize(system, context);
 
     // Discover K (number of particle groups) from the first isolated force that
     // has groups.  In K-replica systems, IsolatedBondedForce / IsolatedNonbonded
@@ -903,7 +918,9 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
 
         // ---- Assemble full analytical Hessian for this outer step ----
         // The assembled H is (3*K*N) x (3*K*N) in System-particle ordering.
-        vector<double> H = bondedHessian.computeHessian(context);
+        vector<double> H = hasStockBonded
+            ? bondedHessian.computeHessian(context)
+            : vector<double>(n * n, 0.0);
         // Bonded and intra-group nonbonded Hessians come out per-group in
         // template-atom ordering (3N x 3N).  Scatter each into the full
         // matrix at the rows/cols given by that group's System particle

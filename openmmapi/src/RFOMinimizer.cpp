@@ -5,6 +5,9 @@
 #include "IsolatedBondedForce.h"
 #include "IsolatedGBSAForce.h"
 #include "IsolatedNonbondedForce.h"
+#include "openmm/HarmonicAngleForce.h"
+#include "openmm/HarmonicBondForce.h"
+#include "openmm/PeriodicTorsionForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
 #include <algorithm>
@@ -116,14 +119,12 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
     int numAtoms = system.getNumParticles();
     int n = 3 * numAtoms;
 
-    BondedHessian bondedHessian;
-    bondedHessian.initialize(system, context);
-
     vector<IsolatedBondedForce*> isoBondedForces;
     vector<GridForce*> gridForces;
     vector<IsolatedNonbondedForce*> isoNBForces;
     vector<IsolatedGBSAForce*> isoGBSAForces;
     vector<GBSAGridForce*> gbsaForces;
+    bool hasStockBonded = false;
     for (int i = 0; i < system.getNumForces(); i++) {
         Force& force = const_cast<Force&>(system.getForce(i));
         if (auto ibf = dynamic_cast<IsolatedBondedForce*>(&force)) isoBondedForces.push_back(ibf);
@@ -131,7 +132,13 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
         if (auto inb = dynamic_cast<IsolatedNonbondedForce*>(&force)) isoNBForces.push_back(inb);
         if (auto igbsa = dynamic_cast<IsolatedGBSAForce*>(&force)) isoGBSAForces.push_back(igbsa);
         if (auto gbsa = dynamic_cast<GBSAGridForce*>(&force)) gbsaForces.push_back(gbsa);
+        if (dynamic_cast<const HarmonicBondForce*>(&force)   != nullptr ||
+            dynamic_cast<const HarmonicAngleForce*>(&force)  != nullptr ||
+            dynamic_cast<const PeriodicTorsionForce*>(&force) != nullptr)
+            hasStockBonded = true;
     }
+    BondedHessian bondedHessian;
+    if (hasStockBonded) bondedHessian.initialize(system, context);
 
     // K-group discovery + per-group System particle indices (same pattern
     // as NewtonMinimizer::minimize).
@@ -185,7 +192,9 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
         lastRMSForce = sqrt(sum / gradient.size());
         if (lastRMSForce < tolerance) return true;
 
-        vector<double> H = bondedHessian.computeHessian(context);
+        vector<double> H = hasStockBonded
+            ? bondedHessian.computeHessian(context)
+            : vector<double>(n * n, 0.0);
         for (IsolatedBondedForce* ibf : isoBondedForces) {
             for (int g = 0; g < K; g++)
                 scatterBlock(H, ibf->computeHessian(context, g), g);
