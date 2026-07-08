@@ -63,6 +63,17 @@ TOL_ANALYTIC = {
     'tricubic_bspline_naked':   dict(rel_e=1e-2, abs_e=1e-2,
                                      rel_f=5e-2, abs_f=1.0,
                                      rel_h=2e-1, abs_h=1e2),
+    # 'loadfile' variant: build in-memory grid with arcsinh + prefilter,
+    # save to disk, reload, evaluate.  Same envelope as arcsinh; guards
+    # the save/load roundtrip of already-arcsinh-transformed grid
+    # coefficients (the setValuesPreTransformed-false double-apply bug
+    # regression).
+    'tricubic_bspline_loadfile': dict(rel_e=1e-2, abs_e=1e-2,
+                                       rel_f=5e-2, abs_f=1.0,
+                                       rel_h=2e-1, abs_h=1e2),
+    'triquintic_bspline_loadfile': dict(rel_e=5e-3, abs_e=1e-2,
+                                         rel_f=2e-2, abs_f=1.0,
+                                         rel_h=1e-1, abs_h=1e2),
     'tricubic_hermite':   dict(rel_e=1e-2, abs_e=1e-2,
                                rel_f=5e-2, abs_f=1.0,
                                rel_h=2e-1, abs_h=1e2),
@@ -112,6 +123,15 @@ OPEN_GAPS = {
     # inv_power on Reference/CPU too.
     ('GridForce[ele/tricubic_bspline_naked]', 'Reference', 'reference'),
     ('GridForce[lja/tricubic_bspline_naked]', 'Reference', 'reference'),
+    # loadfile variant: builds via CUDA, saves, reloads, then evaluates
+    # on the target platform.  Same Reference-side arcsinh gap as the
+    # in-memory arcsinh path.
+    ('GridForce[ele/tricubic_bspline_loadfile]', 'Reference', 'reference'),
+    ('GridForce[lja/tricubic_bspline_loadfile]', 'Reference', 'reference'),
+    ('GridForce[ljr/tricubic_bspline_loadfile]', 'Reference', 'reference'),
+    ('GridForce[ele/triquintic_bspline_loadfile]', 'Reference', 'reference'),
+    ('GridForce[lja/triquintic_bspline_loadfile]', 'Reference', 'reference'),
+    ('GridForce[ljr/triquintic_bspline_loadfile]', 'Reference', 'reference'),
     ('GridForce[ljr/tricubic_bspline_naked]', 'Reference', 'reference'),
     ('GridForce[lja/tricubic_bspline_naked]', 'CPU', 'reference'),
     ('GridForce[ljr/tricubic_bspline_naked]', 'CPU', 'reference'),
@@ -427,6 +447,8 @@ def grid_section(specs):
     # (Coulomb-scale values already smooth, negative p corrupts near zero).
     NAKED_INV_POWER = {'ljr': 12.0, 'lja': 6.0, 'ele': None}
 
+    _loadfile_tmpdir = [None]
+
     def _build_grid_force(nc_file, unit_conv, lig_scales, interp_method,
                           variant='arcsinh', grid_type=None):
         d = _grid_read(nc_file)
@@ -444,7 +466,7 @@ def grid_section(specs):
         order = BSPLINE_PREFILTER_ORDER.get(interp_method, 0)
         if order:
             f.setBSplinePrefilterOrder(order)
-            if variant == 'arcsinh' and BSPLINE_ARCSINH_SCALE > 0.0:
+            if variant in ('arcsinh', 'arcsinh_loadfile') and BSPLINE_ARCSINH_SCALE > 0.0:
                 f.setArcsinhScale(BSPLINE_ARCSINH_SCALE)
             elif variant == 'naked':
                 inv_p = NAKED_INV_POWER.get(grid_type)
@@ -453,7 +475,73 @@ def grid_section(specs):
             if BSPLINE_BLUR_PHYS_NM > 0.0:
                 sigma_cells = BSPLINE_BLUR_PHYS_NM / float(sp.mean())
                 f.setGaussianBlurSigma(sigma_cells)
+        if variant == 'arcsinh_loadfile':
+            # Round-trip through disk so the reloaded force reads already-
+            # arcsinh-transformed, prefiltered coefficients.  Catches any
+            # regression that re-introduces a values-pre-transformed reset
+            # after loadFromFile (the fed027b double-apply bug).  Grid
+            # generation is done once via CUDA and cached so the file can
+            # be replayed on any platform under test.
+            saved_path = _ensure_arcsinh_grid(grid_type, nc_file, unit_conv,
+                                              interp_method, order)
+            reloaded = gfp.GridForce()
+            reloaded.loadFromFile(saved_path)
+            for s in lig_scales:
+                reloaded.addScalingFactor(float(s))
+            reloaded.setInterpolationMethod(interp_method)
+            if order:
+                reloaded.setBSplinePrefilterOrder(order)
+                if BSPLINE_ARCSINH_SCALE > 0.0:
+                    reloaded.setArcsinhScale(BSPLINE_ARCSINH_SCALE)
+            return reloaded
         return f
+
+    _arcsinh_cache = {}
+    def _ensure_arcsinh_grid(grid_type, nc_file, unit_conv, interp_method,
+                              order):
+        """Build a fresh arcsinh+prefiltered GridForce via CUDA and persist
+        it to disk once per (grid_type, interp_method).  Returns the path
+        so callers can loadFromFile onto any platform."""
+        key = (grid_type, interp_method)
+        if key in _arcsinh_cache:
+            return _arcsinh_cache[key]
+        if _loadfile_tmpdir[0] is None:
+            _loadfile_tmpdir[0] = tempfile.mkdtemp(prefix='parity_loadfile_')
+            atexit.register(lambda: shutil.rmtree(_loadfile_tmpdir[0],
+                                                 ignore_errors=True))
+        try:
+            cuda_plat = mm.Platform.getPlatformByName('CUDA')
+        except Exception as e:
+            raise RuntimeError(
+                f"arcsinh loadfile variant needs CUDA to build the grid: {e}")
+        d = _grid_read(nc_file)
+        f = gfp.GridForce()
+        nx, ny, nz = (int(v) for v in d['counts'])
+        f.addGridCounts(nx, ny, nz)
+        sp = d['spacing'] * 0.1
+        f.addGridSpacing(*[float(s) for s in sp])
+        f.setGridOrigin(*[float(o) for o in (d['origin'] * 0.1)])
+        for v in (d['vals'] * unit_conv):
+            f.addGridValue(float(v))
+        f.addScalingFactor(1.0)   # placeholder; harness re-adds real ones after load
+        f.setInterpolationMethod(interp_method)
+        if order:
+            f.setBSplinePrefilterOrder(order)
+            if BSPLINE_ARCSINH_SCALE > 0.0:
+                f.setArcsinhScale(BSPLINE_ARCSINH_SCALE)
+        system = mm.System()
+        system.addParticle(12.0)
+        system.addForce(f)
+        integ = mm.VerletIntegrator(0.001)
+        ctx = mm.Context(system, integ, cuda_plat)
+        ctx.setPositions([[0.0, 0.0, 0.0]] * unit.nanometer)
+        ctx.getState(getEnergy=True)
+        out_path = os.path.join(_loadfile_tmpdir[0],
+                                f'{grid_type}_{interp_method}.grid')
+        f.saveToFile(out_path)
+        del ctx, integ, system, f
+        _arcsinh_cache[key] = out_path
+        return out_path
 
     import tempfile, atexit, shutil
     _deriv_tmpdir = [None]
@@ -528,8 +616,12 @@ def grid_section(specs):
     methods = [('trilinear',                gfp.INTERP_TRILINEAR,          None),
                ('tricubic_bspline',         gfp.INTERP_TRICUBIC_BSPLINE,   'arcsinh'),
                ('tricubic_bspline_naked',   gfp.INTERP_TRICUBIC_BSPLINE,   'naked'),
+               ('tricubic_bspline_loadfile',
+                                            gfp.INTERP_TRICUBIC_BSPLINE,   'arcsinh_loadfile'),
                ('triquintic_bspline',       gfp.INTERP_TRIQUINTIC_BSPLINE, 'arcsinh'),
                ('triquintic_bspline_naked', gfp.INTERP_TRIQUINTIC_BSPLINE, 'naked'),
+               ('triquintic_bspline_loadfile',
+                                            gfp.INTERP_TRIQUINTIC_BSPLINE, 'arcsinh_loadfile'),
                ('tricubic_hermite',         gfp.INTERP_TRICUBIC_HERMITE,   None),
                ('triquintic_hermite',       gfp.INTERP_TRIQUINTIC_HERMITE, None)]
 
