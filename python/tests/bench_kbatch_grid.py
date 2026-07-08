@@ -142,13 +142,14 @@ del ctx; gc.collect()
 rng = np.random.default_rng(20260708)
 starts = [x_k1 + 0.001 * (1 + g) * rng.standard_normal(x_k1.shape) for g in range(K)]
 
-def run_kbatch(block_diagonal):
+def run_kbatch(block_diagonal, solver=gfp.NewtonMinimizer.LMCholesky):
     system = build_system(K)
     ctx = make_ctx(system)
     ctx.setPositions(np.concatenate(starts, axis=0) * unit.nanometer)
     E0, _, _ = snap(ctx)
     t0 = time.time()
     m = gfp.NewtonMinimizer()
+    m.setInnerSolver(solver)
     m.setKBatchBlockDiagonal(block_diagonal)
     m.minimize(ctx, TOL, MAX_ITER)
     dt = time.time() - t0
@@ -157,11 +158,16 @@ def run_kbatch(block_diagonal):
     return E0, E1, F1, x1, dt
 
 print("\nK-batch Newton minimize (all replicas in one call)...")
-print("  Full-H path:")
-E0f, E1f, Ff, xf, dt_full = run_kbatch(False)
+print("  Full-H, CPU LM-Cholesky:")
+E0f, E1f, Ff, xf, dt_full = run_kbatch(False, gfp.NewtonMinimizer.LMCholesky)
 print(f"    Combined E: {E0f:+.3f} -> {E1f:+.3f}   time={dt_full:.2f}s")
-print("  Block-diagonal path:")
-E0b, E1b, Fb, xb, dt_bd = run_kbatch(True)
+print("  Full-H, GPU LM-Cholesky (cuSOLVER):")
+E0g, E1g, Fg, xg, dt_gpu = run_kbatch(False, gfp.NewtonMinimizer.GPULMCholesky)
+print(f"    Combined E: {E0g:+.3f} -> {E1g:+.3f}   time={dt_gpu:.2f}s")
+print(f"  Full CPU vs GPU final-E diff: {E1f - E1g:+.4e} kJ/mol")
+print(f"  Full CPU vs GPU final-x max diff: {np.abs(xf - xg).max():.3e} nm")
+print("  Block-diagonal path (CPU LM-Cholesky):")
+E0b, E1b, Fb, xb, dt_bd = run_kbatch(True, gfp.NewtonMinimizer.LMCholesky)
 print(f"    Combined E: {E0b:+.3f} -> {E1b:+.3f}   time={dt_bd:.2f}s")
 print(f"  Full vs BD final-E diff: {E1f - E1b:+.4e} kJ/mol")
 print(f"  Full vs BD final-x max diff: {np.abs(xf - xb).max():.3e} nm")

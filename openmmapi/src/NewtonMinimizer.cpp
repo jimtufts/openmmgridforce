@@ -46,21 +46,43 @@
 #include "IsolatedBondedForce.h"
 #include "IsolatedGBSAForce.h"
 #include "IsolatedNonbondedForce.h"
+#include "LinearSolverKernels.h"
 #include "openmm/HarmonicAngleForce.h"
 #include "openmm/HarmonicBondForce.h"
 #include "openmm/PeriodicTorsionForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
+#include "openmm/Platform.h"
+#include "openmm/internal/ContextImpl.h"
+#include "openmm/internal/ForceImpl.h"
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 
 using namespace GridForcePlugin;
 using namespace OpenMM;
 using namespace std;
 
 namespace {
+
+// Context::getImpl() is private but ForceImpl::getContextImpl (a protected
+// member) can call it via a friend relationship.  This dummy ForceImpl-
+// derived helper exposes the accessor publicly so a plain utility (not a
+// Force) can still obtain the ContextImpl needed by Platform::createKernel.
+class ContextImplAccessor : public OpenMM::ForceImpl {
+public:
+    using OpenMM::ForceImpl::getContextImpl;
+    void initialize(OpenMM::ContextImpl&) override {}
+    const OpenMM::Force& getOwner() const override {
+        throw OpenMM::OpenMMException("ContextImplAccessor: no owner");
+    }
+    double calcForcesAndEnergy(OpenMM::ContextImpl&, bool, bool, int) override { return 0; }
+    std::map<std::string, double> getDefaultParameters() override { return {}; }
+    std::vector<std::string> getKernelNames() override { return {}; }
+};
 
 // Evaluate energy + gradient at flattened Cartesian positions x.
 static double evaluate(Context& ctx, int numAtoms, const vector<double>& x,
@@ -777,6 +799,24 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
     int nerr = 0;
     const int maxerr = 3;
 
+    // Try to create a GPU-backed dense-Cholesky kernel from the Context's
+    // platform.  If it succeeds we can offload the inner solve when
+    // requested; otherwise we silently fall back to CPU Cholesky.
+    CalcLinearSolverKernel* gpuSolver = nullptr;
+    Kernel gpuSolverKernel;
+    if (innerSolver == GPULMCholesky) {
+        try {
+            ContextImplAccessor acc;
+            OpenMM::ContextImpl& ctxImpl = acc.getContextImpl(context);
+            gpuSolverKernel = context.getPlatform().createKernel(
+                CalcLinearSolverKernel::Name(), ctxImpl);
+            gpuSolver = &gpuSolverKernel.getAs<CalcLinearSolverKernel>();
+            gpuSolver->initialize();
+        } catch (const std::exception&) {
+            gpuSolver = nullptr;   // silent fallback
+        }
+    }
+
     const bool VERBOSE = std::getenv("NEWTON_VERBOSE") != nullptr;
     if (VERBOSE) {
         std::fprintf(stderr, "[TNCG] init: n=%d f=%.4f g_rms=%.3e stpmax=%.4f f_move=%.3e\n",
@@ -787,6 +827,15 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
     const int nAtomsTpl = groupIndices.empty() || groupIndices[0].empty()
         ? 0 : (int)groupIndices[0].size();
     const bool blockDiag = kBatchBlockDiagonal && K > 1 && nAtomsTpl > 0;
+
+    // Timing breakdown (cumulative ms across all outer iters).  Enabled by
+    // env NEWTON_PROFILE=1 so we can see per-phase costs without running a
+    // profiler.
+    const bool PROFILE = std::getenv("NEWTON_PROFILE") != nullptr;
+    using clk = std::chrono::steady_clock;
+    double t_bnd_ms = 0, t_nb_ms = 0, t_grid_ms = 0,
+           t_gbsa_ms = 0, t_gbsag_ms = 0,
+           t_solve_ms = 0, t_ls_ms = 0, t_state_ms = 0;
 
     for (int cycle = 1; cycle <= maxIterations; cycle++) {
         lastIterations = cycle;
@@ -925,6 +974,7 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
         // template-atom ordering (3N x 3N).  Scatter each into the full
         // matrix at the rows/cols given by that group's System particle
         // indices.
+        auto t0 = clk::now();
         for (IsolatedBondedForce* ibf : isoBondedForces) {
             int nAtomsTpl = groupIndices[0].empty() ? 0 : (int)groupIndices[0].size();
             for (int g = 0; g < K; g++) {
@@ -943,6 +993,8 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
                 }
             }
         }
+        t_bnd_ms += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+        t0 = clk::now();
         for (IsolatedNonbondedForce* inb : isoNBForces) {
             int nAtomsTpl = groupIndices[0].empty() ? 0 : (int)groupIndices[0].size();
             for (int g = 0; g < K; g++) {
@@ -961,7 +1013,9 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
                 }
             }
         }
+        t_nb_ms += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
 
+        t0 = clk::now();
         for (GridForce* gf : gridForces) {
             gf->computeHessian(context);
             vector<double> blocks = gf->getHessianBlocks(context);
@@ -982,19 +1036,24 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
                 }
             }
         }
+        t_grid_ms += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
         // IsolatedGBSAForce returns a full 3(K*N) x 3(K*N) Hessian already in
         // System-particle ordering, so no per-group placement is needed.
+        t0 = clk::now();
         for (IsolatedGBSAForce* igbsa : isoGBSAForces) {
             vector<double> iH = igbsa->computeHessian(context);
             if (iH.size() == H.size())
                 for (size_t i = 0; i < H.size(); i++) H[i] += iH[i];
         }
+        t_gbsa_ms += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+        t0 = clk::now();
         for (GBSAGridForce* gbsa : gbsaForces) {
             gbsa->computeHessian(context);
             vector<double> gbsaH = gbsa->getFullHessian(context);
             if (gbsaH.size() == H.size())
                 for (size_t i = 0; i < H.size(); i++) H[i] += gbsaH[i];
         }
+        t_gbsag_ms += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
 
         // Diagnostic: H_ii statistics + off-diag magnitude
         if (VERBOSE && cycle <= 3) {
@@ -1014,14 +1073,29 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
         }
 
         // ---- Inner solve for Newton search direction p ----
+        auto t_solve0 = clk::now();
         if (innerSolver == TNCG) {
             // Symmetric-scaled PCG mutates g into scaled form and back.
             vector<double> g_scaled = g;
             tnsolve(H, g_scaled, n, cycle, p, iterCG, termReason);
             g = g_scaled;
+        } else if (gpuSolver != nullptr) {
+            // GPU-side dense Cholesky with LM shift.  Solves H p = -g via
+            // cuSOLVER dpotrf/dpotrs; gpuSolver ramps lambda internally.
+            vector<double> rhs(n);
+            for (int i = 0; i < n; i++) rhs[i] = -g[i];
+            double h_scale = 0.0;
+            for (int i = 0; i < n; i++)
+                h_scale = std::max(h_scale, std::fabs(H[i*n + i]));
+            if (h_scale < 1.0) h_scale = 1.0;
+            double lambdaUsed = 0.0;
+            termReason = gpuSolver->solveLMCholesky(
+                H, rhs, p, n, 1e4 * h_scale, lambdaUsed);
+            iterCG = 1;   // one Cholesky attempt reported (ramping is internal)
         } else {
             newton_direction(H, g, n, cycle, p, iterCG, termReason);
         }
+        t_solve_ms += std::chrono::duration<double, std::milli>(clk::now() - t_solve0).count();
 
         // Defensive: if p is not a descent direction (numerical blowup) fall
         // back to steepest descent
@@ -1041,8 +1115,10 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
 
     lineSearchStep:
         // ---- Line search along p ----
+        auto t_ls0 = clk::now();
         int lss = search(context, numAtoms, x, f, g, p, f_move, fgCalls,
                          stpmax, cappa, slpmax, angmax, intmax, stpmin);
+        t_ls_ms += std::chrono::duration<double, std::milli>(clk::now() - t_ls0).count();
 
         f_move = f_old - f;
         f_old  = f;
@@ -1061,16 +1137,42 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
             std::fflush(stderr);
         }
 
-        if (lastRMSForce < tolerance) return true;
-        if (f_move == 0.0) return false;
+        auto emit_profile = [&]() {
+            if (!PROFILE) return;
+            std::fprintf(stderr,
+                "[NEWTON_PROFILE] cycles=%d  K=%d n=%d  "
+                "bnd_H=%.1fms  nb_H=%.1fms  grid_H=%.1fms  gbsa_H=%.1fms  "
+                "gbsaGrid_H=%.1fms  solve=%.1fms  line=%.1fms  total=%.1fms\n",
+                cycle, K, n,
+                t_bnd_ms, t_nb_ms, t_grid_ms, t_gbsa_ms, t_gbsag_ms,
+                t_solve_ms, t_ls_ms,
+                t_bnd_ms + t_nb_ms + t_grid_ms + t_gbsa_ms + t_gbsag_ms
+                    + t_solve_ms + t_ls_ms);
+            std::fflush(stderr);
+        };
+
+        if (lastRMSForce < tolerance) { emit_profile(); return true; }
+        if (f_move == 0.0)             { emit_profile(); return false; }
 
         if (lss == 2 || lss == 3) {  // IntplnErr or BadIntpln
             nerr++;
-            if (nerr >= maxerr) return false;
+            if (nerr >= maxerr) { emit_profile(); return false; }
         } else {
             nerr = 0;
         }
     }
 
+    if (PROFILE) {
+        std::fprintf(stderr,
+            "[NEWTON_PROFILE] cycles=%d  K=%d n=%d  "
+            "bnd_H=%.1fms  nb_H=%.1fms  grid_H=%.1fms  gbsa_H=%.1fms  "
+            "gbsaGrid_H=%.1fms  solve=%.1fms  line=%.1fms  total=%.1fms\n",
+            lastIterations, K, n,
+            t_bnd_ms, t_nb_ms, t_grid_ms, t_gbsa_ms, t_gbsag_ms,
+            t_solve_ms, t_ls_ms,
+            t_bnd_ms + t_nb_ms + t_grid_ms + t_gbsa_ms + t_gbsag_ms
+                + t_solve_ms + t_ls_ms);
+        std::fflush(stderr);
+    }
     return false;
 }

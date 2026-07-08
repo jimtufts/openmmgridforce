@@ -8,8 +8,10 @@
 #include "CudaIsolatedSiteKernels.h"
 #include "CudaGBSAGridForceKernels.h"
 #include "CudaIsolatedGBSAKernels.h"
+#include "CudaLinearSolverKernels.h"
 #include "CudaMultiGroupHMCKernels.h"
 #include "CudaMultiGroupNUTSKernels.h"
+#include "LinearSolverKernels.h"
 #include "MultiGroupHMCKernels.h"
 #include "MultiGroupNUTSKernels.h"
 #include "PluginCompatMinimizeKernel.h"
@@ -41,6 +43,7 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
         platform.registerKernelFactory(CalcIsolatedSiteForceKernel::Name(), factory);
         platform.registerKernelFactory(IntegrateMultiGroupHMCStepKernel::Name(), factory);
         platform.registerKernelFactory(IntegrateMultiGroupNUTSStepKernel::Name(), factory);
+        platform.registerKernelFactory(CalcLinearSolverKernel::Name(), factory);
         // Replace stock CUDA MinimizeKernel factory with our compat version
         // (byte-identical on sm >= 60; carries a software atomicAdd(double*)
         // fallback for pre-Pascal). openmm.LocalEnergyMinimizer.minimize()
@@ -76,5 +79,7 @@ KernelImpl* CudaGridForceKernelFactory::createKernelImpl(std::string name, const
         return new CudaIntegrateMultiGroupNUTSStepKernel(name, platform, cu);
     if (name == MinimizeKernel::Name())
         return new PluginCompatMinimizeKernel(name, platform, cu);
+    if (name == CalcLinearSolverKernel::Name())
+        return new CudaCalcLinearSolverKernel(name, platform, cu);
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
 }

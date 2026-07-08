@@ -1585,8 +1585,9 @@ public:
 class NewtonMinimizer {
 public:
     enum InnerSolver {
-        LMCholesky = 0,
-        TNCG       = 1,
+        LMCholesky    = 0,
+        TNCG          = 1,
+        GPULMCholesky = 2,
     };
 
     NewtonMinimizer();

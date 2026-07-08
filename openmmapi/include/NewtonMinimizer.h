@@ -50,6 +50,10 @@ public:
     enum InnerSolver {
         LMCholesky = 0,
         TNCG       = 1,
+        // GPU-side dense Cholesky via cuSOLVER (requires CUDA platform).  Falls
+        // back to LMCholesky if the Context's platform doesn't provide a
+        // CalcLinearSolverKernel implementation.
+        GPULMCholesky = 2,
     };
 
     /**
