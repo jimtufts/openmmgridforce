@@ -125,6 +125,30 @@ public:
     void setInnerSolver(InnerSolver s) { innerSolver = s; }
     InnerSolver getInnerSolver() const { return innerSolver; }
 
+    /**
+     * Enable the block-diagonal K-batch fast path for K > 1 replicas.
+     *
+     * When on: the assembled Hessian is treated as K independent 3N x 3N
+     * blocks (one per particle group), and each block's Newton step is
+     * solved independently.  Total cost is K*N^3 instead of (K*N)^3, and
+     * the full K*N x K*N matrix is never allocated.  This is essential
+     * for large K (e.g. K=88 harmonic-entropy pipelines) where the full
+     * matrix would exhaust memory and Cholesky would take minutes.
+     *
+     * When off (default): the full 3(K*N) x 3(K*N) H is assembled and
+     * solved as a single system.  Correct for any coupling pattern but
+     * O(K^3) more expensive in both flops and memory.
+     *
+     * Caller must guarantee that the physical Hessian is block-diagonal
+     * across particle groups (i.e. no forces couple replicas).  Standard
+     * K-replica MM systems with IsolatedBondedForce +
+     * IsolatedNonbondedForce + IsolatedGBSAForce (NONE/PAIRWISE) +
+     * per-atom GridForce satisfy this; forces that share state across
+     * replicas do not.
+     */
+    void setKBatchBlockDiagonal(bool enable) { kBatchBlockDiagonal = enable; }
+    bool getKBatchBlockDiagonal() const { return kBatchBlockDiagonal; }
+
 private:
     int lastIterations;
     double lastRMSForce;
@@ -132,6 +156,7 @@ private:
     bool useLineSearch;
     double maxStep;
     InnerSolver innerSolver;
+    bool kBatchBlockDiagonal;
 
     // Solve H * x = b using Cholesky decomposition (for positive definite H)
     // Returns false if H is not positive definite

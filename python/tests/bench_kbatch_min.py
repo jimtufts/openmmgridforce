@@ -108,16 +108,29 @@ for g in range(K):
     scale = 0.001 * (1 + g)   # 0.001 nm ... 0.004 nm
     starts.append(x_min + scale * rng.standard_normal(x_min.shape))
 
+def run_kbatch(block_diagonal):
+    system = build_system_kbatch()
+    ctx = make_ctx(system)
+    ctx.setPositions(np.concatenate(starts, axis=0) * unit.nanometer)
+    E0, _, _ = snap(ctx)
+    import time as _t; t0 = _t.time()
+    m = gfp.NewtonMinimizer()
+    m.setKBatchBlockDiagonal(block_diagonal)
+    m.minimize(ctx, TOL, MAX_ITER)
+    dt = _t.time() - t0
+    E1, F1, x1 = snap(ctx)
+    del ctx; gc.collect()
+    return E0, E1, F1, x1, dt
+
 print("\nK-batch Newton minimize (all replicas in one call)...")
-system = build_system_kbatch()
-ctx = make_ctx(system)
-# Concatenate initial positions across replicas
-x_init = np.concatenate(starts, axis=0)
-ctx.setPositions(x_init * unit.nanometer)
-E_batch_before, F_batch_before, _ = snap(ctx)
-gfp.NewtonMinimizer().minimize(ctx, TOL, MAX_ITER)
-E_batch_after, F_batch_after, x_batch = snap(ctx)
-print(f"  Combined E: {E_batch_before:+.3f} -> {E_batch_after:+.3f}")
+print("  Full-H path:")
+E0f, E1f, F_batch_after, x_batch, dt_full = run_kbatch(False)
+print(f"    Combined E: {E0f:+.3f} -> {E1f:+.3f}   time={dt_full:.2f}s")
+print("  Block-diagonal path:")
+E0b, E1b, F_batch_bd,  x_batch_bd, dt_bd = run_kbatch(True)
+print(f"    Combined E: {E0b:+.3f} -> {E1b:+.3f}   time={dt_bd:.2f}s")
+print(f"  Full vs BD final-E diff: {E1f - E1b:+.4e} kJ/mol")
+print(f"  Full vs BD final-x max diff: {np.abs(x_batch - x_batch_bd).max():.3e} nm")
 
 # ----- Compare per-replica -----
 print(f"\n{'replica':<8s} {'E_final':>10s}  {'RMS':>10s}  {'|F|_max':>10s}  "

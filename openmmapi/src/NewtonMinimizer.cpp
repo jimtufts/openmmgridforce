@@ -467,7 +467,8 @@ static int search(Context& ctx, int numAtoms, vector<double>& x, double& f,
 
 NewtonMinimizer::NewtonMinimizer()
     : lastIterations(0), lastRMSForce(0.0), dampingFactor(0.01),
-      useLineSearch(true), maxStep(0.05), innerSolver(LMCholesky) {
+      useLineSearch(true), maxStep(0.05), innerSolver(LMCholesky),
+      kBatchBlockDiagonal(false) {
 }
 
 NewtonMinimizer::~NewtonMinimizer() {
@@ -768,8 +769,137 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
         std::fflush(stderr);
     }
 
+    const int nAtomsTpl = groupIndices.empty() || groupIndices[0].empty()
+        ? 0 : (int)groupIndices[0].size();
+    const bool blockDiag = kBatchBlockDiagonal && K > 1 && nAtomsTpl > 0;
+
     for (int cycle = 1; cycle <= maxIterations; cycle++) {
         lastIterations = cycle;
+
+        vector<double> p(n, 0.0);
+        int iterCG = 0, termReason = 0;
+        double f_before = f;
+        double p_norm = 0.0, pg_dot = 0.0;
+
+        if (blockDiag) {
+            // ---- K-batch block-diagonal fast path ----
+            // Assemble each group's 3N x 3N sub-Hessian directly (no full-H
+            // allocation) and solve K independent Newton systems.  Correct
+            // only if the physical H has no cross-group coupling; caller
+            // opts in via setKBatchBlockDiagonal(true).
+            int n3t = 3 * nAtomsTpl;
+
+            // If any force provides a full K*N x K*N Hessian (IsolatedGBSA,
+            // GBSAGrid), pre-fetch once and cache row starts so we can
+            // extract per-group diagonal blocks without re-computing.
+            vector<double> isoGBSAFull, gbsaGridFull;
+            for (IsolatedGBSAForce* igbsa : isoGBSAForces)
+                isoGBSAFull = igbsa->computeHessian(context);
+            for (GBSAGridForce* gbsa : gbsaForces) {
+                gbsa->computeHessian(context);
+                gbsaGridFull = gbsa->getFullHessian(context);
+            }
+
+            // GridForce provides per-atom 3x3 blocks (6 packed values), no
+            // cross-atom coupling by design.  One call, K groups all read
+            // from the same array.
+            vector<double> gridBlocks;
+            for (GridForce* gf : gridForces) {
+                gf->computeHessian(context);
+                gridBlocks = gf->getHessianBlocks(context);
+            }
+
+            for (int gr = 0; gr < K; gr++) {
+                // Extract per-group gradient
+                const auto& idx = groupIndices[gr];
+                vector<double> gg(n3t);
+                for (int a = 0; a < nAtomsTpl; a++) {
+                    gg[3*a]   = g[3*idx[a]];
+                    gg[3*a+1] = g[3*idx[a]+1];
+                    gg[3*a+2] = g[3*idx[a]+2];
+                }
+
+                // Assemble per-group Hessian
+                vector<double> Hg(n3t * n3t, 0.0);
+                for (IsolatedBondedForce* ibf : isoBondedForces) {
+                    vector<double> iH = ibf->computeHessian(context, gr);
+                    for (size_t i = 0; i < iH.size() && i < Hg.size(); i++)
+                        Hg[i] += iH[i];
+                }
+                for (IsolatedNonbondedForce* inb : isoNBForces) {
+                    vector<double> iH = inb->computeHessian(context, gr);
+                    for (size_t i = 0; i < iH.size() && i < Hg.size(); i++)
+                        Hg[i] += iH[i];
+                }
+                // Extract diagonal block from full K*N x K*N sources
+                auto extractDiagBlock = [&](const vector<double>& Hfull) {
+                    if ((int)Hfull.size() != n * n) return;
+                    for (int a = 0; a < nAtomsTpl; a++)
+                        for (int b = 0; b < nAtomsTpl; b++) {
+                            int rf = 3 * idx[a], cf = 3 * idx[b];
+                            for (int di = 0; di < 3; di++)
+                                for (int dj = 0; dj < 3; dj++)
+                                    Hg[(3*a+di)*n3t + (3*b+dj)]
+                                        += Hfull[(rf+di)*n + (cf+dj)];
+                        }
+                };
+                extractDiagBlock(isoGBSAFull);
+                extractDiagBlock(gbsaGridFull);
+
+                // GridForce per-atom diagonal blocks for atoms in this group
+                for (int a = 0; a < nAtomsTpl; a++) {
+                    int atom = idx[a];
+                    if (6*atom + 5 >= (int)gridBlocks.size()) continue;
+                    double dxx = gridBlocks[6*atom + 0];
+                    double dyy = gridBlocks[6*atom + 1];
+                    double dzz = gridBlocks[6*atom + 2];
+                    double dxy = gridBlocks[6*atom + 3];
+                    double dxz = gridBlocks[6*atom + 4];
+                    double dyz = gridBlocks[6*atom + 5];
+                    int base = 3*a;
+                    Hg[(base+0)*n3t + (base+0)] += dxx;
+                    Hg[(base+1)*n3t + (base+1)] += dyy;
+                    Hg[(base+2)*n3t + (base+2)] += dzz;
+                    Hg[(base+0)*n3t + (base+1)] += dxy;
+                    Hg[(base+1)*n3t + (base+0)] += dxy;
+                    Hg[(base+0)*n3t + (base+2)] += dxz;
+                    Hg[(base+2)*n3t + (base+0)] += dxz;
+                    Hg[(base+1)*n3t + (base+2)] += dyz;
+                    Hg[(base+2)*n3t + (base+1)] += dyz;
+                }
+
+                // Inner solve (LM-Cholesky always for the fast path -- TNCG
+                // per-block is not worth the setup for a 3N x 3N system)
+                vector<double> pg;
+                int iCG = 0, iTR = 0;
+                newton_direction(Hg, gg, n3t, cycle, pg, iCG, iTR);
+                iterCG += iCG;
+                if (iTR > termReason) termReason = iTR;
+
+                // Descent-direction guard per group (steepest-descent fallback)
+                double pgg = 0.0;
+                for (int i = 0; i < n3t; i++) pgg += pg[i] * gg[i];
+                if (pgg >= 0.0)
+                    for (int i = 0; i < n3t; i++) pg[i] = -gg[i];
+
+                // Scatter to full p
+                for (int a = 0; a < nAtomsTpl; a++) {
+                    p[3*idx[a]]   = pg[3*a];
+                    p[3*idx[a]+1] = pg[3*a+1];
+                    p[3*idx[a]+2] = pg[3*a+2];
+                }
+            }
+
+            for (int i = 0; i < n; i++) {
+                p_norm += p[i]*p[i];
+                pg_dot += p[i]*g[i];
+            }
+            p_norm = std::sqrt(p_norm);
+
+            goto lineSearchStep;
+        }
+
+        {  // ---- Full-Hessian path (default) ----
 
         // ---- Assemble full analytical Hessian for this outer step ----
         // The assembled H is (3*K*N) x (3*K*N) in System-particle ordering.
@@ -867,8 +997,6 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
         }
 
         // ---- Inner solve for Newton search direction p ----
-        vector<double> p;
-        int iterCG = 0, termReason = 0;
         if (innerSolver == TNCG) {
             // Symmetric-scaled PCG mutates g into scaled form and back.
             vector<double> g_scaled = g;
@@ -880,18 +1008,22 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
 
         // Defensive: if p is not a descent direction (numerical blowup) fall
         // back to steepest descent
-        double pg = 0.0;
-        for (int i = 0; i < n; i++) pg += p[i] * g[i];
-        if (pg >= 0.0) {
-            for (int i = 0; i < n; i++) p[i] = -g[i];
+        {
+            double pg = 0.0;
+            for (int i = 0; i < n; i++) pg += p[i] * g[i];
+            if (pg >= 0.0) {
+                for (int i = 0; i < n; i++) p[i] = -g[i];
+            }
         }
 
-        double p_norm = 0.0, pg_dot = 0.0;
+        p_norm = 0.0; pg_dot = 0.0;
         for (int i = 0; i < n; i++) { p_norm += p[i]*p[i]; pg_dot += p[i]*g[i]; }
         p_norm = std::sqrt(p_norm);
 
+        }  // end full-H block
+
+    lineSearchStep:
         // ---- Line search along p ----
-        double f_before = f;
         int lss = search(context, numAtoms, x, f, g, p, f_move, fgCalls,
                          stpmax, cappa, slpmax, angmax, intmax, stpmin);
 

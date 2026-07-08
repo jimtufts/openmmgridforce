@@ -1601,6 +1601,8 @@ public:
     void setMaxStep(double s);
     void setInnerSolver(GridForcePlugin::NewtonMinimizer::InnerSolver s);
     GridForcePlugin::NewtonMinimizer::InnerSolver getInnerSolver() const;
+    void setKBatchBlockDiagonal(bool enable);
+    bool getKBatchBlockDiagonal() const;
 
     %pythoncode %{
     def minimizeToTolerance(self, context, force_tolerance=10.0, max_iterations=100):
