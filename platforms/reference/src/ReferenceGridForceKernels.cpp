@@ -359,6 +359,14 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
         if (!g_derivatives.empty()) {
             const_cast<GridForce&>(grid_force).setDerivatives(g_derivatives);
         }
+
+        // If arcsinh or prefilter transforms are enabled, the generated
+        // values persisted in the force are already in transformed form.
+        // Record that fact so subsequent saveToFile() persists the correct
+        // state and reloads do not re-transform.
+        if (grid_force.getArcsinhScale() > 0.0 ||
+            grid_force.getBSplinePrefilterOrder() > 0)
+            const_cast<GridForce&>(grid_force).setValuesPreTransformed(true);
     }
 
     // For user-supplied grids (not auto-generated, not loaded from a file that

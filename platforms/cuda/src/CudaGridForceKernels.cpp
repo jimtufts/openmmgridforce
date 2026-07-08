@@ -548,6 +548,12 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             }
 
             const_cast<GridForce&>(force).setGridData(gridData);
+            // Auto-generation applied arcsinh + prefilter to `vals` in place
+            // above, and setGridData points m_vals into those transformed
+            // values.  Record that fact so a subsequent saveToFile() persists
+            // the correct state and reloads don't re-transform.
+            if (arcsinhScale > 0.0f || force.getBSplinePrefilterOrder() > 0)
+                const_cast<GridForce&>(force).setValuesPreTransformed(true);
         }
     }
 

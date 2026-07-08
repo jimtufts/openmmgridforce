@@ -703,11 +703,11 @@ void GridForce::loadFromFile(const std::string& filename) {
     file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
     file.read(reinterpret_cast<char*>(&header_size), sizeof(uint32_t));
 
-    // Only support V3 format
-    if (version != 3) {
+    // Support V3 (legacy) and V4 (adds valuesPreTransformed flag in flags bit 0).
+    if (version != 3 && version != 4) {
         file.close();
         throw OpenMMException(
-            "GridForce: Only V3 grid files are supported. "
+            "GridForce: Only V3/V4 grid files are supported. "
             "Found version " + std::to_string(version) + ". "
             "Please regenerate your grid files using the current version of GridForce.");
     }
@@ -748,6 +748,12 @@ void GridForce::loadFromFile(const std::string& filename) {
     // Read inv_power_mode (V3)
     uint32_t mode_value = 0;
     file.read(reinterpret_cast<char*>(&mode_value), sizeof(uint32_t));
+
+    // V4: first 8 bytes of the reserved trailer store m_arcsinhScale so
+    // the file carries the compression scale it was generated with.
+    double saved_arcsinhScale = 0.0;
+    if (version == 4)
+        file.read(reinterpret_cast<char*>(&saved_arcsinhScale), sizeof(double));
 
     // Seek to data
     file.seekg(data_offset);
@@ -853,10 +859,16 @@ void GridForce::loadFromFile(const std::string& filename) {
         m_derivatives = m_cachedGridData->getCurrentDerivatives();
     }
 
-    // Mark that values loaded from file are already in their final form.
-    // Auto-generated grids apply arcsinh+prefilter before saving, so the file
-    // already contains transformed values. Skip re-transformation at load time.
-    m_valuesPreTransformed = true;
+    // V4: restore the saved pre-transformed flag from flags bit 0.
+    // V3 files predate the flag; assume pre-transformed=true (matches the
+    // pre-V4 unconditional behavior, correct for auto-generated grids
+    // which were the only supported save path).
+    if (version == 4) {
+        m_valuesPreTransformed = (flags & 0x1u) != 0;
+        m_arcsinhScale = saved_arcsinhScale;
+    } else {
+        m_valuesPreTransformed = true;
+    }
 }
 
 void GridForce::saveToFile(const std::string& filename) const {
@@ -892,9 +904,13 @@ void GridForce::saveToFile(const std::string& filename) const {
     const char magic[8] = {'O', 'M', 'G', 'R', 'I', 'D', '\0', '\0'};
     file.write(magic, 8);
 
-    // Write header (Version 3 format)
-    uint32_t version = 3;
-    uint32_t header_size = 128;  // Fixed size for V3
+    // Write header (Version 4 format).  V4 preserves m_valuesPreTransformed
+    // through the flags field so save/load is self-consistent for both auto-
+    // generated (values already transformed) and user-supplied (raw) grids.
+    // V3 readers assumed values were always pre-transformed; V4 restores the
+    // actual saved state.
+    uint32_t version = 4;
+    uint32_t header_size = 128;  // Fixed size for V3/V4
     file.write(reinterpret_cast<const char*>(&version), sizeof(uint32_t));
     file.write(reinterpret_cast<const char*>(&header_size), sizeof(uint32_t));
 
@@ -935,8 +951,9 @@ void GridForce::saveToFile(const std::string& filename) const {
     else if (m_gridType == "lja") grid_type_code = 3;
     file.write(reinterpret_cast<const char*>(&grid_type_code), sizeof(uint32_t));
 
-    // Write flags
+    // Write flags.  Bit 0 = m_valuesPreTransformed (V4).
     uint32_t flags = 0;
+    if (m_valuesPreTransformed) flags |= 0x1u;
     file.write(reinterpret_cast<const char*>(&flags), sizeof(uint32_t));
 
     // Write inv_power
@@ -946,13 +963,14 @@ void GridForce::saveToFile(const std::string& filename) const {
     uint32_t mode_value = static_cast<uint32_t>(m_invPowerMode);
     file.write(reinterpret_cast<const char*>(&mode_value), sizeof(uint32_t));
 
-    // Pad to 128-byte header boundary
-    // Current offset: 8 (magic) + 4 (version) + 4 (header_size) + 3*4 (nx,ny,nz) + 4 (deriv_count)
-    //                 + 3*8 (dx,dy,dz) + 8 (data_offset) + 3*8 (origin) + 4 (grid_type) + 4 (flags)
-    //                 + 8 (inv_power) + 4 (inv_power_mode) = 108 bytes
-    // Need 128 - 108 = 20 bytes padding
-    char reserved[20] = {0};
-    file.write(reserved, 20);
+    // V4 uses the first 8 bytes of the trailing reserved region for
+    // m_arcsinhScale so the file remains self-describing (the eval-time
+    // sinh inverse-transform needs the same scale the values were
+    // compressed with at generation).  Remaining 12 bytes stay reserved.
+    double arcsinhScale = m_arcsinhScale;
+    file.write(reinterpret_cast<const char*>(&arcsinhScale), sizeof(double));
+    char reserved[12] = {0};
+    file.write(reserved, 12);
 
     // Write grid data
     if (hasDerivs) {
