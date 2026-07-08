@@ -304,9 +304,13 @@ void CudaCalcIsolatedNonbondedForceKernel::copyParametersToContext(ContextImpl& 
     cu.invalidateMolecules();
 }
 
-std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(ContextImpl& context) {
+std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(ContextImpl& context, int groupIndex) {
     if (!hasInitializedKernel) {
         throw OpenMMException("IsolatedNonbondedForce: must call execute() before computeHessian()");
+    }
+    if (groupIndex < 0 || groupIndex >= numParticleGroups) {
+        throw OpenMMException("IsolatedNonbondedForce::computeHessian: groupIndex "
+                              "out of range");
     }
 
     // Get the number of pairs
@@ -337,8 +341,10 @@ std::vector<double> CudaCalcIsolatedNonbondedForceKernel::computeHessian(Context
     // Set up kernel arguments
     int paddedNumAtoms = cu.getPaddedNumAtoms();
     CUdeviceptr posqPtr = cu.getPosq().getDevicePointer();
-    // Hessian uses first group (group 0) particle indices
-    CUdeviceptr particleIndicesPtr = groupParticleIndices.getDevicePointer();
+    // Offset into groupParticleIndices to select the requested group's
+    // particle indices.  Layout is [g0_atom0..g0_atomN-1, g1_atom0..].
+    CUdeviceptr particleIndicesPtr = groupParticleIndices.getDevicePointer()
+        + static_cast<CUdeviceptr>(groupIndex) * numAtoms * sizeof(int);
     CUdeviceptr chargesPtr = charges.getDevicePointer();
     CUdeviceptr sigmasPtr = sigmas.getDevicePointer();
     CUdeviceptr epsilonsPtr = epsilons.getDevicePointer();

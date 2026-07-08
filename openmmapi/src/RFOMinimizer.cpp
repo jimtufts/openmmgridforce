@@ -3,6 +3,7 @@
 #include "GridForce.h"
 #include "GBSAGridForce.h"
 #include "IsolatedBondedForce.h"
+#include "IsolatedGBSAForce.h"
 #include "IsolatedNonbondedForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
@@ -121,14 +122,48 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
     vector<IsolatedBondedForce*> isoBondedForces;
     vector<GridForce*> gridForces;
     vector<IsolatedNonbondedForce*> isoNBForces;
+    vector<IsolatedGBSAForce*> isoGBSAForces;
     vector<GBSAGridForce*> gbsaForces;
     for (int i = 0; i < system.getNumForces(); i++) {
         Force& force = const_cast<Force&>(system.getForce(i));
         if (auto ibf = dynamic_cast<IsolatedBondedForce*>(&force)) isoBondedForces.push_back(ibf);
         if (auto gf = dynamic_cast<GridForce*>(&force)) gridForces.push_back(gf);
         if (auto inb = dynamic_cast<IsolatedNonbondedForce*>(&force)) isoNBForces.push_back(inb);
+        if (auto igbsa = dynamic_cast<IsolatedGBSAForce*>(&force)) isoGBSAForces.push_back(igbsa);
         if (auto gbsa = dynamic_cast<GBSAGridForce*>(&force)) gbsaForces.push_back(gbsa);
     }
+
+    // K-group discovery + per-group System particle indices (same pattern
+    // as NewtonMinimizer::minimize).
+    int K = 1;
+    for (auto* ibf : isoBondedForces) K = std::max(K, ibf->getNumParticleGroups());
+    for (auto* inb : isoNBForces)     K = std::max(K, inb->getNumParticleGroups());
+    vector<vector<int>> groupIndices(K);
+    if (!isoBondedForces.empty()) {
+        for (int g = 0; g < K; g++) {
+            std::string name;
+            isoBondedForces[0]->getParticleGroup(g, name, groupIndices[g]);
+        }
+    } else if (!isoNBForces.empty()) {
+        for (int g = 0; g < K; g++) {
+            std::string name;
+            isoNBForces[0]->getParticleGroup(g, name, groupIndices[g]);
+        }
+    }
+    const int nAtomsTpl = groupIndices.empty() || groupIndices[0].empty()
+        ? 0 : (int)groupIndices[0].size();
+    auto scatterBlock = [&](vector<double>& Hfull, const vector<double>& iH, int g) {
+        int n3t = 3 * nAtomsTpl;
+        const auto& idx = groupIndices[g];
+        for (int a = 0; a < nAtomsTpl; a++)
+            for (int b = 0; b < nAtomsTpl; b++) {
+                int rowFull = 3 * idx[a], colFull = 3 * idx[b];
+                for (int di = 0; di < 3; di++)
+                    for (int dj = 0; dj < 3; dj++)
+                        Hfull[(rowFull+di) * n + (colFull+dj)]
+                            += iH[(3*a+di) * n3t + (3*b+dj)];
+            }
+    };
 
     for (int iter = 0; iter < maxIterations; iter++) {
         lastIterations = iter + 1;
@@ -152,9 +187,8 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
 
         vector<double> H = bondedHessian.computeHessian(context);
         for (IsolatedBondedForce* ibf : isoBondedForces) {
-            vector<double> iH = ibf->computeHessian(context, 0);
-            if (iH.size() == H.size())
-                for (size_t i = 0; i < H.size(); i++) H[i] += iH[i];
+            for (int g = 0; g < K; g++)
+                scatterBlock(H, ibf->computeHessian(context, g), g);
         }
         for (GridForce* gf : gridForces) {
             gf->computeHessian(context);
@@ -177,8 +211,13 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
             }
         }
         for (IsolatedNonbondedForce* inb : isoNBForces) {
-            vector<double> nbH = inb->computeHessian(context);
-            if (nbH.size() == H.size()) for (size_t i = 0; i < H.size(); i++) H[i] += nbH[i];
+            for (int g = 0; g < K; g++)
+                scatterBlock(H, inb->computeHessian(context, g), g);
+        }
+        for (IsolatedGBSAForce* igbsa : isoGBSAForces) {
+            vector<double> iH = igbsa->computeHessian(context);
+            if (iH.size() == H.size())
+                for (size_t i = 0; i < H.size(); i++) H[i] += iH[i];
         }
         for (GBSAGridForce* gbsa : gbsaForces) {
             gbsa->computeHessian(context);

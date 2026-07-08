@@ -44,6 +44,7 @@
 #include "GridForce.h"
 #include "GBSAGridForce.h"
 #include "IsolatedBondedForce.h"
+#include "IsolatedGBSAForce.h"
 #include "IsolatedNonbondedForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
@@ -673,13 +674,46 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
     vector<IsolatedBondedForce*> isoBondedForces;
     vector<GridForce*> gridForces;
     vector<IsolatedNonbondedForce*> isoNBForces;
+    vector<IsolatedGBSAForce*> isoGBSAForces;
     vector<GBSAGridForce*> gbsaForces;
     for (int i = 0; i < system.getNumForces(); i++) {
         Force& force = const_cast<Force&>(system.getForce(i));
         if (auto* ibf = dynamic_cast<IsolatedBondedForce*>(&force)) isoBondedForces.push_back(ibf);
         if (auto* gf = dynamic_cast<GridForce*>(&force)) gridForces.push_back(gf);
         if (auto* inb = dynamic_cast<IsolatedNonbondedForce*>(&force)) isoNBForces.push_back(inb);
+        if (auto* igbsa = dynamic_cast<IsolatedGBSAForce*>(&force)) isoGBSAForces.push_back(igbsa);
         if (auto* gbsa = dynamic_cast<GBSAGridForce*>(&force)) gbsaForces.push_back(gbsa);
+    }
+
+    // Discover K (number of particle groups) from the first isolated force that
+    // has groups.  In K-replica systems, IsolatedBondedForce / IsolatedNonbonded
+    // Force return a 3N x 3N block for a single group; we need to loop over the
+    // K groups and place each block at the right position in the assembled H.
+    int K = 1;
+    for (auto* ibf : isoBondedForces) {
+        int g = ibf->getNumParticleGroups();
+        if (g > K) K = g;
+    }
+    for (auto* inb : isoNBForces) {
+        int g = inb->getNumParticleGroups();
+        if (g > K) K = g;
+    }
+    if (K < 1) K = 1;
+
+    // Cache each group's System-particle-index list once per minimize().
+    // groupIndices[g][a] is the System particle index for template atom a
+    // in group g.  Used to scatter per-group Hessian blocks into H.
+    vector<vector<int>> groupIndices(K);
+    if (!isoBondedForces.empty()) {
+        for (int g = 0; g < K; g++) {
+            std::string name;
+            isoBondedForces[0]->getParticleGroup(g, name, groupIndices[g]);
+        }
+    } else if (!isoNBForces.empty()) {
+        for (int g = 0; g < K; g++) {
+            std::string name;
+            isoNBForces[0]->getParticleGroup(g, name, groupIndices[g]);
+        }
     }
 
     // Line-search parameters (TINKER defaults).  stpmax is a total-L2 cap on
@@ -738,12 +772,47 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
         lastIterations = cycle;
 
         // ---- Assemble full analytical Hessian for this outer step ----
+        // The assembled H is (3*K*N) x (3*K*N) in System-particle ordering.
         vector<double> H = bondedHessian.computeHessian(context);
+        // Bonded and intra-group nonbonded Hessians come out per-group in
+        // template-atom ordering (3N x 3N).  Scatter each into the full
+        // matrix at the rows/cols given by that group's System particle
+        // indices.
         for (IsolatedBondedForce* ibf : isoBondedForces) {
-            // Only groupIndex 0 for now (single-replica minimization).
-            vector<double> iH = ibf->computeHessian(context, 0);
-            if (iH.size() == H.size())
-                for (size_t i = 0; i < H.size(); i++) H[i] += iH[i];
+            int nAtomsTpl = groupIndices[0].empty() ? 0 : (int)groupIndices[0].size();
+            for (int g = 0; g < K; g++) {
+                vector<double> iH = ibf->computeHessian(context, g);
+                int n3t = 3 * nAtomsTpl;
+                const auto& idx = groupIndices[g];
+                for (int a = 0; a < nAtomsTpl; a++) {
+                    for (int b = 0; b < nAtomsTpl; b++) {
+                        int rowFull = 3 * idx[a];
+                        int colFull = 3 * idx[b];
+                        for (int di = 0; di < 3; di++)
+                            for (int dj = 0; dj < 3; dj++)
+                                H[(rowFull + di) * n + (colFull + dj)]
+                                    += iH[(3*a + di) * n3t + (3*b + dj)];
+                    }
+                }
+            }
+        }
+        for (IsolatedNonbondedForce* inb : isoNBForces) {
+            int nAtomsTpl = groupIndices[0].empty() ? 0 : (int)groupIndices[0].size();
+            for (int g = 0; g < K; g++) {
+                vector<double> iH = inb->computeHessian(context, g);
+                int n3t = 3 * nAtomsTpl;
+                const auto& idx = groupIndices[g];
+                for (int a = 0; a < nAtomsTpl; a++) {
+                    for (int b = 0; b < nAtomsTpl; b++) {
+                        int rowFull = 3 * idx[a];
+                        int colFull = 3 * idx[b];
+                        for (int di = 0; di < 3; di++)
+                            for (int dj = 0; dj < 3; dj++)
+                                H[(rowFull + di) * n + (colFull + dj)]
+                                    += iH[(3*a + di) * n3t + (3*b + dj)];
+                    }
+                }
+            }
         }
 
         for (GridForce* gf : gridForces) {
@@ -766,10 +835,12 @@ bool NewtonMinimizer::minimize(Context& context, double tolerance, int maxIterat
                 }
             }
         }
-        for (IsolatedNonbondedForce* inb : isoNBForces) {
-            vector<double> nbH = inb->computeHessian(context);
-            if (nbH.size() == H.size())
-                for (size_t i = 0; i < H.size(); i++) H[i] += nbH[i];
+        // IsolatedGBSAForce returns a full 3(K*N) x 3(K*N) Hessian already in
+        // System-particle ordering, so no per-group placement is needed.
+        for (IsolatedGBSAForce* igbsa : isoGBSAForces) {
+            vector<double> iH = igbsa->computeHessian(context);
+            if (iH.size() == H.size())
+                for (size_t i = 0; i < H.size(); i++) H[i] += iH[i];
         }
         for (GBSAGridForce* gbsa : gbsaForces) {
             gbsa->computeHessian(context);

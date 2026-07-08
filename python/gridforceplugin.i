@@ -1056,29 +1056,25 @@ public:
 
     void updateParametersInContext(Context &context);
 
-    std::vector<double> computeHessian(OpenMM::Context& context);
+    std::vector<double> computeHessian(OpenMM::Context& context, int groupIndex = 0);
 
     %pythoncode %{
-    def getHessianMatrix(self, context):
+    def getHessianMatrix(self, context, groupIndex=0):
         """
-        Compute and return the full Hessian matrix as a numpy array.
-
-        This computes the analytical Hessian (second derivatives) of the
-        isolated nonbonded potential with respect to all atomic coordinates.
+        Compute and return the full Hessian matrix for one particle
+        group as a numpy array.
 
         Args:
-            context: OpenMM Context containing current positions
+            context:     OpenMM Context containing current positions
+            groupIndex:  which particle group's positions to use (default 0)
 
         Returns:
-            numpy.ndarray: Shape (3N, 3N) Hessian matrix where N is the number
-                           of atoms. Units are kJ/(mol·nm²).
-
-        Example:
-            >>> H = isolated_nb_force.getHessianMatrix(context)
-            >>> eigenvalues = np.linalg.eigvalsh(H)
+            numpy.ndarray: Shape (3N, 3N) Hessian matrix in template-atom
+            ordering, where N is the number of atoms per group.
+            Units are kJ/(mol*nm^2).
         """
         import numpy as np
-        flat = np.array(self.computeHessian(context))
+        flat = np.array(self.computeHessian(context, groupIndex))
         n = self.getNumAtoms()
         return flat.reshape(3*n, 3*n)
     %}

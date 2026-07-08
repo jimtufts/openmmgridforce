@@ -85,13 +85,11 @@ public:
                                         const IsolatedNonbondedForce& force) = 0;
 
     /**
-     * Compute the Hessian (second derivatives) for the isolated nonbonded force.
-     * This computes d²E/dr_i dr_j for all pairs of atoms.
-     *
-     * @param context  the context containing the current positions
-     * @return the full Hessian matrix as a flattened vector (3N x 3N)
+     * Compute the Hessian for one particle group.  Uses group `groupIndex`'s
+     * particle indices to read positions.  Returned matrix is 3N x 3N in
+     * template-atom ordering.
      */
-    virtual std::vector<double> computeHessian(OpenMM::ContextImpl& context) = 0;
+    virtual std::vector<double> computeHessian(OpenMM::ContextImpl& context, int groupIndex) = 0;
 
     /**
      * Get the energy for a specific particle group after the last execute() call.

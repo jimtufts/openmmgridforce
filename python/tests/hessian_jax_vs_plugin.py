@@ -26,7 +26,9 @@ from AlGDock.mwe.utils import (
     build_isolated_bonded_force, build_isolated_nonbonded_force,
     build_isolated_gbsa_force, load_positions,
 )
-from AlGDock.mwe.jax_gas_reference import gas_total_energy, build_params_from_prmtop
+from AlGDock.mwe.jax_gas_reference import (
+    gas_total_energy, build_params_from_prmtop,
+    bonded_energy, nb_energy, gb_plus_sa_energy)
 
 PRMDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'prmtopcrd')
 LIGAND_PRMTOP = os.path.join(PRMDIR, 'ligand.prmtop')
@@ -108,7 +110,33 @@ print(f"JAX energy: {E_jax:+.4f}   plugin energy: {E_min:+.4f}   diff = {E_jax-E
 print("Computing JAX Hessian (autodiff)...")
 H_jax = np.array(jax.hessian(gas_total_energy)(pos_flat, params))
 
+# Split JAX Hessian by contribution so each plugin path can be checked.
+E_bnd = lambda x, p: bonded_energy(
+    x, p['bond_idx'], p['bond_r0'], p['bond_k'],
+    p['angle_idx'], p['angle_t0'], p['angle_k'],
+    p['tors_idx'], p['tors_n'], p['tors_phase'], p['tors_k'])
+E_nb  = lambda x, p: nb_energy(
+    x, p['charges'], p['sigmas'], p['epsilons'],
+    p['exc_idx'], p['exc_qprod'], p['exc_sigma'], p['exc_eps'],
+    p['standard_mask'])
+E_gbsa = lambda x, p: gb_plus_sa_energy(x, p['lig_q'], p['lig_r'], p['lig_s'])
+H_jax_bnd  = np.array(jax.hessian(E_bnd) (pos_flat, params))
+H_jax_nb   = np.array(jax.hessian(E_nb)  (pos_flat, params))
+H_jax_gbsa = np.array(jax.hessian(E_gbsa)(pos_flat, params))
+
 print(f"\nJAX H diagonal: min={H_jax.diagonal().min():+.3e}  max={H_jax.diagonal().max():+.3e}  n_neg={int((H_jax.diagonal()<0).sum())}/{n3}")
+
+print("\n=== Per-contribution: plugin vs JAX ===")
+def _cmp(label, Hp, Hj):
+    scale = max(np.linalg.norm(Hj), 1.0)
+    print(f"  {label:<26s}  ||H_plugin||_F={np.linalg.norm(Hp):.3e}  "
+          f"||H_jax||_F={np.linalg.norm(Hj):.3e}  "
+          f"||diff||_F/||H_jax||_F={np.linalg.norm(Hp-Hj)/scale:.3e}  "
+          f"max|diff|={np.abs(Hp-Hj).max():.3e}")
+_cmp("IsolatedBondedForce",     H_bnd_iso, H_jax_bnd)
+_cmp("BondedHessian (stock)",   H_bh_stock, H_jax_bnd)
+_cmp("IsolatedNonbondedForce",  H_nb,      H_jax_nb)
+_cmp("IsolatedGBSAForce PAIR",  H_gbsa,    H_jax_gbsa)
 
 # === Comparison ===
 diff = H_plugin - H_jax

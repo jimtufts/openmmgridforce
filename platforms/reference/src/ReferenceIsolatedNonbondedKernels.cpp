@@ -220,14 +220,17 @@ double ReferenceCalcIsolatedNonbondedForceKernel::execute(
 
 // ==================== computeHessian ====================
 
-vector<double> ReferenceCalcIsolatedNonbondedForceKernel::computeHessian(ContextImpl& context) {
+vector<double> ReferenceCalcIsolatedNonbondedForceKernel::computeHessian(ContextImpl& context, int groupIndex) {
+    if (groupIndex < 0 || groupIndex >= numParticleGroups) {
+        throw OpenMM::OpenMMException("IsolatedNonbondedForce::computeHessian: "
+                                      "groupIndex out of range");
+    }
     vector<Vec3>& posData = refExtractPositions(context);
 
     int hessianSize = 3 * numAtoms;
     vector<double> hessian(hessianSize * hessianSize, 0.0);
 
-    // Use first group's particle indices for Hessian (matches CUDA behavior)
-    const vector<int>& particles = groupParticleIndices[0];
+    const vector<int>& particles = groupParticleIndices[groupIndex];
 
     for (int i = 0; i < numAtoms; i++) {
         for (int j = i + 1; j < numAtoms; j++) {
