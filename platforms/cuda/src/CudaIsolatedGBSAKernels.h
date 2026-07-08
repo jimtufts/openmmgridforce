@@ -138,6 +138,10 @@ private:
     OpenMM::CudaArray hctLigand;     // HCT from ligand-ligand pairwise
     OpenMM::CudaArray bornRadii;     // Computed Born radii
     OpenMM::CudaArray dE_dR;         // dE/dR_born for chain rule
+    // PAIRWISE ligand-only pass (for getGroupReceptorContribution): Born radii
+    // computed with receptor descreening excluded, plus a zero HCT buffer.
+    OpenMM::CudaArray bornRadiiLigOnly;
+    OpenMM::CudaArray hctZero;       // always-zero HCT (stand-in for hctReceptor)
 
     // Alchemical scaling
     float globalScalingFactor;
@@ -151,6 +155,10 @@ private:
     OpenMM::CudaArray groupReceptorDesolvations;  // Receptor desolvation (PAIRWISE only)
     OpenMM::CudaArray groupCrossTermEnergies;     // Cross-term energy (PAIRWISE only)
     OpenMM::CudaArray groupUnscaledEnergies;      // Unscaled total (no per-group scaling)
+    // PAIRWISE ligand-only pass outputs (receptorContribution = ligandSelf - ligOnly)
+    OpenMM::CudaArray groupLigOnlyEnergies;       // gbEnergyLigOnly*scale (ligand-only radii)
+    OpenMM::CudaArray scratchGroupEnergies;       // discard total from the ligand-only pass
+    OpenMM::CudaArray scratchForce;               // discard forces from the ligand-only pass
 
     // Device arrays - per-atom energies
     OpenMM::CudaArray atomEnergies;
@@ -348,6 +356,7 @@ private:
     mutable std::vector<double> groupReceptorDesolvationsHost;
     mutable std::vector<double> groupCrossTermEnergiesHost;
     mutable std::vector<double> groupUnscaledEnergiesHost;
+    mutable std::vector<double> groupLigOnlyEnergiesHost;
     mutable std::vector<std::vector<float>> groupBornRadiiHost;
     mutable std::vector<std::vector<float>> groupAtomEnergiesHost;
     mutable std::vector<std::vector<float>> groupReceptorBornRadiiHost;  // PAIRWISE mode only

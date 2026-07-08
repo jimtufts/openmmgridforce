@@ -481,6 +481,17 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         dEdR_crossTerm.initialize<unsigned long long>(cu, totalParticles, "dEdR_crossTerm");
         initRealBuffer(cu, bornForceLig, totalParticles, "bornForceLig");
 
+        // Ligand-only pass buffers for getGroupReceptorContribution:
+        // receptorContribution = groupLigandSelfEnergies(full radii)
+        //                        - gbEnergyLigOnly(ligand-only radii).
+        initRealBuffer(cu, bornRadiiLigOnly, totalParticles, "isolatedGbsaBornRadiiLigOnly");
+        initRealBuffer(cu, hctZero, totalParticles, "isolatedGbsaHctZero");
+        cu.clearBuffer(hctZero);  // stays zero (never written) => ligand-only Born radii
+        initMixedEnergyBuffer(cu, groupLigOnlyEnergies, numParticleGroups, "isolatedGbsaGroupLigOnlyEnergies");
+        initMixedEnergyBuffer(cu, scratchGroupEnergies, numParticleGroups, "isolatedGbsaScratchGroupEnergies");
+        scratchForce.initialize<unsigned long long>(cu, 3 * cu.getPaddedNumAtoms(), "isolatedGbsaScratchForce");
+        groupLigOnlyEnergiesHost.resize(numParticleGroups);
+
         // Tile-skip cache for locality cutoff
         if (receptorLocalityCutoff > 0.0f) {
             int numRecBlocks = (numReceptorAtoms + 31) / 32;
@@ -846,6 +857,38 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         &globalScalingFactor, &groupScalingFactorsPtr, &groupUnscaledEnergiesPtr
     };
     cu.executeKernel(computeGBEnergyKernel, energyArgs, numBlocks * blockSize, blockSize);
+
+    // Step 4-lig: PAIRWISE receptor contribution = ligandSelf(full radii)
+    //   - gbEnergyLigOnly(ligand-only radii). Reuse the Born-radii and GB-energy
+    //   kernels with the receptor HCT excluded (hctZero), capturing only the
+    //   ligand-self slot into groupLigOnlyEnergies; forces/total go to scratch.
+    //   Host-side delta computed at readback. Mirrors the Reference platform.
+    if (receptorMode == IsolatedGBSAForce::PAIRWISE && numReceptorAtoms > 0) {
+        CUdeviceptr hctZeroPtr = hctZero.getDevicePointer();
+        CUdeviceptr bornRadiiLigOnlyPtr = bornRadiiLigOnly.getDevicePointer();
+        void* bornLigArgs[] = {
+            &radiiPtr, &hctZeroPtr, &hctLigandPtr,
+            &totalParticles, &numAtoms, &bornRadiiLigOnlyPtr
+        };
+        cu.executeKernel(gbMethod == IsolatedGBSAForce::HCT
+                             ? computeBornRadiiHCTKernel : computeBornRadiiOBCKernel,
+                         bornLigArgs, numBlocks * blockSize, blockSize);
+
+        cu.clearBuffer(scratchForce);
+        cu.clearBuffer(scratchGroupEnergies);
+        cu.clearBuffer(groupLigOnlyEnergies);
+        CUdeviceptr scratchForcePtr = scratchForce.getDevicePointer();
+        CUdeviceptr scratchGEPtr = scratchGroupEnergies.getDevicePointer();
+        CUdeviceptr groupLigOnlyPtr = groupLigOnlyEnergies.getDevicePointer();
+        CUdeviceptr nullUnscaledPtr = 0;  // kernel guards on non-null; skip unscaled
+        void* ligOnlyArgs[] = {
+            &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiLigOnlyPtr,
+            &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
+            &scratchForcePtr, &scratchGEPtr, &groupLigOnlyPtr, &paddedNumAtoms,
+            &globalScalingFactor, &groupScalingFactorsPtr, &nullUnscaledPtr
+        };
+        cu.executeKernel(computeGBEnergyKernel, ligOnlyArgs, numBlocks * blockSize, blockSize);
+    }
 
     // Step 4a: GRID mode augment — direct pairwise cross-term.
     // Uses the existing computeCrossTermGBEnergy kernel with ligand Born
@@ -1288,6 +1331,14 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
             downloadMixedEnergy(cu, groupReceptorDesolvations, groupReceptorDesolvationsHost);
             downloadMixedEnergy(cu, groupCrossTermEnergies, groupCrossTermEnergiesHost);
+            // Receptor contribution = ligand GB with receptor descreening minus
+            // ligand GB with ligand-only radii (both *scale). Matches Reference.
+            if (numReceptorAtoms > 0) {
+                downloadMixedEnergy(cu, groupLigOnlyEnergies, groupLigOnlyEnergiesHost);
+                for (int g = 0; g < numParticleGroups; g++)
+                    groupReceptorContributionsHost[g] =
+                        groupLigandSelfEnergiesHost[g] - groupLigOnlyEnergiesHost[g];
+            }
         } else if (receptorMode == IsolatedGBSAForce::GRID
                    && computeCrossTermGrid) {
             downloadMixedEnergy(cu, groupCrossTermEnergies, groupCrossTermEnergiesHost);
