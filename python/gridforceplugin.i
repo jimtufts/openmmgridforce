@@ -1588,6 +1588,11 @@ public:
  */
 class NewtonMinimizer {
 public:
+    enum InnerSolver {
+        LMCholesky = 0,
+        TNCG       = 1,
+    };
+
     NewtonMinimizer();
     ~NewtonMinimizer();
 
@@ -1597,6 +1602,9 @@ public:
     double getFinalRMSForce() const;
     void setDamping(double lambda);
     void setLineSearch(bool enable);
+    void setMaxStep(double s);
+    void setInnerSolver(GridForcePlugin::NewtonMinimizer::InnerSolver s);
+    GridForcePlugin::NewtonMinimizer::InnerSolver getInnerSolver() const;
 
     %pythoncode %{
     def minimizeToTolerance(self, context, force_tolerance=10.0, max_iterations=100):

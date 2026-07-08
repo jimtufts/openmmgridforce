@@ -17,9 +17,8 @@
 namespace GridForcePlugin {
 
 /**
- * P-RFO minimizer.  Reuses NewtonMinimizer's Hessian assembly (BondedHessian
- * + GridForce + IsolatedNonbonded + GBSAGrid contributions) but replaces the
- * damped Cholesky step with the RFO shifted-Newton step:
+ * P-RFO minimizer.  Reuses NewtonMinimizer's Hessian assembly but replaces
+ * the damped Cholesky step with the RFO shifted-Newton step:
  *
  *   dx = Sum_i [-g_i / (lambda_i - mu)] * v_i
  *
@@ -29,6 +28,11 @@ namespace GridForcePlugin {
  * (mu < min lambda_i for a downhill minimization step).  Near a minimum with
  * positive-definite H the step reduces to standard Newton; near a saddle it
  * follows the negative-curvature direction.
+ *
+ * Status: EXPERIMENTAL.  With a small positive lambda_min (soft rigid-body
+ * modes not fully restrained by the site force), the shift mu approaches
+ * lambda_min and the step in that mode is amplified by ~1/(lambda_min - mu),
+ * causing divergence on some starts.  Use NewtonMinimizer for production.
  */
 class OPENMM_EXPORT_GRIDFORCE RFOMinimizer {
 public:

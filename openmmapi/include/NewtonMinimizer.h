@@ -34,6 +34,25 @@ namespace GridForcePlugin {
 class OPENMM_EXPORT_GRIDFORCE NewtonMinimizer {
 public:
     /**
+     * Inner solver used to compute the Newton search direction each outer
+     * iteration.
+     *
+     *  LMCholesky (default): dense Cholesky on H, with Levenberg-Marquardt
+     *      diagonal shift (H + lambda*I) when H is not PD.  O(n^3) per
+     *      outer iteration; the natural choice for small MM systems
+     *      (n_dof <~ 10^3).
+     *
+     *  TNCG: TINKER-style symmetric-scaled preconditioned CG (Ponder &
+     *      Richards 1987), forcing eps = min(1/cycle, g_rms).  Scales
+     *      O(n^2 * iter_CG) per outer iteration and should overtake
+     *      LM-Cholesky for larger systems.
+     */
+    enum InnerSolver {
+        LMCholesky = 0,
+        TNCG       = 1,
+    };
+
+    /**
      * Create a NewtonMinimizer.
      */
     NewtonMinimizer();
@@ -87,11 +106,32 @@ public:
      */
     void setLineSearch(bool enable) { useLineSearch = enable; }
 
+    /**
+     * Set the trust-region cap on maximum per-Cartesian-component step size
+     * (nm).  Prevents huge Newton steps when the Hessian has soft directions
+     * (small eigenvalues + numerical noise -> arbitrarily large H^-1 g).
+     * Default is 0.05 nm to match RFOMinimizer.  Set to a large value (or 0)
+     * to disable the cap.
+     *
+     * @param s  max per-component step (nm)
+     */
+    void setMaxStep(double s) { maxStep = s; }
+
+    /**
+     * Choose the inner solver used to compute the Newton search
+     * direction.  Default is LMCholesky.  See the InnerSolver docstring
+     * above for the tradeoff.
+     */
+    void setInnerSolver(InnerSolver s) { innerSolver = s; }
+    InnerSolver getInnerSolver() const { return innerSolver; }
+
 private:
     int lastIterations;
     double lastRMSForce;
     double dampingFactor;
     bool useLineSearch;
+    double maxStep;
+    InnerSolver innerSolver;
 
     // Solve H * x = b using Cholesky decomposition (for positive definite H)
     // Returns false if H is not positive definite

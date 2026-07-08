@@ -2,6 +2,7 @@
 #include "BondedHessian.h"
 #include "GridForce.h"
 #include "GBSAGridForce.h"
+#include "IsolatedBondedForce.h"
 #include "IsolatedNonbondedForce.h"
 #include "openmm/State.h"
 #include "openmm/OpenMMException.h"
@@ -75,34 +76,35 @@ void RFOMinimizer::jacobiEigen(vector<double>& H, int n,
 
 double RFOMinimizer::solveRFOShift(const vector<double>& eigvals,
                                     const vector<double>& g_proj) {
-    // Find mu < min(eigvals) that solves f(mu) = Sum_i g_i^2 / (mu - lambda_i) = 1.
-    // f is monotone decreasing on (-inf, min(lambda_i)), starting at +inf as mu
-    // approaches min(lambda_i) from below and going to 0 as mu -> -inf.
-    // Bisect on mu in (min(lambda_i) - large, min(lambda_i) - eps).
+    // Find mu < min(eigvals) that solves f(mu) = Sum_i g_i^2 / (lambda_i - mu) = 1.
+    // (lambda_i - mu) > 0 for mu < lambda_min, so each term is positive and
+    // f is monotone increasing on (-inf, lambda_min): f -> 0 as mu -> -inf,
+    // f -> +inf as mu -> lambda_min from below.  Bisect for the unique root.
     int n = (int)eigvals.size();
     double lambdaMin = *min_element(eigvals.begin(), eigvals.end());
     double gTotal = 0.0;
     for (int i = 0; i < n; i++) gTotal += g_proj[i] * g_proj[i];
     if (gTotal < 1e-30) return lambdaMin - 1e-6;
 
-    // Bracket: mu_hi just below lambdaMin, mu_lo far below.
+    // Bracket: muHi just below lambdaMin (f large), muLo far below (f small).
     double eps = max(1e-12, 1e-6 * fabs(lambdaMin));
     double muHi = lambdaMin - eps;
     double muLo = lambdaMin - max(1.0, gTotal);
-    // Expand muLo until f(muLo) < 1.
+    // Expand muLo downward until f(muLo) < 1.
     for (int expand = 0; expand < 60; expand++) {
         double f = 0.0;
-        for (int i = 0; i < n; i++) f += g_proj[i] * g_proj[i] / (muLo - eigvals[i]);
+        for (int i = 0; i < n; i++) f += g_proj[i] * g_proj[i] / (eigvals[i] - muLo);
         if (f < 1.0) break;
         muLo -= (muHi - muLo);
     }
-    // Bisect.
+    // Bisect. f is monotone increasing in mu: f > 1 means mu too close to
+    // lambdaMin (upper end); f < 1 means mu too far (lower end).
     for (int it = 0; it < 200; it++) {
         double mu = 0.5 * (muLo + muHi);
         double f = 0.0;
-        for (int i = 0; i < n; i++) f += g_proj[i] * g_proj[i] / (mu - eigvals[i]);
+        for (int i = 0; i < n; i++) f += g_proj[i] * g_proj[i] / (eigvals[i] - mu);
         if (fabs(f - 1.0) < 1e-10) return mu;
-        if (f > 1.0) muHi = mu;   // too close to lambdaMin
+        if (f > 1.0) muHi = mu;
         else         muLo = mu;
     }
     return 0.5 * (muLo + muHi);
@@ -116,11 +118,13 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
     BondedHessian bondedHessian;
     bondedHessian.initialize(system, context);
 
+    vector<IsolatedBondedForce*> isoBondedForces;
     vector<GridForce*> gridForces;
     vector<IsolatedNonbondedForce*> isoNBForces;
     vector<GBSAGridForce*> gbsaForces;
     for (int i = 0; i < system.getNumForces(); i++) {
         Force& force = const_cast<Force&>(system.getForce(i));
+        if (auto ibf = dynamic_cast<IsolatedBondedForce*>(&force)) isoBondedForces.push_back(ibf);
         if (auto gf = dynamic_cast<GridForce*>(&force)) gridForces.push_back(gf);
         if (auto inb = dynamic_cast<IsolatedNonbondedForce*>(&force)) isoNBForces.push_back(inb);
         if (auto gbsa = dynamic_cast<GBSAGridForce*>(&force)) gbsaForces.push_back(gbsa);
@@ -147,6 +151,11 @@ bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIteration
         if (lastRMSForce < tolerance) return true;
 
         vector<double> H = bondedHessian.computeHessian(context);
+        for (IsolatedBondedForce* ibf : isoBondedForces) {
+            vector<double> iH = ibf->computeHessian(context, 0);
+            if (iH.size() == H.size())
+                for (size_t i = 0; i < H.size(); i++) H[i] += iH[i];
+        }
         for (GridForce* gf : gridForces) {
             gf->computeHessian(context);
             vector<double> blocks = gf->getHessianBlocks(context);
