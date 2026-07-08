@@ -9,6 +9,7 @@
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
 #include <cuda.h>
+#include <cublas_v2.h>
 #include <vector>
 
 namespace GridForcePlugin {
@@ -41,6 +42,12 @@ public:
     std::vector<double> computeHessian(OpenMM::ContextImpl& context) override;
 
 private:
+    std::vector<double> computeHessianGridFloat(OpenMM::ContextImpl& context);
+    std::vector<double> computeHessianPairwiseFloatBuf(OpenMM::ContextImpl& context);
+
+public:
+
+private:
     OpenMM::CudaContext& cu;
     bool hasInitializedKernel;
     int numAtoms;
@@ -49,6 +56,7 @@ private:
     // GB parameters
     IsolatedGBSAForce::GBMethod gbMethod;
     IsolatedGBSAForce::ReceptorMode receptorMode;
+    IsolatedGBSAForce::HessianPrecision hessianPrecision;
     double prefactor;  // -138.935456 * (1/solute - 1/solvent)
     bool includeSurfaceArea;
     float surfaceTension;
@@ -199,6 +207,64 @@ private:
     int hessianNumAtomsCached = 0;
     std::vector<double> hessianFullHost;         // download cache
 
+    // Float intermediates for the GRID-mode Hessian pipeline.
+    OpenMM::CudaArray hessianDRdPsiF;
+    OpenMM::CudaArray hessianD2RdPsi2F;
+    OpenMM::CudaArray hessianDEdHCTF;
+    OpenMM::CudaArray hessianJacobianF;
+    OpenMM::CudaArray hessianGridHCTHessian;     // d^2 Psi_grid / dx^2, [N * 6]
+    OpenMM::CudaArray hessianCouplingMatrixF;
+    OpenMM::CudaArray hessianMatrixF;
+    bool hessianGridFloatBuffersInitialized = false;
+    std::vector<float> hessianGridFloatHost;
+
+    // PAIRWISE HESSIAN_FLOAT: storage-only downgrade. Same kernels as the
+    // double path, recompiled from the same source with -DHBUF_T=float so
+    // the final dim3N*dim3N hessian buffer accumulates via hardware
+    // atomicAdd(float*, float). Compute stays in double. Primarily for
+    // speed gains on platforms without hardware atomicAdd(double*, double)
+    // (pre-sm_60 Maxwell etc.).
+    OpenMM::CudaArray hessianMatrixFloatBuf;
+    bool hessianFloatBufBuffersInitialized = false;
+    bool hessianFloatBufModuleLoaded = false;
+    std::vector<float> hessianFloatBufHost;
+    CUfunction assembleGBSAHessianDoubleFloatBufKernel = nullptr;
+    CUfunction pairwiseCrossBornDeriv1DoubleFloatBufKernel = nullptr;
+    CUfunction pairwiseBornGradHessianDoubleFloatBufKernel = nullptr;
+    CUfunction pairwiseOuterProductHessianDoubleFloatBufKernel = nullptr;
+
+    // cuBLAS-accelerated J_R^T M_R J_R desolvation outer product.
+    // pairwiseOuterProductHessianDouble used to do this loop on-thread; it
+    // dominated the entire pairwise Hessian cost (99% of 66 sec on EA1).
+    // Replaced with a host-side cuBLAS dgemm cascade per group + a small
+    // scatter kernel. cublasHandle is lazy-init on the first PAIRWISE
+    // computeHessian call and torn down in the destructor.
+    cublasHandle_t cublasHandle = nullptr;
+    bool cublasInitialized = false;
+    OpenMM::CudaArray hessianGemmScratchX;       // [Nr * n3] reused across groups
+    OpenMM::CudaArray hessianGemmScratchH;       // [n3 * n3] reused across groups
+    bool hessianGemmScratchInitialized = false;
+    int hessianGemmCachedNr = 0;
+    int hessianGemmCachedN3 = 0;
+    CUfunction scatterDesolvationHessianGemmKernel = nullptr;
+    CUfunction scatterDesolvationHessianGemmFloatBufKernel = nullptr;
+    // Stage A: precompute receptor-diagonal weights, fold into M_R so the
+    // existing JR^T M_R JR dgemm absorbs the cRj outer product and the
+    // dCrossDRR*d2R^R single-Born curvature contribution.
+    OpenMM::CudaArray hessianWj;                 // [K * Nr] double
+    bool hessianWjInitialized = false;
+    int hessianWjCachedKxNr = 0;
+    CUfunction pairwiseAccumWjDoubleKernel = nullptr;       // deprecated; superseded by per-pair scalars kernel below
+    CUfunction addReceptorDiagToMRDoubleKernel = nullptr;
+    // Stage B: per-pair cross-term scalars (cRi, cRiRj, gri, grj, ir*dxyz)
+    // computed once per (g, iL, j) and read by the cross-term consumer in
+    // pairwiseOuterProductHessianDouble. Replaces 5000+ redundant
+    // recomputations per (iL, j) pair in the inner loop.
+    OpenMM::CudaArray hessianPairScalars;        // [K * templateN * Nr * 7] packed (7 doubles per pair)
+    int hessianPairScalarsCachedKxNxNr = 0;
+    bool hessianPairScalarsInitialized = false;
+    CUfunction pairwiseComputePerPairScalarsDoubleKernel = nullptr;
+
     // CUDA kernels
     CUfunction computeReceptorHCTGridKernel;      // Grid interpolation
     CUfunction generateCrossTermGridKernel;       // GRID mode augment: build cross-term scalar field
@@ -246,11 +312,13 @@ private:
     CUfunction computeHessianKernel;                        // legacy placeholder
     // Hessian kernel chain. Double-precision storage variants are loaded
     // lazily in computeHessian() and are the default.
-    CUfunction prepareHessianIntermediatesKernel;           // legacy float path (debug)
-    CUfunction computeHCTJacobianPairwiseKernel;            // legacy float path (debug)
-    CUfunction computeReceptorPairwiseHessianKernel;        // legacy float path (debug)
-    CUfunction computeBornCouplingMatrixKernel;             // legacy float path (debug)
-    CUfunction assembleGBSAHessianKernel;                   // legacy float path (debug)
+    CUfunction prepareHessianIntermediatesKernel;           // float Hessian path
+    CUfunction computeHCTJacobianPairwiseKernel;            // float Hessian path (PAIRWISE)
+    CUfunction computeReceptorPairwiseHessianKernel;        // float Hessian path (PAIRWISE)
+    CUfunction computeHCTJacobianGridKernel;                // float Hessian path (GRID)
+    CUfunction computeReceptorGridHessianKernel;            // float Hessian path (GRID)
+    CUfunction computeBornCouplingMatrixKernel;             // float Hessian path
+    CUfunction assembleGBSAHessianKernel;                   // float Hessian path
     CUfunction computeLigandGBBornDerivDoubleKernel;        // ligand-GB-only dE/dR (double)
     CUfunction prepareHessianIntermediatesDoubleKernel;     // OBC-II transforms (double)
     CUfunction computeHCTJacobianPairwiseDoubleKernel;      // dPsi/dx (double)
@@ -261,6 +329,10 @@ private:
     CUfunction computeBornRadiiOBCDoubleKernel;             // OBC2 transform (double)
     CUfunction computeHctReceptorPairwiseDoubleKernel;      // receptor->ligand HCT in double
     CUfunction computeHctLigandPairwiseDoubleKernel;
+    // GRID mode double-storage variants of the receptor-descreening chain.
+    CUfunction computeHctReceptorGridDoubleKernel;          // receptor->ligand HCT via grid (double)
+    CUfunction computeHCTJacobianGridDoubleKernel;          // dPsi/dx via grid (double)
+    CUfunction computeReceptorGridHessianDoubleKernel;      // d2Psi/dx2 via grid (double)
     // PAIRWISE receptor-desolvation + cross-term Hessian kernels (double).
     CUfunction pairwiseRecBornDoubleKernel;                 // recBorn + transform derivs
     CUfunction pairwiseRecCouplingDoubleKernel;             // recDeDR + MR

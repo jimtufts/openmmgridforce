@@ -6,6 +6,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "BondedHessian.h"
+#include "IsolatedBondedForce.h"
 #include "internal/BondedHessianAnalytical.h"
 #include "openmm/HarmonicBondForce.h"
 #include "openmm/HarmonicAngleForce.h"
@@ -15,6 +16,7 @@
 #include "openmm/State.h"
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
 
 using namespace GridForcePlugin;
 using namespace GridForcePlugin::BondedHessianAnalytical;

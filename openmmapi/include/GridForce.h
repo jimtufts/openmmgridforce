@@ -87,12 +87,7 @@ struct OPENMM_EXPORT_GRIDFORCE ParticleGroup {
                   const std::vector<int>& particleIndices,
                   const std::vector<double>& scalingFactors = std::vector<double>())
         : name(name), particleIndices(particleIndices), scalingFactors(scalingFactors),
-          groupScalingFactor(1.0), groupRuntimeCap(0.0) {
-        // If no scaling factors provided, default to 1.0 for all particles
-        if (this->scalingFactors.empty()) {
-            this->scalingFactors.resize(particleIndices.size(), 1.0);
-        }
-    }
+          groupScalingFactor(1.0), groupRuntimeCap(0.0) {}
 
     std::string name;                    // Group name for identification
     std::vector<int> particleIndices;    // Particle indices in this group
@@ -1158,6 +1153,17 @@ class OPENMM_EXPORT_GRIDFORCE GridForce : public OpenMM::Force {
      * @return  true if values are pre-transformed
      */
     bool getValuesPreTransformed() const { return m_valuesPreTransformed; }
+
+    /**
+     * Override the pre-transformed flag. Use after loadFromFile() when the
+     * caller knows the loaded file contains raw (un-prefiltered) values, so
+     * that a subsequent setBSplinePrefilterOrder() / setArcsinhScale() /
+     * setGaussianBlurSigma() actually applies at runtime instead of being
+     * silently skipped.
+     *
+     * @param flag  true if values are already transformed, false if raw
+     */
+    void setValuesPreTransformed(bool flag) { m_valuesPreTransformed = flag; }
 
     /**
      * Load grid from a binary file.

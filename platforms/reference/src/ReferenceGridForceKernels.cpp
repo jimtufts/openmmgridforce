@@ -177,6 +177,12 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
     g_interpolationMethod = grid_force.getInterpolationMethod();
     g_bsplinePrefilterOrder = grid_force.getBSplinePrefilterOrder();
     g_blurSigma = grid_force.getGaussianBlurSigma();
+    if (g_interpolationMethod != 0 && g_interpolationMethod != 1 &&
+        g_interpolationMethod != 2 && g_interpolationMethod != 3) {
+        throw OpenMMException("GridForce: interpolation method " +
+                              std::to_string(g_interpolationMethod) +
+                              " not implemented on Reference/CPU platform.");
+    }
     // arcsinh dynamic-range compression and the GPU adaptive (PCG) prefilter are
     // CUDA-only; fail loudly rather than silently generate a grid that diverges from
     // CUDA. (The standard cubic/quintic prefilter and Gaussian blur are supported.)
@@ -353,6 +359,27 @@ void ReferenceCalcGridForceKernel::initialize(const System &system,
         if (!g_derivatives.empty()) {
             const_cast<GridForce&>(grid_force).setDerivatives(g_derivatives);
         }
+
+        // If arcsinh or prefilter transforms are enabled, the generated
+        // values persisted in the force are already in transformed form.
+        // Record that fact so subsequent saveToFile() persists the correct
+        // state and reloads do not re-transform.
+        if (grid_force.getArcsinhScale() > 0.0 ||
+            grid_force.getBSplinePrefilterOrder() > 0)
+            const_cast<GridForce&>(grid_force).setValuesPreTransformed(true);
+    }
+
+    // For user-supplied grids (not auto-generated, not loaded from a file that
+    // already stored prefiltered coefficients), apply blur+B-spline prefilter
+    // here so B-spline interpolation passes through the raw samples. CUDA does
+    // the same in CudaGridForceKernels.cpp; auto-gen runs the same step lazily
+    // inside generateGrid() at first execute() (g_vals is empty here in that
+    // case, so this block is a no-op for the auto-gen path).
+    if (!grid_force.getAutoGenerateGrid() && !grid_force.getValuesPreTransformed() && !g_vals.empty()) {
+        if (g_blurSigma > 0.0)
+            gaussianBlur3D(g_vals, g_counts[0], g_counts[1], g_counts[2], g_blurSigma);
+        if (g_bsplinePrefilterOrder > 0)
+            bsplinePrefilter3DByOrder(g_vals, g_counts[0], g_counts[1], g_counts[2], g_bsplinePrefilterOrder);
     }
 }
 
@@ -636,41 +663,35 @@ void ReferenceCalcGridForceKernel::generateGrid(
                         g_spacing[0], g_spacing[1], g_spacing[2]
                     );
 
-                    // Convert derivatives from physical coordinates to cell-local [0,1] coordinates
-                    // Like RASPA3, we DIVIDE by spacing powers (not multiply!)
-                    // This converts from physical nm^-n to cell-fractional coordinates
-                    // Order: [f, fx,fy,fz, fxx,fxy,fxz,fyy,fyz,fzz, fxxy,fxxz,fxyy,fxyz,fxzz,fyyz,fyzz,
-                    //         fxxyy,fxxzz,fyyzz,fxxyz,fxyyz,fxyzz, fxxyyz,fxxyzz,fxyyzz, fxxyyzz]
-
-                    // Scaling factors for each derivative based on which variables it differentiates
+                    // Convert physical-coord derivatives to cell-fractional (∂U/∂s = ∂U/∂x * spacing).
                     double scaling[27];
-                    scaling[0] = 1.0;  // f
-                    scaling[1] = 1.0 / g_spacing[0];  // fx
-                    scaling[2] = 1.0 / g_spacing[1];  // fy
-                    scaling[3] = 1.0 / g_spacing[2];  // fz
-                    scaling[4] = 1.0 / (g_spacing[0] * g_spacing[0]);  // fxx
-                    scaling[5] = 1.0 / (g_spacing[0] * g_spacing[1]);  // fxy
-                    scaling[6] = 1.0 / (g_spacing[0] * g_spacing[2]);  // fxz
-                    scaling[7] = 1.0 / (g_spacing[1] * g_spacing[1]);  // fyy
-                    scaling[8] = 1.0 / (g_spacing[1] * g_spacing[2]);  // fyz
-                    scaling[9] = 1.0 / (g_spacing[2] * g_spacing[2]);  // fzz
-                    scaling[10] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[1]);  // fxxy
-                    scaling[11] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[2]);  // fxxz
-                    scaling[12] = 1.0 / (g_spacing[0] * g_spacing[1] * g_spacing[1]);  // fxyy
-                    scaling[13] = 1.0 / (g_spacing[0] * g_spacing[1] * g_spacing[2]);  // fxyz
-                    scaling[14] = 1.0 / (g_spacing[0] * g_spacing[2] * g_spacing[2]);  // fxzz
-                    scaling[15] = 1.0 / (g_spacing[1] * g_spacing[1] * g_spacing[2]);  // fyyz
-                    scaling[16] = 1.0 / (g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fyzz
-                    scaling[17] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[1]);  // fxxyy
-                    scaling[18] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[2] * g_spacing[2]);  // fxxzz
-                    scaling[19] = 1.0 / (g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fyyzz
-                    scaling[20] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[2]);  // fxxyz
-                    scaling[21] = 1.0 / (g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2]);  // fxyyz
-                    scaling[22] = 1.0 / (g_spacing[0] * g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fxyzz
-                    scaling[23] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2]);  // fxxyyz
-                    scaling[24] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fxxyzz
-                    scaling[25] = 1.0 / (g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fxyyzz
-                    scaling[26] = 1.0 / (g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2]);  // fxxyyzz
+                    scaling[0] = 1.0;
+                    scaling[1] = g_spacing[0];
+                    scaling[2] = g_spacing[1];
+                    scaling[3] = g_spacing[2];
+                    scaling[4] = g_spacing[0] * g_spacing[0];
+                    scaling[5] = g_spacing[0] * g_spacing[1];
+                    scaling[6] = g_spacing[0] * g_spacing[2];
+                    scaling[7] = g_spacing[1] * g_spacing[1];
+                    scaling[8] = g_spacing[1] * g_spacing[2];
+                    scaling[9] = g_spacing[2] * g_spacing[2];
+                    scaling[10] = g_spacing[0] * g_spacing[0] * g_spacing[1];
+                    scaling[11] = g_spacing[0] * g_spacing[0] * g_spacing[2];
+                    scaling[12] = g_spacing[0] * g_spacing[1] * g_spacing[1];
+                    scaling[13] = g_spacing[0] * g_spacing[1] * g_spacing[2];
+                    scaling[14] = g_spacing[0] * g_spacing[2] * g_spacing[2];
+                    scaling[15] = g_spacing[1] * g_spacing[1] * g_spacing[2];
+                    scaling[16] = g_spacing[1] * g_spacing[2] * g_spacing[2];
+                    scaling[17] = g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[1];
+                    scaling[18] = g_spacing[0] * g_spacing[0] * g_spacing[2] * g_spacing[2];
+                    scaling[19] = g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2];
+                    scaling[20] = g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[2];
+                    scaling[21] = g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2];
+                    scaling[22] = g_spacing[0] * g_spacing[1] * g_spacing[2] * g_spacing[2];
+                    scaling[23] = g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2];
+                    scaling[24] = g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[2] * g_spacing[2];
+                    scaling[25] = g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2];
+                    scaling[26] = g_spacing[0] * g_spacing[0] * g_spacing[1] * g_spacing[1] * g_spacing[2] * g_spacing[2];
 
                     // Store scaled derivatives.
                     // Handle overlap regions like RASPA3: zero out higher derivatives if energy is capped
@@ -883,11 +904,9 @@ void ReferenceCalcGridForceKernel::computeAtom(int ia,
                 double value, dvalue_dx, dvalue_dy, dvalue_dz;
                 tricubicEvalVG(a, fx, fy, fz, &value, &dvalue_dx, &dvalue_dy, &dvalue_dz);
                 interpolated = value;
-                // Stored derivatives are divided by spacing^n (see generateGrid), so the unit-cell
-                // gradient is multiplied by spacing to recover physical units (matches triquintic/CUDA).
-                double dvdx = dvalue_dx * g_spacing[0];
-                double dvdy = dvalue_dy * g_spacing[1];
-                double dvdz = dvalue_dz * g_spacing[2];
+                double dvdx = dvalue_dx / g_spacing[0];
+                double dvdy = dvalue_dy / g_spacing[1];
+                double dvdz = dvalue_dz / g_spacing[2];
                 if (g_inv_power > 0.0) {
                     double base_interpolated = interpolated;
                     interpolated = pow(interpolated, g_inv_power);
@@ -984,13 +1003,9 @@ void ReferenceCalcGridForceKernel::computeAtom(int ia,
                 }
 
                 interpolated = value;
-
-                // Convert gradients from local [0,1] coordinates to physical coordinates
-                // Since we divided by spacing when storing, multiply by spacing to convert back
-                // d/dx_physical = (d/ds_x) * grid_spacing
-                double dvdx = dvalue_dx * g_spacing[0];
-                double dvdy = dvalue_dy * g_spacing[1];
-                double dvdz = dvalue_dz * g_spacing[2];
+                double dvdx = dvalue_dx / g_spacing[0];
+                double dvdy = dvalue_dy / g_spacing[1];
+                double dvdz = dvalue_dz / g_spacing[2];
 
                 // Apply inverse power transformation if specified
                 if (g_inv_power > 0.0) {
@@ -1401,12 +1416,6 @@ void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<
             throw OpenMMException("GridForce: Hessian not supported for tricubic Hermite (method 2)");
 
         } else if (g_interpolationMethod == 3) {
-            // TRIQUINTIC HERMITE. Mirrors the execute() assembly: build the 216
-            // polynomial coefficients, evaluate value/gradient/Hessian in unit-cell
-            // coords, then convert to physical units. Note the Reference stores
-            // corner derivatives divided by spacing^n, so (matching the force path)
-            // the unit-cell gradient is MULTIPLIED by spacing and the Hessian by
-            // spacing^2 -- this yields the same physical-unit values as CUDA.
             if (g_derivatives.empty()) {
                 throw OpenMMException("GridForce: Triquintic Hessian (method=3) requires precomputed derivatives.");
             }
@@ -1457,16 +1466,15 @@ void ReferenceCalcGridForceKernel::computeHessianForPositions(const std::vector<
                 }
             }
             interpolated = value;
-            // unit-cell -> physical (matches force-path convention: MULTIPLY by spacing)
-            gx = dvx * g_spacing[0];
-            gy = dvy * g_spacing[1];
-            gz = dvz * g_spacing[2];
-            H.xx = hxx * g_spacing[0] * g_spacing[0];
-            H.yy = hyy * g_spacing[1] * g_spacing[1];
-            H.zz = hzz * g_spacing[2] * g_spacing[2];
-            H.xy = hxy * g_spacing[0] * g_spacing[1];
-            H.xz = hxz * g_spacing[0] * g_spacing[2];
-            H.yz = hyz * g_spacing[1] * g_spacing[2];
+            gx = dvx / g_spacing[0];
+            gy = dvy / g_spacing[1];
+            gz = dvz / g_spacing[2];
+            H.xx = hxx / (g_spacing[0] * g_spacing[0]);
+            H.yy = hyy / (g_spacing[1] * g_spacing[1]);
+            H.zz = hzz / (g_spacing[2] * g_spacing[2]);
+            H.xy = hxy / (g_spacing[0] * g_spacing[1]);
+            H.xz = hxz / (g_spacing[0] * g_spacing[2]);
+            H.yz = hyz / (g_spacing[1] * g_spacing[2]);
 
         } else {
             // TRILINEAR. The interpolant is multilinear, so all pure second

@@ -52,6 +52,25 @@ public:
         PAIRWISE = 2  /**< Full pairwise receptor-ligand HCT */
     };
 
+    /**
+     * Storage precision for the analytical Hessian path.
+     *
+     * FLOAT matches GBSAGridForce and the production force kernels:
+     * ~1e-5 relative noise floor, faster, runs at full speed on all CUDA
+     * arches.
+     *
+     * DOUBLE eliminates float-summation noise (notably in J^T M J at
+     * Mpro-scale pairwise sums). Runs at native speed on sm_60+ (Pascal
+     * and newer: hardware atomicAdd(double*) available). On pre-sm_60
+     * hardware (Maxwell, Kepler) the kernel falls back to a software
+     * atomicCAS loop, which works but is ~50-100x slower than FLOAT —
+     * use FLOAT on those arches unless precision is critical.
+     */
+    enum HessianPrecision {
+        HESSIAN_FLOAT  = 0,
+        HESSIAN_DOUBLE = 1
+    };
+
     // OBC-II parameters
     static constexpr double OBC_ALPHA = 1.0;
     static constexpr double OBC_BETA = 0.8;
@@ -193,6 +212,25 @@ public:
      * Set the receptor mode. Default is NONE.
      */
     void setReceptorMode(ReceptorMode mode) { receptorMode = mode; }
+
+    // ========== Hessian Precision ==========
+
+    /**
+     * Get the storage precision used by computeHessian().
+     * Default DOUBLE; see HessianPrecision enum for trade-offs.
+     */
+    HessianPrecision getHessianPrecision() const { return hessianPrecision; }
+
+    /**
+     * Set the storage precision used by computeHessian(). Mostly for speed
+     * gains on platforms without hardware atomicAdd(double*, double) (pre-
+     * sm_60 Maxwell/Kepler), where the software CAS fallback dominates the
+     * Hessian wall time. For PAIRWISE this is storage-only: internal compute
+     * stays in double, only the final dim3N*dim3N hessian buffer is float-
+     * typed (hardware atomicAdd(float*, float)). For GRID it is full
+     * float-compute. Default DOUBLE preserves the legacy semantics.
+     */
+    void setHessianPrecision(HessianPrecision precision) { hessianPrecision = precision; }
 
     // ========== Receptor Configuration (GRID mode) ==========
 
@@ -357,13 +395,25 @@ public:
     std::vector<double> getParticleGroupEnergies() const;
 
     /**
-     * Get the ligand self-solvation energy (ligand-ligand GB only).
+     * Get the ligand self-solvation GB energy for this group.
+     *
+     * Semantics: this is the Still self+pair GB energy over ligand atoms
+     * computed with the Born radii that were actually used to produce
+     * getGroupEnergy() -- i.e., WITH receptor descreening applied when
+     * receptorMode is PAIRWISE or GRID, and without it in NONE mode.
+     * Does not include the SA term (SA lives in getGroupEnergy() only).
+     *
+     * To recover the ligand-only GB energy (Born radii from ligand HCT
+     * alone), subtract getGroupReceptorContribution():
+     *   E_lig_only_GB = getGroupLigandSelfEnergy() - getGroupReceptorContribution()
      */
     double getGroupLigandSelfEnergy(int groupIndex) const;
 
     /**
-     * Get the receptor contribution to ligand solvation.
-     * (Change in ligand GB energy due to receptor screening)
+     * Get the receptor descreening contribution to the ligand GB energy.
+     * Equals (E_lig_with_receptor - E_lig_alone) for the GB Still energy
+     * computed with the two respective Born radii. Populated by Reference;
+     * the CUDA path currently returns 0.0 (TODO to populate).
      */
     double getGroupReceptorContribution(int groupIndex) const;
 
@@ -498,6 +548,7 @@ private:
 
     // Receptor mode
     ReceptorMode receptorMode;
+    HessianPrecision hessianPrecision = HESSIAN_DOUBLE;
 
     // Grid mode configuration
     std::shared_ptr<DesolvationGrid> desolvationGrid;

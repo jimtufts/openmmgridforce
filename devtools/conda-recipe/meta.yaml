@@ -1,5 +1,5 @@
 {% set name = "openmm-gridforce" %}
-{% set version = "1.0.0" %}
+{% set version = "0.8.1" %}
 
 package:
   name: {{ name|lower }}
@@ -18,13 +18,14 @@ requirements:
   build:
     - {{ compiler('cxx') }}
     - cmake
-    - swig =3.0.12
+    - swig >=4
     - make  # [unix]
   host:
-    - python
+    - python >=3.10
+    - pip
     - openmm >=8.0
   run:
-    - python
+    - python >=3.10
     - openmm >=8.0
     - {{ pin_compatible('__glibc', max_pin='x.x') }}  # [linux]
 
@@ -32,15 +33,13 @@ test:
   requires:
     - pytest
   source_files:
-    - python/TestReferenceGridForce.py
-    - python/grids/direct_ele.nc
-    - python/grids/LJa.nc
-    - python/grids/LJr.nc
-    - python/prmtopcrd/*
+    - python/tests
+    - python/grids
+    - python/prmtopcrd
   imports:
-    - gridforce
+    - gridforceplugin
   commands:
-    - python python/TestReferenceGridForce.py
+    - python -c "import gridforceplugin; import openmm as mm; [print(mm.Platform.getPlatform(i).getName()) for i in range(mm.Platform.getNumPlatforms())]"
 
 about:
   home: https://github.com/jimtufts/openmmgridforce

@@ -51,7 +51,7 @@ public:
      * @param context  the context containing the current positions
      * @return the full Hessian matrix as a flattened vector (3N x 3N)
      */
-    std::vector<double> computeHessian(OpenMM::ContextImpl& context) override;
+    std::vector<double> computeHessian(OpenMM::ContextImpl& context, int groupIndex) override;
 
     /**
      * Get the energy for a specific particle group after the last execute() call.

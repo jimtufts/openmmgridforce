@@ -45,7 +45,19 @@ SET(SOURCE_INCLUDE_FILES)
 FILE(GLOB src_files ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 FILE(GLOB cuda_src_files ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu)
 FILE(GLOB incl_files ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
-SET(SOURCE_FILES ${SOURCE_FILES} ${src_files} ${cuda_src_files} ${KERNELS_CPP})
+# Plugin-shared common source used by this library: PluginCompatMinimizeKernel
+# is a CUDA-usable copy of OpenMM's CommonMinimizeKernel with a pre-Pascal
+# software atomicAdd(double*) fallback baked into its NVRTC source.
+SET(PLUGIN_COMMON_CUDA_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/src/PluginCompatMinimizeKernel.cpp)
+SET(SOURCE_FILES ${SOURCE_FILES} ${src_files} ${cuda_src_files}
+                                 ${PLUGIN_COMMON_CUDA_SRC}
+                                 ${KERNELS_CPP})
+# Also compile the plugin-shared CommonGridForceKernelSources.cpp (generated
+# from GenKernelSource.cmake); it holds the pluginCompatMinimize.cc string
+# constant that PluginCompatMinimizeKernel.cpp reads.
+SET(SOURCE_FILES ${SOURCE_FILES}
+    ${CMAKE_CURRENT_BINARY_DIR}/../common/src/CommonGridForceKernelSources.cpp)
 SET(SOURCE_INCLUDE_FILES ${SOURCE_INCLUDE_FILES} ${incl_files})
 
 INCLUDE_DIRECTORIES(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -62,9 +74,11 @@ INCLUDE_DIRECTORIES(BEFORE ${CUDAToolkit_INCLUDE_DIRS})
 
 # Create the library
 ADD_LIBRARY(${SHARED_TARGET} SHARED ${SOURCE_FILES} ${SOURCE_INCLUDE_FILES} ${API_INCLUDE_FILES})
-ADD_DEPENDENCIES(${SHARED_TARGET} CudaKernels)
+ADD_DEPENDENCIES(${SHARED_TARGET} CudaKernels CommonKernels)
+SET_SOURCE_FILES_PROPERTIES(${CMAKE_CURRENT_BINARY_DIR}/../common/src/CommonGridForceKernelSources.cpp
+    PROPERTIES GENERATED TRUE)
 
-TARGET_LINK_LIBRARIES(${SHARED_TARGET} CUDA::cuda_driver CUDA::cudart CUDA::cublas OpenMM OpenMMCUDA OpenMMGridForce)
+TARGET_LINK_LIBRARIES(${SHARED_TARGET} CUDA::cuda_driver CUDA::cudart CUDA::cublas CUDA::cusolver OpenMM OpenMMCUDA OpenMMGridForce)
 
 SET_TARGET_PROPERTIES(${SHARED_TARGET} PROPERTIES
     CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"

@@ -48,6 +48,7 @@ namespace std {
 #include "IsolatedGBSAForceKernels.h"
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
+#include "RFOMinimizer.h"
 #include "BATTopology.h"
 #ifdef GRIDFORCE_BUILD_CUDA
 #include "CudaBATConverter.h"
@@ -471,6 +472,12 @@ public:
         PAIRWISE = 2  // Full pairwise receptor-ligand HCT
     };
 
+    // Storage precision for the analytical Hessian
+    enum HessianPrecision {
+        HESSIAN_FLOAT  = 0,
+        HESSIAN_DOUBLE = 1
+    };
+
     // Constants
     static const double OBC_ALPHA;
     static const double OBC_BETA;
@@ -529,6 +536,8 @@ public:
     // Receptor mode
     ReceptorMode getReceptorMode() const;
     void setReceptorMode(ReceptorMode mode);
+    HessianPrecision getHessianPrecision() const;
+    void setHessianPrecision(HessianPrecision precision);
 
     // Grid mode configuration
     void setDesolvationGrid(std::shared_ptr<DesolvationGrid> grid);
@@ -693,6 +702,9 @@ public:
     bool hasDerivatives() const;
     const std::vector<double>& getDerivatives() const;
     void setDerivatives(const std::vector<double>& derivs);
+
+    bool getValuesPreTransformed() const;
+    void setValuesPreTransformed(bool flag);
 
     void setReceptorAtoms(const std::vector<int>& atomIndices);
     const std::vector<int>& getReceptorAtoms() const;
@@ -1044,29 +1056,25 @@ public:
 
     void updateParametersInContext(Context &context);
 
-    std::vector<double> computeHessian(OpenMM::Context& context);
+    std::vector<double> computeHessian(OpenMM::Context& context, int groupIndex = 0);
 
     %pythoncode %{
-    def getHessianMatrix(self, context):
+    def getHessianMatrix(self, context, groupIndex=0):
         """
-        Compute and return the full Hessian matrix as a numpy array.
-
-        This computes the analytical Hessian (second derivatives) of the
-        isolated nonbonded potential with respect to all atomic coordinates.
+        Compute and return the full Hessian matrix for one particle
+        group as a numpy array.
 
         Args:
-            context: OpenMM Context containing current positions
+            context:     OpenMM Context containing current positions
+            groupIndex:  which particle group's positions to use (default 0)
 
         Returns:
-            numpy.ndarray: Shape (3N, 3N) Hessian matrix where N is the number
-                           of atoms. Units are kJ/(mol·nm²).
-
-        Example:
-            >>> H = isolated_nb_force.getHessianMatrix(context)
-            >>> eigenvalues = np.linalg.eigvalsh(H)
+            numpy.ndarray: Shape (3N, 3N) Hessian matrix in template-atom
+            ordering, where N is the number of atoms per group.
+            Units are kJ/(mol*nm^2).
         """
         import numpy as np
-        flat = np.array(self.computeHessian(context))
+        flat = np.array(self.computeHessian(context, groupIndex))
         n = self.getNumAtoms()
         return flat.reshape(3*n, 3*n)
     %}
@@ -1576,6 +1584,12 @@ public:
  */
 class NewtonMinimizer {
 public:
+    enum InnerSolver {
+        LMCholesky    = 0,
+        TNCG          = 1,
+        GPULMCholesky = 2,
+    };
+
     NewtonMinimizer();
     ~NewtonMinimizer();
 
@@ -1585,6 +1599,11 @@ public:
     double getFinalRMSForce() const;
     void setDamping(double lambda);
     void setLineSearch(bool enable);
+    void setMaxStep(double s);
+    void setInnerSolver(GridForcePlugin::NewtonMinimizer::InnerSolver s);
+    GridForcePlugin::NewtonMinimizer::InnerSolver getInnerSolver() const;
+    void setKBatchBlockDiagonal(bool enable);
+    bool getKBatchBlockDiagonal() const;
 
     %pythoncode %{
     def minimizeToTolerance(self, context, force_tolerance=10.0, max_iterations=100):
@@ -1615,6 +1634,24 @@ public:
             'rms_force': self.getFinalRMSForce()
         }
     %}
+};
+
+/**
+ * RFOMinimizer performs P-RFO minimization using the plugin's analytical
+ * Hessian machinery. Handles indefinite Hessians (saddle regions, small
+ * or negative eigenvalues) cleanly via a shifted-Newton step chosen from
+ * the RFO secular equation.
+ */
+class RFOMinimizer {
+public:
+    RFOMinimizer();
+    ~RFOMinimizer();
+
+    bool minimize(OpenMM::Context& context, double tolerance = 1.0, int maxIterations = 100);
+    int getNumIterations() const;
+    double getFinalRMSForce() const;
+    void setMaxStep(double s);
+    void setLineSearch(bool enable);
 };
 
 /**
@@ -2134,3 +2171,55 @@ size_t getGridCacheMaxHostMemory() {
     return GridForcePlugin::GridDataCache::getMaxHostMemory();
 }
 %}
+
+// LocalEnergyMinimizer dispatch: pure Python, four backends.
+%pythoncode %{
+
+class LocalEnergyMinimizer:
+    """Backend-dispatching wrapper around stock and plugin-owned minimizers.
+
+    Backends
+    --------
+    stock  : openmm.LocalEnergyMinimizer.minimize(context, tol, maxIter).
+             When the gridforceplugin is loaded, the CUDA MinimizeKernel
+             factory is transparently replaced by PluginCompatMinimizeKernel,
+             which is byte-for-byte equivalent to OpenMM's CommonMinimizeKernel
+             on sm>=60 and adds a software atomicAdd(double*) fallback on
+             pre-Pascal (Maxwell sm_52, Kepler sm_35/37). No user-visible
+             behavior change on Pascal+; on Maxwell mixed/double it just works.
+    newton : NewtonMinimizer — Newton-Raphson via analytical Hessian.
+    rfo    : RFOMinimizer     — P-RFO via analytical Hessian; robust near
+             saddle-like regions where the Hessian is indefinite.
+    auto   : same as 'stock' — the compat fix means stock always works now,
+             so there is no separate 'compat' backend to fall back to.
+    """
+
+    _VALID_BACKENDS = ('stock', 'newton', 'rfo', 'auto')
+
+    @staticmethod
+    def minimize(context, tolerance=10.0, maxIterations=0,
+                 reporter=None, backend='auto'):
+        if backend not in LocalEnergyMinimizer._VALID_BACKENDS:
+            raise ValueError(
+                f"backend={backend!r} not one of {LocalEnergyMinimizer._VALID_BACKENDS}")
+        if backend in ('auto', 'stock'):
+            import openmm as _mm
+            if reporter is None:
+                _mm.LocalEnergyMinimizer.minimize(
+                    context, tolerance, maxIterations)
+            else:
+                _mm.LocalEnergyMinimizer.minimize(
+                    context, tolerance, maxIterations, reporter)
+            return 'stock'
+        if backend == 'newton':
+            nm = NewtonMinimizer()
+            iters = maxIterations if maxIterations > 0 else 100
+            nm.minimize(context, tolerance, iters)
+            return 'newton'
+        if backend == 'rfo':
+            rm = RFOMinimizer()
+            iters = maxIterations if maxIterations > 0 else 100
+            rm.minimize(context, tolerance, iters)
+            return 'rfo'
+%}
+

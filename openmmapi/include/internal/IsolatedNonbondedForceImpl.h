@@ -67,9 +67,11 @@ public:
     void updateParametersInContext(OpenMM::ContextImpl& context);
 
     /**
-     * Compute the Hessian (second derivatives) for the isolated nonbonded force.
+     * Compute the Hessian for one particle group.  groupIndex selects
+     * which group's positions are read; returned matrix is 3N x 3N with
+     * template-atom ordering.
      */
-    std::vector<double> computeHessian(OpenMM::ContextImpl& context);
+    std::vector<double> computeHessian(OpenMM::ContextImpl& context, int groupIndex = 0);
 
     void setSkipGroupEnergyDownload(bool skip) {
         kernel.getAs<CalcIsolatedNonbondedForceKernel>().setSkipGroupEnergyDownload(skip);

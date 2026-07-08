@@ -245,13 +245,18 @@ public:
     void updateParametersInContext(OpenMM::Context& context);
 
     /**
-     * Compute the Hessian (second derivatives) for the isolated nonbonded force.
-     * This computes d²E/dr_i dr_j for all pairs of atoms.
+     * Compute the Hessian (second derivatives) for one particle group of
+     * the isolated nonbonded force.  Uses group-`groupIndex` particle
+     * indices to read positions.  The returned matrix is 3N x 3N with
+     * template-atom ordering (not full System ordering); the caller is
+     * responsible for placing it into the right block of the full
+     * multi-group Hessian if needed.
      *
-     * @param context  the Context containing the current positions
-     * @return the full Hessian matrix as a flattened vector (3N x 3N), row-major order
+     * @param context     the Context containing the current positions
+     * @param groupIndex  particle group whose positions are used (default 0)
+     * @return the Hessian matrix as a flattened vector (3N x 3N), row-major
      */
-    std::vector<double> computeHessian(OpenMM::Context& context);
+    std::vector<double> computeHessian(OpenMM::Context& context, int groupIndex = 0);
 
 protected:
     OpenMM::ForceImpl* createImpl() const;

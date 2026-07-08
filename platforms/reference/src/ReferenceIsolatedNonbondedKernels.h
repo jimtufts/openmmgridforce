@@ -25,7 +25,7 @@ public:
     void initialize(const OpenMM::System& system, const IsolatedNonbondedForce& force) override;
     double execute(OpenMM::ContextImpl& context, bool includeForces, bool includeEnergy) override;
     void copyParametersToContext(OpenMM::ContextImpl& context, const IsolatedNonbondedForce& force) override;
-    std::vector<double> computeHessian(OpenMM::ContextImpl& context) override;
+    std::vector<double> computeHessian(OpenMM::ContextImpl& context, int groupIndex) override;
     double getGroupEnergy(int groupIndex) const override;
 
 protected:

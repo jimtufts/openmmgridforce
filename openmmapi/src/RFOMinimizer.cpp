@@ -1,0 +1,302 @@
+#include "RFOMinimizer.h"
+#include "BondedHessian.h"
+#include "GridForce.h"
+#include "GBSAGridForce.h"
+#include "IsolatedBondedForce.h"
+#include "IsolatedGBSAForce.h"
+#include "IsolatedNonbondedForce.h"
+#include "openmm/HarmonicAngleForce.h"
+#include "openmm/HarmonicBondForce.h"
+#include "openmm/PeriodicTorsionForce.h"
+#include "openmm/State.h"
+#include "openmm/OpenMMException.h"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+using namespace GridForcePlugin;
+using namespace OpenMM;
+using namespace std;
+
+RFOMinimizer::RFOMinimizer()
+    : lastIterations(0), lastRMSForce(0.0), maxStep(0.05), useLineSearch(true) {}
+
+RFOMinimizer::~RFOMinimizer() {}
+
+void RFOMinimizer::jacobiEigen(vector<double>& H, int n,
+                               vector<double>& eigvals,
+                               vector<double>& eigvecs) {
+    eigvecs.assign(n * n, 0.0);
+    for (int i = 0; i < n; i++) eigvecs[i * n + i] = 1.0;
+
+    const int maxSweeps = 100;
+    const double tol = 1e-14;
+    for (int sweep = 0; sweep < maxSweeps; sweep++) {
+        double off = 0.0;
+        for (int p = 0; p < n - 1; p++)
+            for (int q = p + 1; q < n; q++)
+                off += H[p * n + q] * H[p * n + q];
+        if (off < tol) break;
+
+        for (int p = 0; p < n - 1; p++) {
+            for (int q = p + 1; q < n; q++) {
+                double Hpq = H[p * n + q];
+                if (fabs(Hpq) < 1e-16) continue;
+                double Hpp = H[p * n + p];
+                double Hqq = H[q * n + q];
+                double theta = (Hqq - Hpp) / (2.0 * Hpq);
+                double t = (theta >= 0.0)
+                           ?  1.0 / (theta + sqrt(1.0 + theta * theta))
+                           : -1.0 / (-theta + sqrt(1.0 + theta * theta));
+                double c = 1.0 / sqrt(1.0 + t * t);
+                double s = t * c;
+
+                H[p * n + p] = Hpp - t * Hpq;
+                H[q * n + q] = Hqq + t * Hpq;
+                H[p * n + q] = 0.0;
+                H[q * n + p] = 0.0;
+
+                for (int i = 0; i < n; i++) {
+                    if (i == p || i == q) continue;
+                    double Hip = H[i * n + p];
+                    double Hiq = H[i * n + q];
+                    H[i * n + p] = c * Hip - s * Hiq;
+                    H[p * n + i] = H[i * n + p];
+                    H[i * n + q] = s * Hip + c * Hiq;
+                    H[q * n + i] = H[i * n + q];
+                }
+                for (int i = 0; i < n; i++) {
+                    double Vip = eigvecs[i * n + p];
+                    double Viq = eigvecs[i * n + q];
+                    eigvecs[i * n + p] = c * Vip - s * Viq;
+                    eigvecs[i * n + q] = s * Vip + c * Viq;
+                }
+            }
+        }
+    }
+    eigvals.resize(n);
+    for (int i = 0; i < n; i++) eigvals[i] = H[i * n + i];
+}
+
+double RFOMinimizer::solveRFOShift(const vector<double>& eigvals,
+                                    const vector<double>& g_proj) {
+    // Find mu < min(eigvals) that solves f(mu) = Sum_i g_i^2 / (lambda_i - mu) = 1.
+    // (lambda_i - mu) > 0 for mu < lambda_min, so each term is positive and
+    // f is monotone increasing on (-inf, lambda_min): f -> 0 as mu -> -inf,
+    // f -> +inf as mu -> lambda_min from below.  Bisect for the unique root.
+    int n = (int)eigvals.size();
+    double lambdaMin = *min_element(eigvals.begin(), eigvals.end());
+    double gTotal = 0.0;
+    for (int i = 0; i < n; i++) gTotal += g_proj[i] * g_proj[i];
+    if (gTotal < 1e-30) return lambdaMin - 1e-6;
+
+    // Bracket: muHi just below lambdaMin (f large), muLo far below (f small).
+    double eps = max(1e-12, 1e-6 * fabs(lambdaMin));
+    double muHi = lambdaMin - eps;
+    double muLo = lambdaMin - max(1.0, gTotal);
+    // Expand muLo downward until f(muLo) < 1.
+    for (int expand = 0; expand < 60; expand++) {
+        double f = 0.0;
+        for (int i = 0; i < n; i++) f += g_proj[i] * g_proj[i] / (eigvals[i] - muLo);
+        if (f < 1.0) break;
+        muLo -= (muHi - muLo);
+    }
+    // Bisect. f is monotone increasing in mu: f > 1 means mu too close to
+    // lambdaMin (upper end); f < 1 means mu too far (lower end).
+    for (int it = 0; it < 200; it++) {
+        double mu = 0.5 * (muLo + muHi);
+        double f = 0.0;
+        for (int i = 0; i < n; i++) f += g_proj[i] * g_proj[i] / (eigvals[i] - mu);
+        if (fabs(f - 1.0) < 1e-10) return mu;
+        if (f > 1.0) muHi = mu;
+        else         muLo = mu;
+    }
+    return 0.5 * (muLo + muHi);
+}
+
+bool RFOMinimizer::minimize(Context& context, double tolerance, int maxIterations) {
+    const System& system = context.getSystem();
+    int numAtoms = system.getNumParticles();
+    int n = 3 * numAtoms;
+
+    vector<IsolatedBondedForce*> isoBondedForces;
+    vector<GridForce*> gridForces;
+    vector<IsolatedNonbondedForce*> isoNBForces;
+    vector<IsolatedGBSAForce*> isoGBSAForces;
+    vector<GBSAGridForce*> gbsaForces;
+    bool hasStockBonded = false;
+    for (int i = 0; i < system.getNumForces(); i++) {
+        Force& force = const_cast<Force&>(system.getForce(i));
+        if (auto ibf = dynamic_cast<IsolatedBondedForce*>(&force)) isoBondedForces.push_back(ibf);
+        if (auto gf = dynamic_cast<GridForce*>(&force)) gridForces.push_back(gf);
+        if (auto inb = dynamic_cast<IsolatedNonbondedForce*>(&force)) isoNBForces.push_back(inb);
+        if (auto igbsa = dynamic_cast<IsolatedGBSAForce*>(&force)) isoGBSAForces.push_back(igbsa);
+        if (auto gbsa = dynamic_cast<GBSAGridForce*>(&force)) gbsaForces.push_back(gbsa);
+        if (dynamic_cast<const HarmonicBondForce*>(&force)   != nullptr ||
+            dynamic_cast<const HarmonicAngleForce*>(&force)  != nullptr ||
+            dynamic_cast<const PeriodicTorsionForce*>(&force) != nullptr)
+            hasStockBonded = true;
+    }
+    BondedHessian bondedHessian;
+    if (hasStockBonded) bondedHessian.initialize(system, context);
+
+    // K-group discovery + per-group System particle indices (same pattern
+    // as NewtonMinimizer::minimize).
+    int K = 1;
+    for (auto* ibf : isoBondedForces) K = std::max(K, ibf->getNumParticleGroups());
+    for (auto* inb : isoNBForces)     K = std::max(K, inb->getNumParticleGroups());
+    vector<vector<int>> groupIndices(K);
+    if (!isoBondedForces.empty()) {
+        for (int g = 0; g < K; g++) {
+            std::string name;
+            isoBondedForces[0]->getParticleGroup(g, name, groupIndices[g]);
+        }
+    } else if (!isoNBForces.empty()) {
+        for (int g = 0; g < K; g++) {
+            std::string name;
+            isoNBForces[0]->getParticleGroup(g, name, groupIndices[g]);
+        }
+    }
+    const int nAtomsTpl = groupIndices.empty() || groupIndices[0].empty()
+        ? 0 : (int)groupIndices[0].size();
+    auto scatterBlock = [&](vector<double>& Hfull, const vector<double>& iH, int g) {
+        int n3t = 3 * nAtomsTpl;
+        const auto& idx = groupIndices[g];
+        for (int a = 0; a < nAtomsTpl; a++)
+            for (int b = 0; b < nAtomsTpl; b++) {
+                int rowFull = 3 * idx[a], colFull = 3 * idx[b];
+                for (int di = 0; di < 3; di++)
+                    for (int dj = 0; dj < 3; dj++)
+                        Hfull[(rowFull+di) * n + (colFull+dj)]
+                            += iH[(3*a+di) * n3t + (3*b+dj)];
+            }
+    };
+
+    for (int iter = 0; iter < maxIterations; iter++) {
+        lastIterations = iter + 1;
+
+        State state = context.getState(State::Positions | State::Forces | State::Energy);
+        vector<Vec3> positions = state.getPositions();
+        vector<Vec3> forces = state.getForces();
+        double energy = state.getPotentialEnergy();
+
+        vector<double> gradient(n);
+        for (int i = 0; i < numAtoms; i++) {
+            gradient[3*i]     = -forces[i][0];
+            gradient[3*i + 1] = -forces[i][1];
+            gradient[3*i + 2] = -forces[i][2];
+        }
+
+        double sum = 0.0;
+        for (double g : gradient) sum += g * g;
+        lastRMSForce = sqrt(sum / gradient.size());
+        if (lastRMSForce < tolerance) return true;
+
+        vector<double> H = hasStockBonded
+            ? bondedHessian.computeHessian(context)
+            : vector<double>(n * n, 0.0);
+        for (IsolatedBondedForce* ibf : isoBondedForces) {
+            for (int g = 0; g < K; g++)
+                scatterBlock(H, ibf->computeHessian(context, g), g);
+        }
+        for (GridForce* gf : gridForces) {
+            gf->computeHessian(context);
+            vector<double> blocks = gf->getHessianBlocks(context);
+            for (int i = 0; i < numAtoms; i++) {
+                if (6*i + 5 < (int)blocks.size()) {
+                    double dxx = blocks[6*i + 0], dyy = blocks[6*i + 1], dzz = blocks[6*i + 2];
+                    double dxy = blocks[6*i + 3], dxz = blocks[6*i + 4], dyz = blocks[6*i + 5];
+                    int base = 3*i;
+                    H[(base+0)*n + (base+0)] += dxx;
+                    H[(base+1)*n + (base+1)] += dyy;
+                    H[(base+2)*n + (base+2)] += dzz;
+                    H[(base+0)*n + (base+1)] += dxy;
+                    H[(base+1)*n + (base+0)] += dxy;
+                    H[(base+0)*n + (base+2)] += dxz;
+                    H[(base+2)*n + (base+0)] += dxz;
+                    H[(base+1)*n + (base+2)] += dyz;
+                    H[(base+2)*n + (base+1)] += dyz;
+                }
+            }
+        }
+        for (IsolatedNonbondedForce* inb : isoNBForces) {
+            for (int g = 0; g < K; g++)
+                scatterBlock(H, inb->computeHessian(context, g), g);
+        }
+        for (IsolatedGBSAForce* igbsa : isoGBSAForces) {
+            vector<double> iH = igbsa->computeHessian(context);
+            if (iH.size() == H.size())
+                for (size_t i = 0; i < H.size(); i++) H[i] += iH[i];
+        }
+        for (GBSAGridForce* gbsa : gbsaForces) {
+            gbsa->computeHessian(context);
+            vector<double> gbsaH = gbsa->getFullHessian(context);
+            if (gbsaH.size() == H.size()) for (size_t i = 0; i < H.size(); i++) H[i] += gbsaH[i];
+        }
+
+        // Symmetrize H (Jacobi requires exact symmetry to full precision).
+        for (int i = 0; i < n; i++)
+            for (int j = i + 1; j < n; j++) {
+                double sym = 0.5 * (H[i*n + j] + H[j*n + i]);
+                H[i*n + j] = sym;
+                H[j*n + i] = sym;
+            }
+
+        vector<double> eigvals, eigvecs;
+        jacobiEigen(H, n, eigvals, eigvecs);
+
+        // Project gradient onto eigenvectors.
+        vector<double> g_proj(n, 0.0);
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                g_proj[i] += eigvecs[j * n + i] * gradient[j];
+
+        double mu = solveRFOShift(eigvals, g_proj);
+
+        // Step in eigenbasis: alpha_i = -g_i / (lambda_i - mu).
+        vector<double> alpha(n, 0.0);
+        for (int i = 0; i < n; i++) {
+            double denom = eigvals[i] - mu;
+            if (fabs(denom) < 1e-12) denom = (denom < 0 ? -1e-12 : 1e-12);
+            alpha[i] = -g_proj[i] / denom;
+        }
+
+        vector<double> dx(n, 0.0);
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                dx[i] += eigvecs[i * n + j] * alpha[j];
+
+        // Scale down if any component exceeds maxStep.
+        double maxComp = 0.0;
+        for (double v : dx) maxComp = max(maxComp, fabs(v));
+        double stepScale = 1.0;
+        if (maxComp > maxStep) stepScale = maxStep / maxComp;
+
+        vector<Vec3> newPos = positions;
+        for (int i = 0; i < numAtoms; i++) {
+            newPos[i][0] += stepScale * dx[3*i];
+            newPos[i][1] += stepScale * dx[3*i + 1];
+            newPos[i][2] += stepScale * dx[3*i + 2];
+        }
+        context.setPositions(newPos);
+
+        if (useLineSearch) {
+            // Simple backtracking: halve until energy decreases or 5 attempts.
+            State s2 = context.getState(State::Energy);
+            double e2 = s2.getPotentialEnergy();
+            double alpha_ls = stepScale;
+            for (int bt = 0; bt < 5 && !(e2 < energy); bt++) {
+                alpha_ls *= 0.5;
+                for (int i = 0; i < numAtoms; i++) {
+                    newPos[i][0] = positions[i][0] + alpha_ls * dx[3*i];
+                    newPos[i][1] = positions[i][1] + alpha_ls * dx[3*i + 1];
+                    newPos[i][2] = positions[i][2] + alpha_ls * dx[3*i + 2];
+                }
+                context.setPositions(newPos);
+                s2 = context.getState(State::Energy);
+                e2 = s2.getPotentialEnergy();
+            }
+        }
+    }
+    return false;
+}

@@ -128,8 +128,6 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
             int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
             int binIdx = binOffset / numPoints;
             corrOffset = binIdx * 27 * numPoints;  // Values are at deriv=0
-        } else if (useKDECorrections) {
-            corrOffset = 0;
         } else {
             corrOffset = binOffset;
         }
@@ -357,20 +355,14 @@ __device__ inline GBSAInterpolationResult interpolateGBSAGrids(
     if (method == 0) {
         // Trilinear interpolation (default, optimized version)
         // Compute correction offset based on format:
-        // - Pure KDE [27*numPoints]: offset=0
         // - Binned [numBins*numPoints]: offset=binOffset
         // - Binned+KDE [numBins*27*numPoints]: offset=binIdx*27*numPoints (values at deriv=0)
         int corrOffset;
         if (hasBinnedKDEDerivatives) {
-            // Binned+KDE: binOffset was computed as binIdx*numPoints, need binIdx*27*numPoints
             int numPoints = gridCounts[0] * gridCounts[1] * gridCounts[2];
             int binIdx = binOffset / numPoints;
-            corrOffset = binIdx * 27 * numPoints;  // Values are at deriv=0
-        } else if (useKDECorrections) {
-            // Pure KDE: no binning
-            corrOffset = 0;
+            corrOffset = binIdx * 27 * numPoints;
         } else {
-            // Standard binned: use binOffset directly
             corrOffset = binOffset;
         }
 
@@ -577,8 +569,6 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
             int numPoints = gridCounts[0] * nyz;
             int binIdx = binOffset / numPoints;
             corrOffset = binIdx * 27 * numPoints;
-        } else if (useKDECorrections) {
-            corrOffset = 0;
         } else {
             corrOffset = binOffset;
         }
@@ -938,8 +928,6 @@ __device__ inline GBSAHessianResult interpolateGBSAGridsWithHessian(
             int numPoints = gridCounts[0] * nyz;
             int binIdx = binOffset / numPoints;
             corrOffset = binIdx * 27 * numPoints;
-        } else if (useKDECorrections) {
-            corrOffset = 0;
         } else {
             corrOffset = binOffset;
         }
@@ -1021,8 +1009,9 @@ extern "C" __global__ void computeReceptorHCT(
     bool hasBinnedKDEDerivatives,              // True if corrections are binned+KDE [numBins*27*nPoints]
     float* __restrict__ hctReceptor            // Output: HCT from receptor
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= totalParticles) return;
+    const int stride_p = blockDim.x * gridDim.x;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < totalParticles; idx += stride_p) {
 
     // Determine which group this atom belongs to and its position within the group
     int atomInGroup = idx;
@@ -1076,6 +1065,7 @@ extern "C" __global__ void computeReceptorHCT(
     );
 
     hctReceptor[idx] = result.isInside ? result.hct : 0.0f;
+    }
 }
 
 /**
@@ -1197,8 +1187,9 @@ extern "C" __global__ void computeBornRadii(
     int templateNumAtoms,
     float* __restrict__ bornRadii
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numAtoms) return;
+    const int stride = blockDim.x * gridDim.x;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < numAtoms; idx += stride) {
 
     int templateIdx = idx % templateNumAtoms;
     float R_i = radii[templateIdx];
@@ -1220,6 +1211,7 @@ extern "C" __global__ void computeBornRadii(
     bornRadius = fminf(bornRadius, 50.0f);  // Max 50 nm
 
     bornRadii[idx] = bornRadius;
+    }
 }
 
 /**
@@ -1485,8 +1477,9 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= totalParticles) return;
+    const int stride_p = blockDim.x * gridDim.x;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < totalParticles; idx += stride_p) {
 
     // Determine group and atom in group
     int atomInGroup = idx;
@@ -1563,6 +1556,7 @@ extern "C" __global__ void computeReceptorHCTGradientForce(
     atomicAdd(&forceBuffer[particleIdx], static_cast<unsigned long long>((long long)(force.x * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx + paddedNumAtoms], static_cast<unsigned long long>((long long)(force.y * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(force.z * 0x100000000)));
+    }
 }
 
 /**
@@ -1843,8 +1837,9 @@ extern "C" __global__ void prepareHessianIntermediates(
     float* __restrict__ d2R_dPsi2_out,
     float* __restrict__ dE_dHCT_out
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numAtoms) return;
+    const int stride_p = blockDim.x * gridDim.x;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < numAtoms; idx += stride_p) {
 
     int templateIdx = idx % templateNumAtoms;
     float R_i = radii[templateIdx];
@@ -1895,6 +1890,7 @@ extern "C" __global__ void prepareHessianIntermediates(
 
     // dE/dHCT = dE/dR * dR/dΨ (derivative of energy w.r.t. raw HCT integral)
     dE_dHCT_out[idx] = dE_dR_in[idx] * dR_dPsi;
+    }
 }
 
 /**
