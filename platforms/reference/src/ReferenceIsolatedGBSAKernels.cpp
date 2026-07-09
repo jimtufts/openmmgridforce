@@ -765,6 +765,21 @@ void ReferenceCalcIsolatedGBSAForceKernel::computeGroup(
                     }
                 }
             }
+            // Receptor ΔSA from ligand-induced Born radius change (PAIRWISE probe = 0.14).
+            if (includeSurfaceArea) {
+                const double probe = 0.14;
+                for (int j = 0; j < numReceptorAtoms; j++) {
+                    if (std::abs(recBornRadiiWithLig[j] - receptorBornRadiiRef[j]) < 1e-7)
+                        continue;
+                    double Rsolv = receptorRadii[j] + probe;
+                    double ratioW = receptorRadii[j] / recBornRadiiWithLig[j];
+                    double ratioA = receptorRadii[j] / receptorBornRadiiRef[j];
+                    double r6W = ratioW*ratioW*ratioW*ratioW*ratioW*ratioW;
+                    double r6A = ratioA*ratioA*ratioA*ratioA*ratioA*ratioA;
+                    desolvation += surfaceTension * 4.0 * M_PI * Rsolv * Rsolv * (r6W - r6A);
+                }
+            }
+
             desolvation *= scale;
             groupReceptorDesolvations_[g] = desolvation;
             groupEnergies_[g] += desolvation;
