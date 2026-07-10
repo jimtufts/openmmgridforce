@@ -768,9 +768,10 @@ void CudaIntegrateMultiGroupHMCStepKernel::executeMC(
         }
     }
 
-    // Get baseline PE (compute forces + energy for all groups)
-    int allGroupsMask = 0xFFFFFFFF;
-    context.calcForcesAndEnergy(true, true, allGroupsMask);
+    // Baseline PE using the MC energy mask (skips ~0 pairwise GBSA at low
+    // alpha) and energy only -- MC accept/reject needs energy, not forces.
+    int mcMask = integrator.getMCEnergyGroupMask();
+    context.calcForcesAndEnergy(false, true, mcMask);
     vector<double> peBaseline(K, 0.0);
     computeGroupPE(peBaseline);
 
@@ -867,8 +868,8 @@ void CudaIntegrateMultiGroupHMCStepKernel::executeMC(
             cu.executeKernel(mcApplyRigidBodyMoveKernel, args, numBlocks * blockSize, blockSize);
         }
 
-        // 5. Recompute PE
-        context.calcForcesAndEnergy(true, true, allGroupsMask);
+        // 5. Recompute PE (MC energy mask, energy only)
+        context.calcForcesAndEnergy(false, true, mcMask);
         vector<double> peTrial(K, 0.0);
         computeGroupPE(peTrial);
 

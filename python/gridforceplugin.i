@@ -1908,6 +1908,8 @@ public:
     int getNumMCTrials() const;
     void setMCStepSize(double stepSize);
     double getMCStepSize() const;
+    void setMCEnergyGroupMask(int mask);
+    int getMCEnergyGroupMask() const;
     void setGroupMCEnabled(int group, bool enabled);
     bool getGroupMCEnabled(int group) const;
     void setAllGroupMCEnabled(const std::vector<int>& enabled);
@@ -2023,6 +2025,8 @@ public:
     int getNumMCTrials() const;
     void setMCStepSize(double stepSize);
     double getMCStepSize() const;
+    void setMCEnergyGroupMask(int mask);
+    int getMCEnergyGroupMask() const;
     void setGroupMCEnabled(int group, bool enabled);
     bool getGroupMCEnabled(int group) const;
     void setAllGroupMCEnabled(const std::vector<int>& enabled);

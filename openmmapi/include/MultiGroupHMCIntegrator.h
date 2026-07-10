@@ -303,6 +303,15 @@ public:
     double getMCStepSize() const { return mcStepSize; }
 
     /**
+     * Force-group mask used when evaluating MC trial energies. Lets the MC
+     * skip forces that are ~0 at low alpha (e.g. the pairwise GBSA) so the
+     * MC energy is cheap, matching the reference's grid-only sampling
+     * Hamiltonian. Default 0xFFFFFFFF (all groups).
+     */
+    void setMCEnergyGroupMask(int mask) { mcEnergyGroupMask = mask; }
+    int getMCEnergyGroupMask() const { return mcEnergyGroupMask; }
+
+    /**
      * Enable/disable MC moves for a specific group.
      * Only enabled groups receive MC trial moves.
      * @param group   group index
@@ -495,6 +504,7 @@ private:
     // MC configuration
     int numMCTrials;                  // number of MC trials per step (0=disabled)
     double mcStepSize;                // Gaussian translation sigma in nm
+    int mcEnergyGroupMask;            // force-group mask for MC trial energy (default all)
     std::vector<int> groupMCEnabled;  // per-group MC eligibility (1=on, 0=off)
     int mcAttempted;                  // cumulative MC attempted count
     int mcAccepted;                   // cumulative MC accepted count

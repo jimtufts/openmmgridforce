@@ -48,6 +48,7 @@ MultiGroupHMCIntegrator::MultiGroupHMCIntegrator(int numGroups, int atomsPerGrou
     // MC defaults (disabled)
     numMCTrials = 0;
     mcStepSize = 0.025;  // 0.025 nm default
+    mcEnergyGroupMask = 0xFFFFFFFF;  // all force groups (override to skip pairwise GBSA)
     groupMCEnabled.resize(numGroups, 0);
     mcAttempted = 0;
     mcAccepted = 0;

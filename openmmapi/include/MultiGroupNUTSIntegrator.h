@@ -138,6 +138,8 @@ public:
      */
     void setMCStepSize(double stepSize);
     double getMCStepSize() const { return mcStepSize; }
+    void setMCEnergyGroupMask(int mask) { mcEnergyGroupMask = mask; }
+    int getMCEnergyGroupMask() const { return mcEnergyGroupMask; }
 
     /**
      * Enable/disable MC moves for a specific group.
@@ -345,6 +347,7 @@ private:
     // MC configuration
     int numMCTrials;
     double mcStepSize;
+    int mcEnergyGroupMask;
     std::vector<int> groupMCEnabled;
     int mcAttempted;
     int mcAccepted;

@@ -49,6 +49,7 @@ MultiGroupNUTSIntegrator::MultiGroupNUTSIntegrator(int numGroups, int atomsPerGr
     // MC defaults (disabled)
     numMCTrials = 0;
     mcStepSize = 0.025;
+    mcEnergyGroupMask = 0xFFFFFFFF;
     groupMCEnabled.resize(numGroups, 0);
     mcAttempted = 0;
     mcAccepted = 0;
