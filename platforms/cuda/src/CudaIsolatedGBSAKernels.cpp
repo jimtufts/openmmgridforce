@@ -1364,18 +1364,31 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
 
 void CudaCalcIsolatedGBSAForceKernel::updateParametersInContext(ContextImpl& context,
                                                                  const IsolatedGBSAForce& force) {
-    // Re-upload atom parameters
-    vector<float> chargesVec(numAtoms), radiiVec(numAtoms), scalesVec(numAtoms);
+    // Re-upload atom parameters. Route through uploadRealScalars so the
+    // vector element size matches the CudaArray element size at this
+    // context's precision (float in single, double in mixed/double).
+    vector<double> chargesVec(numAtoms), radiiVec(numAtoms), scalesVec(numAtoms);
     for (int i = 0; i < numAtoms; i++) {
         double q, r, s;
         force.getAtomParameters(i, q, r, s);
-        chargesVec[i] = static_cast<float>(q);
-        radiiVec[i] = static_cast<float>(r);
-        scalesVec[i] = static_cast<float>(s);
+        chargesVec[i] = q;
+        radiiVec[i] = r;
+        scalesVec[i] = s;
     }
-    charges.upload(chargesVec);
-    radii.upload(radiiVec);
-    scaleFactors.upload(scalesVec);
+    // Buffers were sized+typed at init time; here we just re-upload with
+    // the element type matching the context precision.
+    if (cu.getUseDoublePrecision()) {
+        charges.upload(chargesVec);
+        radii.upload(radiiVec);
+        scaleFactors.upload(scalesVec);
+    } else {
+        std::vector<float> cf(chargesVec.begin(), chargesVec.end());
+        std::vector<float> rf(radiiVec.begin(), radiiVec.end());
+        std::vector<float> sf(scalesVec.begin(), scalesVec.end());
+        charges.upload(cf);
+        radii.upload(rf);
+        scaleFactors.upload(sf);
+    }
 
     // Update solvent parameters
     double soluteDielectric = force.getSoluteDielectric();
