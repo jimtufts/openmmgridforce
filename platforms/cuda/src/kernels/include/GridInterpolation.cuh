@@ -25,6 +25,14 @@
 #include "TricubicCoefficients.cuh"
 #include "TriquinticCoefficients.cuh"
 
+// Element type of the stored grid values. Host defines to `double` when
+// double-precision context is active or force.setUseDoubleStorage(true).
+// Defaults to `float`. LJr inv_power=4 chain rule cube-amplifies grid quantum,
+// so float32 storage becomes the accuracy floor in double-precision runs.
+#ifndef GRID_VALUES_TYPE
+#define GRID_VALUES_TYPE float
+#endif
+
 /**
  * Result of grid interpolation containing value and gradient.
  */
@@ -112,7 +120,7 @@ __device__ inline bool computeGridCell(
  *                        If false, gradient is in unit cell coords (for chain rule application).
  */
 __device__ inline InterpolationResult trilinearInterpolate(
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     real originX, real originY, real originZ,
@@ -192,7 +200,7 @@ __device__ inline InterpolationResult trilinearInterpolate(
  *                        If false, gradient is in unit cell coords (for chain rule application).
  */
 __device__ inline InterpolationResult bsplineInterpolate(
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     real originX, real originY, real originZ,
@@ -280,7 +288,7 @@ __device__ inline InterpolationResult bsplineInterpolate(
  * where deriv_idx: 0=f, 1=dx, 2=dy, 3=dz, 4=dxx, 5=dxy, 6=dxz, 7=dyy, 8=dyz, 9=dzz, ..., 13=dxyz
  */
 __device__ inline InterpolationResult tricubicInterpolate(
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
@@ -362,7 +370,7 @@ __device__ inline InterpolationResult tricubicInterpolate(
  * Derivative storage (RASPA3 order): gridDerivatives[deriv_idx * totalPoints + point_idx]
  */
 __device__ inline InterpolationResult triquinticInterpolate(
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
@@ -490,7 +498,7 @@ __device__ inline bool triquinticInterpolateReal(
  * Provides C3 continuity when combined with quintic prefilter.
  */
 __device__ inline InterpolationResult quinticBsplineInterpolate(
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
     real originX, real originY, real originZ,
@@ -591,7 +599,7 @@ __device__ inline InterpolationResult quinticBsplineInterpolate(
  * @return InterpolationResult with value and gradient
  */
 __device__ inline InterpolationResult interpolateGrid(
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const GRID_STORAGE_TYPE* __restrict__ gridDerivatives,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,

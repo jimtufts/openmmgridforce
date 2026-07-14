@@ -9,4 +9,4 @@ source ~/miniforge3/etc/profile.d/conda.sh
 conda activate openmmgridforce312
 
 cd /home/jtufts/src/p312/openmmgridforce
-python python/tests/bench_multigroup_pairwise.py
+python -u python/tests/bench_multigroup_pairwise.py

@@ -18,7 +18,7 @@ extern "C" __global__ void computeGridForce(
     unsigned long long* __restrict__ forceBuffers,
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const float* __restrict__ scalingFactors,
     const float invPower,
     const int invPowerMode,  // 0=NONE, 1=RUNTIME, 2=STORED

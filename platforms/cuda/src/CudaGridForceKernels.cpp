@@ -699,6 +699,28 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     // (raw) forces sharing the same GridData get separate GPU cache entries
     gridHash ^= std::hash<int>{}(interpolationMethod) + 0x9e3779b9;
 
+    // Store grid values as double when running in a double-precision CUDA
+    // Context OR when the caller explicitly opts in via setUseDoubleStorage(true).
+    // LJr's inv_power=4 chain rule cube-amplifies grid quantization, so float32
+    // storage becomes the accuracy floor in a double-precision run. Cache key
+    // includes the dtype so a mixed-precision Context still sees the float
+    // cached copy.
+    const bool wantDoubleValues =
+        cu.getUseDoublePrecision() || force.getUseDoubleStorage();
+    gridHash ^= (wantDoubleValues ? (size_t)0xD0D0D0D0D0D0D0D0ULL : (size_t)0);
+
+    auto uploadGridValues = [&](std::shared_ptr<CudaArray>& arr) {
+        arr = std::make_shared<CudaArray>();
+        if (wantDoubleValues) {
+            arr->initialize<double>(cu, vals.size(), "gridValues");
+            arr->upload(vals);
+        } else {
+            vector<float> valsFloat(vals.begin(), vals.end());
+            arr->initialize<float>(cu, vals.size(), "gridValues");
+            arr->upload(valsFloat);
+        }
+    };
+
     // Only upload full grid to GPU if NOT using tiled mode
     // (Tiled mode streams tiles on demand via TileManager)
     if (!willUseTiledMode) {
@@ -715,10 +737,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
             } else {
                 // Cached entry expired - remove it and create new one
                 gridCache.erase(it);
-                vector<float> valsFloat(vals.begin(), vals.end());
-                g_vals_shared = std::make_shared<CudaArray>();
-                g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
-                g_vals_shared->upload(valsFloat);
+                uploadGridValues(g_vals_shared);
                 gridCache[cacheKey] = g_vals_shared;
                 vals.clear();
                 vals.shrink_to_fit();
@@ -734,10 +753,7 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
                 }
             }
 
-            vector<float> valsFloat(vals.begin(), vals.end());
-            g_vals_shared = std::make_shared<CudaArray>();
-            g_vals_shared->initialize<float>(cu, vals.size(), "gridValues");
-            g_vals_shared->upload(valsFloat);
+            uploadGridValues(g_vals_shared);
             gridCache[cacheKey] = g_vals_shared;
             vals.clear();
             vals.shrink_to_fit();
@@ -974,6 +990,15 @@ void CudaCalcGridForceKernel::initialize(const System& system, const GridForce& 
     }
     if (wantDoubleStorage)
         defines["GRID_STORAGE_TYPE"] = "double";
+    // Grid VALUES: only promote for the non-tiled path. TileManager streams
+    // tiles from a float-only on-disk format, so the tiled kernels must keep
+    // GRID_VALUES_TYPE=float even in a double Context. The compiled bundle
+    // includes both tiled and non-tiled read kernels; splitting a define
+    // between them would need separate compiles, so we conservatively keep
+    // values in float whenever tiled mode is in play.
+    if (!willUseTiledMode &&
+        (cu.getUseDoublePrecision() || force.getUseDoubleStorage()))
+        defines["GRID_VALUES_TYPE"] = "double";
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
         CudaGridForceKernelSources::gridForceKernel +
@@ -2109,9 +2134,16 @@ void CudaCalcGridForceKernel::generateGrid(
     d_gridSpacing.upload(gridSpacingVec);
 
     // Generate the derivatives in double when double storage is enabled.
+    // Promote grid VALUES to double when the context is double-precision or
+    // the caller opts in via setUseDoubleStorage. The chunk / tile buffers
+    // below must match the kernel's GRID_VALUES_TYPE.
+    const bool wantDoubleValues =
+        cu.getUseDoublePrecision() || useDoubleStorage;
     map<string, string> genDefines;
     if (useDoubleStorage)
         genDefines["GRID_STORAGE_TYPE"] = "double";
+    if (wantDoubleValues)
+        genDefines["GRID_VALUES_TYPE"] = "double";
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
         CudaGridForceKernelSources::gridGenerationKernel, genDefines);
@@ -2330,9 +2362,13 @@ void CudaCalcGridForceKernel::generateGrid(
                           << " (points " << chunkOffset << " to " << (chunkOffset + chunkSize - 1) << ")" << std::endl;
             }
 
-            // Allocate GPU buffer for this chunk
+            // Allocate GPU buffer for this chunk in the values-storage precision
+            // set by GRID_VALUES_TYPE above.
             CudaArray chunkVals;
-            chunkVals.initialize<float>(cu, chunkSize, "gridValuesChunk");
+            if (wantDoubleValues)
+                chunkVals.initialize<double>(cu, chunkSize, "gridValuesChunk");
+            else
+                chunkVals.initialize<float>(cu, chunkSize, "gridValuesChunk");
 
             int gridSizeKernel = (chunkSize + blockSize - 1) / blockSize;
 
@@ -2372,13 +2408,19 @@ void CudaCalcGridForceKernel::generateGrid(
             // Synchronize
             cuStreamSynchronize(cu.getCurrentStream());
 
-            // Download chunk results
-            vector<float> chunkValsFloat(chunkSize);
-            chunkVals.download(chunkValsFloat);
-
-            // Copy to output array
-            for (int i = 0; i < chunkSize; i++) {
-                vals[chunkOffset + i] = chunkValsFloat[i];
+            // Download chunk results into `vals` at the same precision the
+            // device buffer was allocated at, then widen the float copy in
+            // place; skips a round-trip cast when running in double.
+            if (wantDoubleValues) {
+                vector<double> chunkValsDouble(chunkSize);
+                chunkVals.download(chunkValsDouble);
+                for (int i = 0; i < chunkSize; i++)
+                    vals[chunkOffset + i] = chunkValsDouble[i];
+            } else {
+                vector<float> chunkValsFloat(chunkSize);
+                chunkVals.download(chunkValsFloat);
+                for (int i = 0; i < chunkSize; i++)
+                    vals[chunkOffset + i] = chunkValsFloat[i];
             }
         }
     }
@@ -2458,9 +2500,16 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
     receptorEpsilons.upload(epsilonsVec);
 
     // Generate the derivatives in double when double storage is enabled.
+    // Promote grid VALUES to double when the context is double-precision or
+    // the caller opts in via setUseDoubleStorage. The chunk / tile buffers
+    // below must match the kernel's GRID_VALUES_TYPE.
+    const bool wantDoubleValues =
+        cu.getUseDoublePrecision() || useDoubleStorage;
     map<string, string> genDefines;
     if (useDoubleStorage)
         genDefines["GRID_STORAGE_TYPE"] = "double";
+    if (wantDoubleValues)
+        genDefines["GRID_VALUES_TYPE"] = "double";
     CUmodule module = cu.createModule(
         CudaGridForceKernelSources::commonHeaders +
         CudaGridForceKernelSources::gridGenerationKernel, genDefines);
@@ -2565,9 +2614,14 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
                     tiledGrid.writeTile(tx, ty, tz, values, derivBytes);
 
                 } else {
-                    // Values only
+                    // Values only. Device buffer matches GRID_VALUES_TYPE so
+                    // the kernel's writes align; on-disk file format still
+                    // stores values as float (downcast below).
                     CudaArray tileValsGPU;
-                    tileValsGPU.initialize<float>(cu, tilePoints, "tileValues");
+                    if (wantDoubleValues)
+                        tileValsGPU.initialize<double>(cu, tilePoints, "tileValues");
+                    else
+                        tileValsGPU.initialize<float>(cu, tilePoints, "tileValues");
 
                     CUfunction tileKernel = cu.getKernel(module, "generateTileKernel");
 
@@ -2611,9 +2665,17 @@ void CudaCalcGridForceKernel::generateGridToTiledFile(
 
                     cuStreamSynchronize(cu.getCurrentStream());
 
-                    // Download and write
+                    // Download in the device buffer's precision, then downcast
+                    // for the on-disk float32 file format.
                     std::vector<float> values(tilePoints);
-                    tileValsGPU.download(values);
+                    if (wantDoubleValues) {
+                        std::vector<double> valuesDouble(tilePoints);
+                        tileValsGPU.download(valuesDouble);
+                        for (int i = 0; i < tilePoints; i++)
+                            values[i] = (float)valuesDouble[i];
+                    } else {
+                        tileValsGPU.download(values);
+                    }
 
                     tiledGrid.writeTile(tx, ty, tz, values);
                 }

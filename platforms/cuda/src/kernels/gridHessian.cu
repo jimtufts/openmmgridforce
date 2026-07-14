@@ -130,7 +130,7 @@ extern "C" __global__ void computeGridHessian(
     mixed* __restrict__ hessianBuffer,  // 6 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const float* __restrict__ scalingFactors,
     const float invPower,
     const int invPowerMode,  // 0=NONE, 1=RUNTIME, 2=STORED
@@ -701,7 +701,7 @@ extern "C" __global__ void computeGridThirdDerivatives(
     mixed* __restrict__ thirdDerivBuffer,  // 10 components per atom
     const int* __restrict__ gridCounts,
     const float* __restrict__ gridSpacing,
-    const float* __restrict__ gridValues,
+    const GRID_VALUES_TYPE* __restrict__ gridValues,
     const float* __restrict__ scalingFactors,
     const float invPower,
     const int invPowerMode,

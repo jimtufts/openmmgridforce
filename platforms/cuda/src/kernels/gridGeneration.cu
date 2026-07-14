@@ -199,7 +199,7 @@ extern "C" __global__ void generateGridWithAnalyticalDerivatives(
 }
 
 extern "C" __global__ void generateGridKernel(
-    float* __restrict__ gridValues,
+    GRID_VALUES_TYPE* __restrict__ gridValues,
     const float3* __restrict__ receptorPositions,
     const float* __restrict__ receptorCharges,
     const float* __restrict__ receptorSigmas,
