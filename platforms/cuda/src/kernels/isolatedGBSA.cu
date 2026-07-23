@@ -277,7 +277,8 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
     int numReceptorAtoms,
     real prefactor,
     real* __restrict__ receptorEnergy,
-    int numTiles
+    int numTiles,
+    float cutoffDistance
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
     const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / TILE_SIZE;
@@ -288,6 +289,8 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
     __shared__ real energyBuffer[256];
 
     const int NUM_BLOCKS = (numReceptorAtoms + TILE_SIZE - 1) / TILE_SIZE;
+    const float cutoff2 = cutoffDistance * cutoffDistance;
+    const bool useCutoff = (cutoffDistance > 0.0f);
 
     real energy = 0.0f;
 
@@ -350,17 +353,19 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
                     real dy = localData[tbx + j].y - pos1.y;
                     real dz = localData[tbx + j].z - pos1.z;
                     real r2 = dx * dx + dy * dy + dz * dz;
-                    real r = sqrt(r2);
+                    if (!useCutoff || r2 <= cutoff2) {
+                        real q2 = localData[tbx + j].charge;
+                        real R2 = localData[tbx + j].bornRadius;
+                        real RiRj = R1 * R2;
+                        real expArg = -r2 / (4.0f * RiRj);
+                        real expTerm = exp(expArg);
+                        real f_gb2 = r2 + RiRj * expTerm;
+                        real f_gb = sqrt(f_gb2);
 
-                    real q2 = localData[tbx + j].charge;
-                    real R2 = localData[tbx + j].bornRadius;
-                    real RiRj = R1 * R2;
-                    real expArg = -r2 / (4.0f * RiRj);
-                    real expTerm = exp(expArg);
-                    real f_gb2 = r2 + RiRj * expTerm;
-                    real f_gb = sqrt(f_gb2);
-
-                    energy += prefactor * q1 * q2 / f_gb;
+                        real pairEnergy = prefactor * q1 * q2 / f_gb;
+                        if (useCutoff) pairEnergy -= prefactor * q1 * q2 / cutoffDistance;
+                        energy += pairEnergy;
+                    }
                 }
             }
         } else {
@@ -373,18 +378,19 @@ extern "C" __global__ void computeReceptorGBEnergyTiled(
                     real dy = localData[tbx + tj].y - pos1.y;
                     real dz = localData[tbx + tj].z - pos1.z;
                     real r2 = dx * dx + dy * dy + dz * dz;
-                    real r = sqrt(r2);
+                    if (!useCutoff || r2 <= cutoff2) {
+                        real q2 = localData[tbx + tj].charge;
+                        real R2 = localData[tbx + tj].bornRadius;
+                        real RiRj = R1 * R2;
+                        real expArg = -r2 / (4.0f * RiRj);
+                        real expTerm = exp(expArg);
+                        real f_gb2 = r2 + RiRj * expTerm;
+                        real f_gb = sqrt(f_gb2);
 
-                    real q2 = localData[tbx + tj].charge;
-                    real R2 = localData[tbx + tj].bornRadius;
-                    real RiRj = R1 * R2;
-                    real expArg = -r2 / (4.0f * RiRj);
-                    real expTerm = exp(expArg);
-                    real f_gb2 = r2 + RiRj * expTerm;
-                    real f_gb = sqrt(f_gb2);
-
-                    // Each pair counted once (atom1 in tile X, atom2 in tile Y, x > y)
-                    energy += prefactor * q1 * q2 / f_gb;
+                        real pairEnergy = prefactor * q1 * q2 / f_gb;
+                        if (useCutoff) pairEnergy -= prefactor * q1 * q2 / cutoffDistance;
+                        energy += pairEnergy;
+                    }
                 }
                 tj = (tj + 1) & (TILE_SIZE - 1);
                 __syncwarp();
@@ -512,7 +518,8 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
     real prefactor,
     real* __restrict__ receptorEnergy,    // [1] scalar output
     real* __restrict__ receptorDeDR,      // [numReceptorAtoms] per-atom output
-    int numTiles
+    int numTiles,
+    float cutoffDistance                  // <=0 disables cutoff
 ) {
     const int totalWarps = (gridDim.x * blockDim.x) / TILE_SIZE;
     const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / TILE_SIZE;
@@ -523,6 +530,8 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
     __shared__ real energyBuffer[256];
 
     const int NUM_BLOCKS = (numReceptorAtoms + TILE_SIZE - 1) / TILE_SIZE;
+    const float cutoff2 = cutoffDistance * cutoffDistance;
+    const bool useCutoff = (cutoffDistance > 0.0f);
 
     real energy = 0.0f;
     real myDeDR = 0.0f;  // dE/dR for atom1 (this thread's atom)
@@ -599,22 +608,29 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
                     real dz = localData[tbx + tj].z - pos1.z;
                     real r2 = dx*dx + dy*dy + dz*dz;
 
-                    real q2 = localData[tbx + tj].charge;
-                    real R2 = localData[tbx + tj].bornRadius;
-                    real RiRj = R1 * R2;
-                    real expArg = -r2 / (4.0f * RiRj);
-                    real expTerm = exp(expArg);
-                    real f_gb2 = r2 + RiRj * expTerm;
-                    real f_gb = sqrt(f_gb2);
-                    real invFgb2 = 1.0f / f_gb2;
+                    // Strict cutoff on rec-rec GB pair — matches vanilla
+                    // GBSAOBCForce.CutoffNonPeriodic. Skipped pairs contribute
+                    // zero to energy AND to dE/dR (no shift needed there).
+                    if (!useCutoff || r2 <= cutoff2) {
+                        real q2 = localData[tbx + tj].charge;
+                        real R2 = localData[tbx + tj].bornRadius;
+                        real RiRj = R1 * R2;
+                        real expArg = -r2 / (4.0f * RiRj);
+                        real expTerm = exp(expArg);
+                        real f_gb2 = r2 + RiRj * expTerm;
+                        real f_gb = sqrt(f_gb2);
+                        real invFgb2 = 1.0f / f_gb2;
 
-                    energy += prefactor * q1 * q2 / f_gb;
+                        real pairEnergy = prefactor * q1 * q2 / f_gb;
+                        if (useCutoff) pairEnergy -= prefactor * q1 * q2 / cutoffDistance;
+                        energy += pairEnergy;
 
-                    real factor = -prefactor * q1 * q2 * invFgb2;
-                    real dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-                    real dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-                    myDeDR += factor * dFgbDR1;
-                    localData[tbx + tj].energy += factor * dFgbDR2;
+                        real factor = -prefactor * q1 * q2 * invFgb2;
+                        real dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                        real dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                        myDeDR += factor * dFgbDR1;
+                        localData[tbx + tj].energy += factor * dFgbDR2;
+                    }
                 }
                 tj = (tj + 1) & (TILE_SIZE - 1);
                 __syncwarp();
@@ -636,22 +652,26 @@ extern "C" __global__ void computeReceptorGBEnergyAndDeDRTiled(
                     real dz = localData[tbx + tj].z - pos1.z;
                     real r2 = dx*dx + dy*dy + dz*dz;
 
-                    real q2 = localData[tbx + tj].charge;
-                    real R2 = localData[tbx + tj].bornRadius;
-                    real RiRj = R1 * R2;
-                    real expArg = -r2 / (4.0f * RiRj);
-                    real expTerm = exp(expArg);
-                    real f_gb2 = r2 + RiRj * expTerm;
-                    real f_gb = sqrt(f_gb2);
-                    real invFgb2 = 1.0f / f_gb2;
+                    if (!useCutoff || r2 <= cutoff2) {
+                        real q2 = localData[tbx + tj].charge;
+                        real R2 = localData[tbx + tj].bornRadius;
+                        real RiRj = R1 * R2;
+                        real expArg = -r2 / (4.0f * RiRj);
+                        real expTerm = exp(expArg);
+                        real f_gb2 = r2 + RiRj * expTerm;
+                        real f_gb = sqrt(f_gb2);
+                        real invFgb2 = 1.0f / f_gb2;
 
-                    energy += prefactor * q1 * q2 / f_gb;
+                        real pairEnergy = prefactor * q1 * q2 / f_gb;
+                        if (useCutoff) pairEnergy -= prefactor * q1 * q2 / cutoffDistance;
+                        energy += pairEnergy;
 
-                    real factor = -prefactor * q1 * q2 * invFgb2;
-                    real dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-                    real dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
-                    myDeDR += factor * dFgbDR1;
-                    localData[tbx + tj].energy += factor * dFgbDR2;
+                        real factor = -prefactor * q1 * q2 * invFgb2;
+                        real dFgbDR1 = (R2 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                        real dFgbDR2 = (R1 * expTerm / (2.0f * f_gb)) * (1.0f + r2 / (4.0f * RiRj));
+                        myDeDR += factor * dFgbDR1;
+                        localData[tbx + tj].energy += factor * dFgbDR2;
+                    }
                 }
                 tj = (tj + 1) & (TILE_SIZE - 1);
                 __syncwarp();
@@ -2213,7 +2233,8 @@ extern "C" __global__ void computeIsolatedGBEnergy(
     int paddedNumAtoms,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
-    mixed* __restrict__ groupUnscaledEnergies
+    mixed* __restrict__ groupUnscaledEnergies,
+    float cutoffDistance   // <=0 disables cutoff (matches vanilla NoCutoff)
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2247,6 +2268,8 @@ extern "C" __global__ void computeIsolatedGBEnergy(
 
     mixed energy = 0.0f;
     real3 force = make_real3(0.0f, 0.0f, 0.0f);
+    float cutoff2 = cutoffDistance * cutoffDistance;
+    bool useCutoff = (cutoffDistance > 0.0f);
 
     // Self energy term
     energy += 0.5f * prefactor * q_i * q_i / R_i;
@@ -2259,13 +2282,15 @@ extern "C" __global__ void computeIsolatedGBEnergy(
         int particleIdx_j = particleIndices[j];
 
         real4 pos_j = posq[particleIdx_j];
-        real q_j = charges[templateIdx_j];
-        real R_j = bornRadii[j];
-
         real dx = pos_j.x - pos_i.x;
         real dy = pos_j.y - pos_i.y;
         real dz = pos_j.z - pos_i.z;
         real r2 = dx*dx + dy*dy + dz*dz;
+        // Strict cutoff on lig-lig GB pair energy — matches vanilla
+        // GBSAOBCForce.CutoffNonPeriodic (ReferenceObc.cpp:327).
+        if (useCutoff && r2 > cutoff2) continue;
+        real q_j = charges[templateIdx_j];
+        real R_j = bornRadii[j];
         real r = sqrt(r2);
 
         // Still equation
@@ -2277,6 +2302,10 @@ extern "C" __global__ void computeIsolatedGBEnergy(
         real invFgb = 1.0f / f_gb;
 
         real pairEnergy = prefactor * q_i * q_j * invFgb;
+        if (useCutoff) {
+            // Direct-Coulomb shift correction (ReferenceObc.cpp:352).
+            pairEnergy -= prefactor * q_i * q_j / cutoffDistance;
+        }
         energy += pairEnergy;
 
         // Force = -dE/dr scaled by alchemical factor
@@ -5176,6 +5205,14 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             real invFgb = 1.0f / f_gb;
 
             real pairEnergy = prefactor * lQ * recQ * invFgb;
+            if (useCutoff) {
+                // Direct-Coulomb shift correction — matches vanilla OpenMM
+                // GBSAOBCForce.CutoffNonPeriodic (ReferenceObc.cpp:352).
+                // Makes the shifted GB pair energy consistent with a truncated
+                // Coulomb at r = cutoff. Constant-per-pair shift, so no force
+                // contribution (dEdR_direct is unchanged).
+                pairEnergy -= prefactor * lQ * recQ / cutoffDistance;
+            }
             crossEnergy += pairEnergy;
 
             // Direct force on ligand

@@ -189,7 +189,11 @@ public:
      *
      * Returns NO_LOCALITY_CUTOFF (-1.0) if all receptor atoms are updated.
      */
-    double getReceptorLocalityCutoff() const { return receptorLocalityCutoff; }
+    /**
+     * @deprecated Now an alias for getCutoffDistance(). Retained for API
+     * compatibility. See setReceptorLocalityCutoff() for details.
+     */
+    double getReceptorLocalityCutoff() const { return cutoffDistance; }
 
     /**
      * Set the locality cutoff for receptor desolvation (nm).
@@ -199,7 +203,13 @@ public:
      * Note: This only affects receptor desolvation (Step 7). Ligand Born radii
      * and the cross-term always use all receptor atoms.
      */
-    void setReceptorLocalityCutoff(double distance) { receptorLocalityCutoff = distance; }
+    /**
+     * @deprecated Now a passthrough to setCutoffDistance(). Two separate
+     * cutoff APIs were historically supported (per-pair distance vs
+     * tile-skip optimization), but the internal implementation now uses a
+     * single unified cutoff to match OpenMM's GBSAOBCForce convention.
+     */
+    void setReceptorLocalityCutoff(double distance) { setCutoffDistance(distance); }
 
     // ========== Receptor Mode ==========
 

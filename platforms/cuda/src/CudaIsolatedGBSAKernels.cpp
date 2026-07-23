@@ -169,7 +169,10 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     receptorMode = force.getReceptorMode();
     hessianPrecision = force.getHessianPrecision();
     cutoffDistance = static_cast<float>(force.getCutoffDistance());
-    receptorLocalityCutoff = static_cast<float>(force.getReceptorLocalityCutoff());
+    // Unified cutoff: receptorLocalityCutoff is an internal alias for
+    // cutoffDistance so callers can't inadvertently mismatch the two.
+    // Matches OpenMM's single-cutoff convention.
+    receptorLocalityCutoff = cutoffDistance;
 
     // Compute GB prefactor: -138.935456 * (1/ε_solute - 1/ε_solvent)
     double soluteDielectric = force.getSoluteDielectric();
@@ -630,7 +633,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         void* refEnergyTiledArgs[] = {
             &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiRefPtr,
             &numReceptorAtoms, prefactorArgInit, &receptorRefEnergyPtr,
-            &scratchDeDRPtr, &numTiles
+            &scratchDeDRPtr, &numTiles, &cutoffDistance
         };
         cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel,
                          refEnergyTiledArgs, recNumBlocks * recBlockSize, recBlockSize);
@@ -741,21 +744,12 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         int tiledBlockSize = 256;
         int tiledBlocks = (totalTiles * 32 + tiledBlockSize - 1) / tiledBlockSize;
 
-        bool useLocalityCache = (receptorLocalityCutoff > 0.0f && hctRecBlockCache.isInitialized());
-
-        // Determine tile-skip and cache mode
-        float localityCutoffVal = -1.0f;  // no skip by default
+        // Strict cutoff on HCT — matches vanilla OpenMM GBSAOBCForce with
+        // CutoffNonPeriodic. No cache: correct under REPX / MC / position
+        // resets by construction (no stale state to invalidate).
+        float localityCutoffVal = (receptorLocalityCutoff > 0.0f)
+            ? receptorLocalityCutoff : -1.0f;
         CUdeviceptr hctCachePtr = (CUdeviceptr)0;
-
-        if (useLocalityCache && !hasTileCache) {
-            // First call: full computation, write cache
-            localityCutoffVal = -1.0f;  // no tile-skip
-            hctCachePtr = hctRecBlockCache.getDevicePointer();  // write cache
-        } else if (useLocalityCache && hasTileCache) {
-            // Subsequent calls: tile-skip + cached reconstruction
-            localityCutoffVal = receptorLocalityCutoff;  // enable tile-skip
-            hctCachePtr = (CUdeviceptr)0;  // don't overwrite cache
-        }
 
         CUdeviceptr groupScalingFactorsPtr2 = groupScalingFactorsBuffer.getDevicePointer();
         void* tiledArgs[] = {
@@ -770,20 +764,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         };
         cu.executeKernel(computeReceptorLigandHCTTiledKernel, tiledArgs, tiledBlocks * tiledBlockSize, tiledBlockSize);
 
-        // For tile-skip mode: add cached HCT for distant blocks (receptor→ligand direction)
-        if (useLocalityCache && hasTileCache) {
-            CUdeviceptr cachePtr = hctRecBlockCache.getDevicePointer();
-            float locCut = receptorLocalityCutoff;
-            void* distantArgs[] = {
-                &cachePtr, &posqPtr, &particleIndicesPtr,
-                &recBlockBoundsPtr, &locCut, &numRecBlocks,
-                &totalParticles, &hctRecFixedPtr
-            };
-            int distBlocks = (totalParticles + blockSize - 1) / blockSize;
-            cu.executeKernel(addDistantHCTFromCacheKernel, distantArgs, distBlocks * blockSize, blockSize);
-        }
-
-        // Convert fixed-point to float
+        // Convert fixed-point accumulators to float
         int convBlocks = (totalParticles + blockSize - 1) / blockSize;
         void* convArgs1[] = { &hctRecFixedPtr, &hctReceptorPtr, &totalParticles };
         cu.executeKernel(convertTiledHCTToFloatKernel, convArgs1, convBlocks * blockSize, blockSize);
@@ -793,28 +774,6 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         int convBlocks2 = (ligRecTotal + blockSize - 1) / blockSize;
         void* convArgs2[] = { &ligToRecFixedPtr, &ligandToReceptorHCTPtr2, &ligRecTotal };
         cu.executeKernel(convertTiledHCTToFloatKernel, convArgs2, convBlocks2 * blockSize, blockSize);
-
-        // For tile-skip mode: restore cached lig→rec HCT for distant receptor atoms
-        if (useLocalityCache && hasTileCache) {
-            CUdeviceptr ligRecCachePtr = ligToRecHCTCache.getDevicePointer();
-            float locCut = receptorLocalityCutoff;
-            void* restoreArgs[] = {
-                &ligRecCachePtr, &ligandToReceptorHCTPtr2,
-                &posqPtr, &particleIndicesPtr, &recBlockBoundsPtr, &locCut,
-                &groupStartPtr, &numParticleGroups, &numReceptorAtoms, &totalParticles
-            };
-            int restoreBlocks = (ligRecTotal + blockSize - 1) / blockSize;
-            cu.executeKernel(restoreDistantLigToRecHCTKernel, restoreArgs, restoreBlocks * blockSize, blockSize);
-        }
-
-        // First call: save cache for lig→rec direction
-        if (useLocalityCache && !hasTileCache) {
-            // Device-to-device copy of ligandToReceptorHCT → ligToRecHCTCache
-            CUdeviceptr srcPtr = ligandToReceptorHCT.getDevicePointer();
-            CUdeviceptr dstPtr = ligToRecHCTCache.getDevicePointer();
-            cuMemcpyDtoD(dstPtr, srcPtr, ligRecTotal * (size_t)realElementSize(cu));
-            hasTileCache = true;
-        }
 
         fusedHCTComputed_ = true;
     }
@@ -854,7 +813,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
         &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
         &forcePtr, &groupEnergiesPtr, &groupLigandEnergiesPtr, &paddedNumAtoms,
-        &globalScalingFactor, &groupScalingFactorsPtr, &groupUnscaledEnergiesPtr
+        &globalScalingFactor, &groupScalingFactorsPtr, &groupUnscaledEnergiesPtr,
+        &cutoffDistance
     };
     cu.executeKernel(computeGBEnergyKernel, energyArgs, numBlocks * blockSize, blockSize);
 
@@ -885,7 +845,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiLigOnlyPtr,
             &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
             &scratchForcePtr, &scratchGEPtr, &groupLigOnlyPtr, &paddedNumAtoms,
-            &globalScalingFactor, &groupScalingFactorsPtr, &nullUnscaledPtr
+            &globalScalingFactor, &groupScalingFactorsPtr, &nullUnscaledPtr,
+            &cutoffDistance
         };
         cu.executeKernel(computeGBEnergyKernel, ligOnlyArgs, numBlocks * blockSize, blockSize);
     }
@@ -990,7 +951,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 void* tiledArgs[] = {
                     &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
                     &numReceptorAtoms, prefactorArg, &receptorEnergyPtr, &groupDeDRPtr,
-                    &numTiles
+                    &numTiles, &cutoffDistance
                 };
                 cu.executeKernel(computeReceptorGBEnergyAndDeDRTiledKernel,
                                  tiledArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
@@ -998,7 +959,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 // Energy only
                 void* recEnergyArgs[] = {
                     &receptorPosPtr, &receptorChargesPtr, &groupBornRadiiPtr,
-                    &numReceptorAtoms, prefactorArg, &receptorEnergyPtr, &numTiles
+                    &numReceptorAtoms, prefactorArg, &receptorEnergyPtr, &numTiles,
+                    &cutoffDistance
                 };
                 cu.executeKernel(computeReceptorGBEnergyTiledKernel, recEnergyArgs, recNumBlocksTiled * recBlockSize, recBlockSize);
             }
@@ -1063,19 +1025,13 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         int forceBlocks2 = (forceThreads + blockSize - 1) / blockSize;
 
         CUdeviceptr recBlockBoundsPtr2 = recBlockBounds.getDevicePointer();
-        bool useForceTileSkip = (receptorLocalityCutoff > 0.0f && crossTermBlockCache.isInitialized());
 
-        // Force tile-skip: first call = no skip + cache write, subsequent = skip + reconstruct
-        float forceTileSkipCutoff = -1.0f;
+        // Strict cutoff on cross-term GB energy — matches vanilla OpenMM
+        // GBSAOBCForce with CutoffNonPeriodic. No cache: correct under REPX
+        // / MC by construction.
+        float forceTileSkipCutoff = (receptorLocalityCutoff > 0.0f)
+            ? receptorLocalityCutoff : -1.0f;
         CUdeviceptr crossCachePtr = (CUdeviceptr)0;
-
-        if (useForceTileSkip && !hasCrossTermCache) {
-            forceTileSkipCutoff = -1.0f;  // no skip, compute all
-            crossCachePtr = crossTermBlockCache.getDevicePointer();  // write cache
-        } else if (useForceTileSkip && hasCrossTermCache) {
-            forceTileSkipCutoff = receptorLocalityCutoff;  // enable tile-skip
-            crossCachePtr = (CUdeviceptr)0;  // don't overwrite cache
-        }
 
         void* tiledForceArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr, &chargesPtr,
@@ -1089,28 +1045,6 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &recBlockBoundsPtr2, &forceTileSkipCutoff, &crossCachePtr
         };
         cu.executeKernel(computePairwiseGBForceTiledKernel, tiledForceArgs, forceBlocks2 * blockSize, blockSize);
-
-        // For tile-skip mode: add cached cross-term energy for distant blocks
-        if (useForceTileSkip && hasCrossTermCache) {
-            float locCut = receptorLocalityCutoff;
-            void* distCrossArgs[] = {
-                &crossCachePtr, &posqPtr, &particleIndicesPtr,
-                &recBlockBoundsPtr2, &locCut, &groupStartPtr,
-                &numParticleGroups, &numRecBlocks2,
-                &globalScalingFactor, &groupScalingFactorsPtr, &groupCrossTermPtr
-            };
-            // Need to pass the actual cache pointer for reading
-            CUdeviceptr crossCacheReadPtr = crossTermBlockCache.getDevicePointer();
-            distCrossArgs[0] = &crossCacheReadPtr;
-            int totalCrossTiles = numParticleGroups * numRecBlocks2;
-            int crossBlocks = (totalCrossTiles + blockSize - 1) / blockSize;
-            cu.executeKernel(addDistantCrossTermFromCacheKernel, distCrossArgs, crossBlocks * blockSize, blockSize);
-        }
-
-        // First call: mark cross-term cache as built
-        if (useForceTileSkip && !hasCrossTermCache) {
-            hasCrossTermCache = true;
-        }
 
         // Add cross-term to group energies
         void* crossAccumArgs[] = {
@@ -1401,7 +1335,10 @@ void CudaCalcIsolatedGBSAForceKernel::updateParametersInContext(ContextImpl& con
     includeSurfaceArea = force.getIncludeSurfaceArea();
     surfaceTension = static_cast<float>(force.getSurfaceTension());
     cutoffDistance = static_cast<float>(force.getCutoffDistance());
-    receptorLocalityCutoff = static_cast<float>(force.getReceptorLocalityCutoff());
+    // Unified cutoff: receptorLocalityCutoff is an internal alias for
+    // cutoffDistance so callers can't inadvertently mismatch the two.
+    // Matches OpenMM's single-cutoff convention.
+    receptorLocalityCutoff = cutoffDistance;
 
     // Update alchemical scaling factors
     globalScalingFactor = static_cast<float>(force.getGlobalScalingFactor());
