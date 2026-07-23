@@ -1363,19 +1363,6 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
     if (singleGroup) {
         ligGroupStart = sGroupStart;
         ligGroupSize = sGroupSize;
-        // Cooperative load of ligand atoms
-        for (int i = threadIdx.x; i < ligGroupSize && i < MAX_LIG_ATOMS; i += blockDim.x) {
-            int ligGlobalIdx = ligGroupStart + i;
-            int particleIdx = particleIndices[ligGlobalIdx];
-            int templateIdx = (i % templateNumAtoms);
-            real4 p = posq[particleIdx];
-            sLigPos[i] = make_real4(p.x, p.y, p.z, 0);
-            real R = ligandRadii[templateIdx];
-            sLigR_off[i] = R - DIELECTRIC_OFFSET;
-            sLigS[i] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
-            sLigParticleIdx[i] = ligGlobalIdx;
-        }
-        __syncthreads();
     } else {
         // Block spans multiple groups — fall back to per-thread group lookup
         ligGroupStart = groupStart[groupIdx];
@@ -1394,68 +1381,92 @@ extern "C" __global__ void computeReceptorLigandHCTParallel(
     // Accumulate ligand→receptor HCT (this receptor atom screened by all ligand atoms)
     real hctLigToRec = 0.0f;
 
-    // Loop over ligand atoms
-    int nLig = (ligGroupSize < MAX_LIG_ATOMS) ? ligGroupSize : MAX_LIG_ATOMS;
-    for (int li = 0; li < nLig; li++) {
-        real4 ligPos;
-        real ligR_off, ligS;
-        int ligGlobalIdx;
+    // TILE the ligand: process in chunks of MAX_LIG_ATOMS. Fixes silent truncation
+    // when ligGroupSize > MAX_LIG_ATOMS.
+    for (int ligTileStart = 0; ligTileStart < ligGroupSize; ligTileStart += MAX_LIG_ATOMS) {
+        int nLig = ligGroupSize - ligTileStart;
+        if (nLig > MAX_LIG_ATOMS) nLig = MAX_LIG_ATOMS;
 
+        // For single-group blocks, cooperative-load this ligand tile into shared memory
         if (singleGroup) {
-            ligPos = sLigPos[li];
-            ligR_off = sLigR_off[li];
-            ligS = sLigS[li];
-            ligGlobalIdx = sLigParticleIdx[li];
-        } else {
-            int idx = ligGroupStart + li;
-            int particleIdx = particleIndices[idx];
-            int templateIdx = li % templateNumAtoms;
-            real4 p = posq[particleIdx];
-            ligPos = make_real4(p.x, p.y, p.z, 0);
-            real R = ligandRadii[templateIdx];
-            ligR_off = R - DIELECTRIC_OFFSET;
-            ligS = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
-            ligGlobalIdx = idx;
+            for (int i = threadIdx.x; i < nLig; i += blockDim.x) {
+                int ligGlobalIdx = ligGroupStart + ligTileStart + i;
+                int particleIdx = particleIndices[ligGlobalIdx];
+                int templateIdx = ((ligTileStart + i) % templateNumAtoms);
+                real4 p = posq[particleIdx];
+                sLigPos[i] = make_real4(p.x, p.y, p.z, 0);
+                real R = ligandRadii[templateIdx];
+                sLigR_off[i] = R - DIELECTRIC_OFFSET;
+                sLigS[i] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
+                sLigParticleIdx[i] = ligGlobalIdx;
+            }
+            __syncthreads();
         }
 
-        real dx = recPos.x - ligPos.x;
-        real dy = recPos.y - ligPos.y;
-        real dz = recPos.z - ligPos.z;
-        real r2 = dx*dx + dy*dy + dz*dz;
+        // Loop over ligand atoms in this tile
+        for (int li = 0; li < nLig; li++) {
+            real4 ligPos;
+            real ligR_off, ligS;
+            int ligGlobalIdx;
 
-        if (useCutoff && r2 > cutoff2) continue;
+            if (singleGroup) {
+                ligPos = sLigPos[li];
+                ligR_off = sLigR_off[li];
+                ligS = sLigS[li];
+                ligGlobalIdx = sLigParticleIdx[li];
+            } else {
+                int idx = ligGroupStart + ligTileStart + li;
+                int particleIdx = particleIndices[idx];
+                int templateIdx = (ligTileStart + li) % templateNumAtoms;
+                real4 p = posq[particleIdx];
+                ligPos = make_real4(p.x, p.y, p.z, 0);
+                real R = ligandRadii[templateIdx];
+                ligR_off = R - DIELECTRIC_OFFSET;
+                ligS = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
+                ligGlobalIdx = idx;
+            }
 
-        real invR = rsqrt(r2);
-        real r = r2 * invR;
-        if (r < 1e-6f) continue;
+            real dx = recPos.x - ligPos.x;
+            real dy = recPos.y - ligPos.y;
+            real dz = recPos.z - ligPos.z;
+            real r2 = dx*dx + dy*dy + dz*dz;
 
-        // --- Ligand→Receptor HCT (ligand screens this receptor atom) ---
-        real r_plus_Si = r + ligS;
-        if (recR_off < r_plus_Si) {
-            real r_minus_Si = fabs(r - ligS);
-            real l = (recR_off > r_minus_Si) ? (1.0f / recR_off) : (1.0f / r_minus_Si);
-            real u = 1.0f / r_plus_Si;
-            real l2 = l*l, u2 = u*u;
-            real r_inv = 1.0f / r;
-            real term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u/l) + 0.25f*ligS*ligS*r_inv*(l2-u2);
-            if (recR_off < (ligS - r)) term += 2.0f*(1.0f/recR_off - l);
-            hctLigToRec += term;
+            if (useCutoff && r2 > cutoff2) continue;
+
+            real invR = rsqrt(r2);
+            real r = r2 * invR;
+            if (r < 1e-6f) continue;
+
+            // --- Ligand→Receptor HCT (ligand screens this receptor atom) ---
+            real r_plus_Si = r + ligS;
+            if (recR_off < r_plus_Si) {
+                real r_minus_Si = fabs(r - ligS);
+                real l = (recR_off > r_minus_Si) ? (1.0f / recR_off) : (1.0f / r_minus_Si);
+                real u = 1.0f / r_plus_Si;
+                real l2 = l*l, u2 = u*u;
+                real r_inv = 1.0f / r;
+                real term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u/l) + 0.25f*ligS*ligS*r_inv*(l2-u2);
+                if (recR_off < (ligS - r)) term += 2.0f*(1.0f/recR_off - l);
+                hctLigToRec += term;
+            }
+
+            // --- Receptor→Ligand HCT (this receptor screens ligand atom) ---
+            real r_plus_Sj = r + recS;
+            if (ligR_off < r_plus_Sj) {
+                real r_minus_Sj = fabs(r - recS);
+                real l = (ligR_off > r_minus_Sj) ? (1.0f / ligR_off) : (1.0f / r_minus_Sj);
+                real u = 1.0f / r_plus_Sj;
+                real l2 = l*l, u2 = u*u;
+                real r_inv = 1.0f / r;
+                real term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u/l) + 0.25f*recS*recS*r_inv*(l2-u2);
+                if (ligR_off < (recS - r)) term += 2.0f*(1.0f/ligR_off - l);
+
+                // Accumulate into ligand atom's HCT via atomicAdd
+                atomicAdd(&hctReceptor[ligGlobalIdx], term);
+            }
         }
 
-        // --- Receptor→Ligand HCT (this receptor screens ligand atom) ---
-        real r_plus_Sj = r + recS;
-        if (ligR_off < r_plus_Sj) {
-            real r_minus_Sj = fabs(r - recS);
-            real l = (ligR_off > r_minus_Sj) ? (1.0f / ligR_off) : (1.0f / r_minus_Sj);
-            real u = 1.0f / r_plus_Sj;
-            real l2 = l*l, u2 = u*u;
-            real r_inv = 1.0f / r;
-            real term = l - u + 0.25f*r*(u2-l2) + 0.5f*r_inv*log(u/l) + 0.25f*recS*recS*r_inv*(l2-u2);
-            if (ligR_off < (recS - r)) term += 2.0f*(1.0f/ligR_off - l);
-
-            // Accumulate into ligand atom's HCT via atomicAdd
-            atomicAdd(&hctReceptor[ligGlobalIdx], term);
-        }
+        if (singleGroup) __syncthreads();  // release shared memory for next tile
     }
 
     // Direct write: ligand→receptor HCT for this receptor atom
@@ -5075,36 +5086,25 @@ extern "C" __global__ void computePairwiseGBForceTiled(
         int gs = groupStart[groupIdx];
         int ge = groupStart[groupIdx + 1];
         int groupSize = ge - gs;
-        int nLig = (groupSize < MAX_LIG) ? groupSize : MAX_LIG;
 
-        // Cooperative load: ligand atoms into shared memory
-        for (int i = tgx; i < nLig; i += TILE_SIZE) {
-            int ligGlobal = gs + i;
-            int particleIdx = particleIndices[ligGlobal];
-            int templateIdx = i % templateNumAtoms;
-            real4 p = posq[particleIdx];
-            sLigPos[sBase + i] = make_real4(p.x, p.y, p.z, 0);
-            sLigCharge[sBase + i] = ligandCharges[templateIdx];
-            sLigBornR[sBase + i] = ligandBornRadii[ligGlobal];
-            real R = ligandRadii[templateIdx];
-            sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
-            sLigS[sBase + i] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
-        }
-        __syncwarp();
-
-        // Tile-skip: check if any ligand atom is close enough to this receptor block
+        // Tile-skip: iterate ALL ligand atoms from global memory. Necessary
+        // for correctness when groupSize > MAX_LIG (we haven't loaded them
+        // into shared memory yet).
         if (useTileSkip) {
-            float4 bounds = recBlockBounds[recBlock];  // (cx, cy, cz, radius)
+            float4 bounds = recBlockBounds[recBlock];
             float threshold = localityCutoff + bounds.w;
             float threshold2 = threshold * threshold;
             bool anyClose = false;
-            for (int i = 0; i < nLig && !anyClose; i++) {
-                real dx = sLigPos[sBase + i].x - bounds.x;
-                real dy = sLigPos[sBase + i].y - bounds.y;
-                real dz = sLigPos[sBase + i].z - bounds.z;
+            for (int i = 0; i < groupSize && !anyClose; i++) {
+                int ligGlobal = gs + i;
+                int particleIdx = particleIndices[ligGlobal];
+                real4 lPos = posq[particleIdx];
+                real dx = lPos.x - bounds.x;
+                real dy = lPos.y - bounds.y;
+                real dz = lPos.z - bounds.z;
                 if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
             }
-            if (!anyClose) continue;  // skip this tile entirely
+            if (!anyClose) continue;
         }
 
         // Load receptor atom for this thread
@@ -5125,12 +5125,31 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             recBF = bornForcesRec[groupIdx * numReceptorAtoms + recIdx];
         }
 
-        // Accumulate per-receptor-atom contributions
-        real4 recForceOnLig = make_real4(0, 0, 0, 0);
+        // Accumulate per-receptor-atom contributions across all ligand tiles
         real crossEnergy = 0.0f;
 
-        // Iterate over all ligand atoms from shared memory
-        for (int li = 0; li < nLig; li++) {
+        // TILE the ligand atoms so groupSize > MAX_LIG works correctly.
+        for (int ligTileStart = 0; ligTileStart < groupSize; ligTileStart += MAX_LIG) {
+            int nLig = groupSize - ligTileStart;
+            if (nLig > MAX_LIG) nLig = MAX_LIG;
+
+            // Cooperative load of this ligand tile into shared memory
+            for (int i = tgx; i < nLig; i += TILE_SIZE) {
+                int ligGlobal = gs + ligTileStart + i;
+                int particleIdx = particleIndices[ligGlobal];
+                int templateIdx = (ligTileStart + i) % templateNumAtoms;
+                real4 p = posq[particleIdx];
+                sLigPos[sBase + i] = make_real4(p.x, p.y, p.z, 0);
+                sLigCharge[sBase + i] = ligandCharges[templateIdx];
+                sLigBornR[sBase + i] = ligandBornRadii[ligGlobal];
+                real R = ligandRadii[templateIdx];
+                sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
+                sLigS[sBase + i] = (R - DIELECTRIC_OFFSET) * ligandScaleFactors[templateIdx];
+            }
+            __syncwarp();
+
+            // Iterate over ligand atoms from this shared-memory tile
+            for (int li = 0; li < nLig; li++) {
             real4 lPos = sLigPos[sBase + li];
             real lQ = sLigCharge[sBase + li];
             real lBornR = sLigBornR[sBase + li];
@@ -5190,7 +5209,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
             }
 
             // Write forces on ligand atom via atomicAdd
-            int ligGlobal = gs + li;
+            int ligGlobal = gs + ligTileStart + li;
             int ligParticle = particleIndices[ligGlobal];
             atomicAdd(&forceBuffer[ligParticle], static_cast<unsigned long long>((long long)(fx * 0x100000000)));
             atomicAdd(&forceBuffer[ligParticle + paddedNumAtoms], static_cast<unsigned long long>((long long)(fy * 0x100000000)));
@@ -5198,7 +5217,9 @@ extern "C" __global__ void computePairwiseGBForceTiled(
 
             // Accumulate dE/dR_born_lig via fixed-point atomicAdd
             atomicAdd(&dEdR_crossTerm[ligGlobal], static_cast<unsigned long long>((long long)(dEdR_lig * 0x100000000)));
-        }
+            }  // end inner li loop
+            __syncwarp();  // ready shared memory for next ligand tile
+        }  // end ligTileStart loop
 
         // Write cross-term energy (per-group, scaled)
         if (validRec) {
@@ -5396,31 +5417,21 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
         int gs = groupStart[groupIdx];
         int ge = groupStart[groupIdx + 1];
         int groupSize = ge - gs;
-        int nLig = (groupSize < MAX_LIG) ? groupSize : MAX_LIG;
 
-        // Load ligand data into shared memory
-        for (int i = tgx; i < nLig; i += TILE_SIZE) {
-            int ligGlobal = gs + i;
-            int particleIdx = particleIndices[ligGlobal];
-            int templateIdx = i % templateNumAtoms;
-            real4 p = posq[particleIdx];
-            sLigPos[sBase + i] = make_real4(p.x, p.y, p.z, 0);
-            real R = ligandRadii[templateIdx];
-            sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
-            sLigBF[sBase + i] = bornForceLig[ligGlobal];
-        }
-        __syncwarp();
-
-        // Tile-skip: check if any ligand atom is close enough to this receptor block
+        // Tile-skip: iterate ALL ligand atoms from global memory (necessary
+        // for groupSize > MAX_LIG since we haven't loaded them yet).
         if (useTileSkip) {
             float4 bounds = recBlockBounds[recBlock];
             float threshold = localityCutoff + bounds.w;
             float threshold2 = threshold * threshold;
             bool anyClose = false;
-            for (int i = 0; i < nLig && !anyClose; i++) {
-                real dx = sLigPos[sBase + i].x - bounds.x;
-                real dy = sLigPos[sBase + i].y - bounds.y;
-                real dz = sLigPos[sBase + i].z - bounds.z;
+            for (int i = 0; i < groupSize && !anyClose; i++) {
+                int ligGlobal = gs + i;
+                int particleIdx = particleIndices[ligGlobal];
+                real4 lPos = posq[particleIdx];
+                real dx = lPos.x - bounds.x;
+                real dy = lPos.y - bounds.y;
+                real dz = lPos.z - bounds.z;
                 if (dx*dx + dy*dy + dz*dz < threshold2) anyClose = true;
             }
             if (!anyClose) continue;
@@ -5438,46 +5449,63 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
             recS = recR_off * receptorScaleFactors[recIdx];
         }
 
-        // Iterate ligand atoms: receptor screens ligand → force on ligand
-        for (int li = 0; li < nLig; li++) {
-            real4 lPos = sLigPos[sBase + li];
-            real lR_off = sLigR_off[sBase + li];
-            real lBF = sLigBF[sBase + li];
+        // TILE the ligand: process in chunks of MAX_LIG so groupSize > MAX_LIG works.
+        for (int ligTileStart = 0; ligTileStart < groupSize; ligTileStart += MAX_LIG) {
+            int nLig = groupSize - ligTileStart;
+            if (nLig > MAX_LIG) nLig = MAX_LIG;
 
-            real dx = lPos.x - recPos.x;
-            real dy = lPos.y - recPos.y;
-            real dz = lPos.z - recPos.z;
-            real r2 = dx*dx + dy*dy + dz*dz;
+            // Load this ligand tile into shared memory
+            for (int i = tgx; i < nLig; i += TILE_SIZE) {
+                int ligGlobal = gs + ligTileStart + i;
+                int particleIdx = particleIndices[ligGlobal];
+                int templateIdx = (ligTileStart + i) % templateNumAtoms;
+                real4 p = posq[particleIdx];
+                sLigPos[sBase + i] = make_real4(p.x, p.y, p.z, 0);
+                real R = ligandRadii[templateIdx];
+                sLigR_off[sBase + i] = R - DIELECTRIC_OFFSET;
+                sLigBF[sBase + i] = bornForceLig[ligGlobal];
+            }
+            __syncwarp();
 
-            if (useCutoff && r2 > cutoff2) continue;
+            // Iterate ligand atoms: receptor screens ligand → force on ligand
+            for (int li = 0; li < nLig; li++) {
+                real4 lPos = sLigPos[sBase + li];
+                real lR_off = sLigR_off[sBase + li];
+                real lBF = sLigBF[sBase + li];
 
-            real invR = rsqrt(r2);
-            real r = r2 * invR;
-            if (r < 1e-6f) continue;
+                real dx = lPos.x - recPos.x;
+                real dy = lPos.y - recPos.y;
+                real dz = lPos.z - recPos.z;
+                real r2 = dx*dx + dy*dy + dz*dz;
 
-            real r_plus_Srec = r + recS;
-            if (!validRec || lR_off >= r_plus_Srec) continue;
+                if (useCutoff && r2 > cutoff2) continue;
 
-            real r_minus_Srec = fabs(r - recS);
-            real l = (lR_off > r_minus_Srec) ? (1.0f/lR_off) : (1.0f/r_minus_Srec);
-            real u = 1.0f / r_plus_Srec;
-            real l2 = l*l, u2 = u*u;
-            real r2_inv = invR * invR;
+                real invR = rsqrt(r2);
+                real r = r2 * invR;
+                if (r < 1e-6f) continue;
 
-            real t3 = 0.125f * (1.0f + recS*recS*r2_inv) * (l2 - u2)
-                     + 0.25f * log(u/l) * r2_inv;
+                real r_plus_Srec = r + recS;
+                if (!validRec || lR_off >= r_plus_Srec) continue;
 
-            real de = lBF * t3 * invR;
+                real r_minus_Srec = fabs(r - recS);
+                real l = (lR_off > r_minus_Srec) ? (1.0f/lR_off) : (1.0f/r_minus_Srec);
+                real u = 1.0f / r_plus_Srec;
+                real l2 = l*l, u2 = u*u;
+                real r2_inv = invR * invR;
 
-            int ligGlobal = gs + li;
-            int ligParticle = particleIndices[ligGlobal];
-            atomicAdd(&forceBuffer[ligParticle], static_cast<unsigned long long>((long long)(de * dx * 0x100000000)));
-            atomicAdd(&forceBuffer[ligParticle + paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dy * 0x100000000)));
-            atomicAdd(&forceBuffer[ligParticle + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dz * 0x100000000)));
+                real t3 = 0.125f * (1.0f + recS*recS*r2_inv) * (l2 - u2)
+                         + 0.25f * log(u/l) * r2_inv;
 
+                real de = lBF * t3 * invR;
+
+                int ligGlobal = gs + ligTileStart + li;
+                int ligParticle = particleIndices[ligGlobal];
+                atomicAdd(&forceBuffer[ligParticle], static_cast<unsigned long long>((long long)(de * dx * 0x100000000)));
+                atomicAdd(&forceBuffer[ligParticle + paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dy * 0x100000000)));
+                atomicAdd(&forceBuffer[ligParticle + 2*paddedNumAtoms], static_cast<unsigned long long>((long long)(de * dz * 0x100000000)));
+            }
+            __syncwarp();
         }
-
-        __syncwarp();
     }
 }
 
