@@ -1253,6 +1253,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             CUdeviceptr receptorPosPtr2 = receptorPositions.getDevicePointer();
             CUdeviceptr receptorChargesPtr2 = receptorCharges.getDevicePointer();
             CUdeviceptr receptorBornRadiiPtr2 = receptorBornRadii.getDevicePointer();
+            float crossTermCutoff = (receptorLocalityCutoff > 0.0f)
+                ? receptorLocalityCutoff : -1.0f;
             void* crossDerivArgs[] = {
                 &posqPtr, &particleIndicesPtr, &chargesPtr,
                 &bornRadiiPtr,
@@ -1262,6 +1264,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 prefactorArg,
                 &dE_dRPtr,
                 &globalScalingFactor, &groupScalingFactorsPtr,
+                &crossTermCutoff,
             };
             cu.executeKernel(accumulateCrossTermBornDerivativesKernel,
                              crossDerivArgs, numBlocks * blockSize, blockSize);
