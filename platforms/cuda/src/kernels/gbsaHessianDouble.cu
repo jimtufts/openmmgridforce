@@ -1430,7 +1430,10 @@ extern "C" __global__ void pairwiseCrossBornDeriv1Double(
     if (idx >= totalParticles) return;
     int Nr = numReceptorAtoms;
     int dim3N = 3 * totalParticles;
-    const double MIN_CROSS_R2 = 0.01;
+    // Numerical safety floor only — 1e-8 nm^2 = 1e-4 nm is far below any physical
+    // MD distance. A larger floor creates a step discontinuity in H at r=0.1 nm.
+    // Matches the force-kernel fix (isolatedGBSA.cu).
+    const double MIN_CROSS_R2 = 1e-8;
 
     int g = 0, gs = 0, ge = 0;
     for (int gg = 0; gg < numGroups; gg++) {
@@ -1703,7 +1706,10 @@ extern "C" __global__ void pairwiseOuterProductHessianDouble(
     int atom_col = col / 3;
 
     double pf = (double)prefactor;
-    const double MIN_CROSS_R2 = 0.01;
+    // Numerical safety floor only — 1e-8 nm^2 = 1e-4 nm is far below any physical
+    // MD distance. A larger floor creates a step discontinuity in H at r=0.1 nm.
+    // Matches the force-kernel fix (isolatedGBSA.cu).
+    const double MIN_CROSS_R2 = 1e-8;
 
     size_t jrBase = (size_t)g * Nr * n3;
     size_t mrBase = (size_t)g * Nr * Nr;
@@ -1882,7 +1888,10 @@ extern "C" __global__ void pairwiseComputePerPairScalarsDouble(
     double dy = (double)pi.y - (double)pj.y;
     double dz = (double)pi.z - (double)pj.z;
     double r2 = dx*dx + dy*dy + dz*dz;
-    const double MIN_CROSS_R2 = 0.01;
+    // Numerical safety floor only — 1e-8 nm^2 = 1e-4 nm is far below any physical
+    // MD distance. A larger floor creates a step discontinuity in H at r=0.1 nm.
+    // Matches the force-kernel fix (isolatedGBSA.cu).
+    const double MIN_CROSS_R2 = 1e-8;
     if (r2 < MIN_CROSS_R2) {
         cRi_out[buf_idx] = 0.0;
         cRiRj_out[buf_idx] = 0.0;

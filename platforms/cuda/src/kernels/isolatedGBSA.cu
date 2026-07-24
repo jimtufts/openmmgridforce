@@ -2410,6 +2410,54 @@ extern "C" __global__ void computeIsolatedSAEnergy(
  *
  * Summed and multiplied by the alchemical scale, added to group desolvation.
  */
+/**
+ * Accumulate the receptor-SA contribution to receptorDeDR (dE_SA/dR_born_rec).
+ *
+ * Companion to computeReceptorDeltaSA (which handles the E side). Without this,
+ * the plugin computes the receptor ΔSA energy but the chain rule to Cartesian
+ * force on the ligand is missing that term, so F != -grad E and HMC drifts.
+ * Matches the ligand-side dE/dR_born_SA in accumulateIsolatedSADerivatives.
+ *
+ *   dE_SA/dR_born_rec_i = -6 * surfaceTension * 4π * (R_i+probe)^2
+ *                          * R_i^6 / R_born_rec_i^7  (evaluated at R_born_withL)
+ *
+ * Must be called BEFORE precomputeReceptorBornForces so the contribution flows
+ * into bornForcesRec and downstream chain-rule kernels.
+ */
+extern "C" __global__ void accumulateReceptorSADerivatives(
+    const real* __restrict__ receptorRadii,
+    const real* __restrict__ receptorBornRadii,     // per-group [g*N_r + i]
+    int numReceptorAtoms,
+    int numGroups,
+    float surfaceTension,
+    float probeRadius,
+    real* __restrict__ receptorDeDR,                // [g*N_r + i] +=
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
+) {
+    int totalWork = numGroups * numReceptorAtoms;
+    for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+         globalIdx < totalWork;
+         globalIdx += gridDim.x * blockDim.x) {
+
+        int groupIdx = globalIdx / numReceptorAtoms;
+        int i = globalIdx % numReceptorAtoms;
+        float scale = globalScalingFactor * groupScalingFactors[groupIdx];
+        if (scale < 0.05f) continue;
+
+        real R_i = receptorRadii[i];
+        real R_born = receptorBornRadii[groupIdx * numReceptorAtoms + i];
+
+        float Rsolv = R_i + probeRadius;
+        real ratio = R_i / R_born;
+        real ratio5 = ratio * ratio * ratio * ratio * ratio;
+        real dEdR_SA = -6.0f * surfaceTension * 4.0f * 3.14159265f
+                       * Rsolv * Rsolv * ratio5 * R_i / (R_born * R_born);
+
+        receptorDeDR[globalIdx] += dEdR_SA * scale;
+    }
+}
+
 extern "C" __global__ void computeReceptorDeltaSA(
     const real* __restrict__ receptorRadii,
     const real* __restrict__ receptorBornRadii,     // per-group [g*N_r + i]

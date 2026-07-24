@@ -119,6 +119,7 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       computeBornRadiiHCTKernel(nullptr), computeBornRadiiOBCKernel(nullptr),
       computeGBEnergyKernel(nullptr), computeSAEnergyKernel(nullptr),
       computeReceptorDeltaSAKernel(nullptr),
+      accumulateReceptorSADerivativesKernel(nullptr),
       accumulateBornRadiiDerivativesKernel(nullptr), accumulateSADerivativesKernel(nullptr),
       computeHCTChainRuleForcesKernel(nullptr),
       computeReceptorHCTGradientForceKernel(nullptr),
@@ -530,6 +531,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
     computeGBEnergyKernel = cu.getKernel(module, "computeIsolatedGBEnergy");
     computeSAEnergyKernel = cu.getKernel(module, "computeIsolatedSAEnergy");
     computeReceptorDeltaSAKernel = cu.getKernel(module, "computeReceptorDeltaSA");
+    accumulateReceptorSADerivativesKernel = cu.getKernel(module, "accumulateReceptorSADerivatives");
     accumulateBornRadiiDerivativesKernel = cu.getKernel(module, "accumulateIsolatedBornRadiiDerivatives");
     accumulateSADerivativesKernel = cu.getKernel(module, "accumulateIsolatedSADerivatives");
     computeHCTChainRuleForcesKernel = cu.getKernel(module, "computeIsolatedHCTChainRuleForces");
@@ -994,6 +996,26 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             };
             cu.executeKernel(accumulateCrossTermReceptorDeDRKernel,
                              crossDedrArgs, crossBlocks * blockSize, blockSize);
+        }
+
+        // 4b.3a++: Accumulate receptor SA contribution to receptorDeDR.
+        // dE_SA_rec/dR_born_rec is required so bornForcesRec captures the
+        // chain-rule path from receptor ΔSA back to Cartesian force on the
+        // ligand. Without this the SA energy is included but its derivative
+        // is dropped, breaking F = -grad E for the SA term.
+        if (includeForces && includeSurfaceArea) {
+            float rProbe = 0.14f;
+            int totalRecWork = numParticleGroups * numReceptorAtoms;
+            int saDerivBlocks = (totalRecWork + blockSize - 1) / blockSize;
+            void* recSaDerivArgs[] = {
+                &receptorRadiiPtr, &receptorBornRadiiPtr,
+                &numReceptorAtoms, &numParticleGroups,
+                &surfaceTension, &rProbe,
+                &receptorDeDRPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
+            };
+            cu.executeKernel(accumulateReceptorSADerivativesKernel,
+                             recSaDerivArgs, saDerivBlocks * blockSize, blockSize);
         }
 
         // 4b.3b: Precompute bornForces per receptor atom

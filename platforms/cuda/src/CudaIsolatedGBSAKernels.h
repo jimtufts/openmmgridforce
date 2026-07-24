@@ -287,6 +287,7 @@ private:
     CUfunction computeGBEnergyKernel;             // GB energy with forces
     CUfunction computeSAEnergyKernel;             // Surface area energy
     CUfunction computeReceptorDeltaSAKernel;      // Receptor ΔSA (PAIRWISE only)
+    CUfunction accumulateReceptorSADerivativesKernel; // Receptor SA -> receptorDeDR (PAIRWISE)
     CUfunction accumulateBornRadiiDerivativesKernel;
     CUfunction accumulateSADerivativesKernel;
     CUfunction computeHCTChainRuleForcesKernel;
