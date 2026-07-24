@@ -391,6 +391,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         initRealBuffer(cu, receptorSelfHCT, numReceptorAtoms, "isolatedGbsaReceptorSelfHCT");
         initRealBuffer(cu, receptorBornRadiiRef, numReceptorAtoms, "isolatedGbsaReceptorBornRadiiRef");
         initRealBuffer(cu, receptorReferenceEnergy, 1, "isolatedGbsaReceptorReferenceEnergy");
+        initRealBuffer(cu, receptorEnergyRef, 1, "isolatedGbsaReceptorEnergyRef");
     }
 
     // Process particle groups
@@ -937,9 +938,23 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.clearBuffer(receptorDeDR);  // clear ALL groups' dE/dR at once (async)
         }
 
-        double refEnergyDouble = receptorReferenceEnergyValue;
-        float refEnergyFloat = receptorReferenceEnergyValue;
-        void* refEnergyArg = (cu.getUseDoublePrecision() ? (void*)&refEnergyDouble : (void*)&refEnergyFloat);
+        // 4b.3-pre: Fresh reference energy this step.
+        // Compute receptor GB energy with receptor-alone Born radii (constant)
+        // via the SAME kernel invocation used for the with-ligand groups so
+        // the desolvation subtraction inside accumulateDesolvationOnGPU
+        // cancels any per-launch rounding that the previous init-time cached
+        // scalar had been leaking through (was ~64 kJ/mol systematic offset
+        // on OBC_RL delta for highly charged systems).
+        cu.clearBuffer(receptorEnergyRef);
+        CUdeviceptr receptorEnergyRefPtr = receptorEnergyRef.getDevicePointer();
+        void* refEnergyStepArgs[] = {
+            &receptorPosPtr, &receptorChargesPtr, &receptorBornRadiiRefPtr,
+            &numReceptorAtoms, prefactorArg, &receptorEnergyRefPtr, &numTiles,
+            &cutoffDistance
+        };
+        cu.executeKernel(computeReceptorGBEnergyTiledKernel, refEnergyStepArgs,
+                         recNumBlocksTiled * recBlockSize, recBlockSize);
+
         for (int g = 0; g < numParticleGroups; g++) {
             CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + (size_t)g * numReceptorAtoms * realElementSize(cu);
             CUdeviceptr groupDeDRPtr = receptorDeDRPtr + (size_t)g * numReceptorAtoms * realElementSize(cu);
@@ -968,7 +983,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             }
 
             void* accumArgs[] = {
-                &receptorEnergyPtr, refEnergyArg, &g,
+                &receptorEnergyPtr, &receptorEnergyRefPtr, &g,
                 &globalScalingFactor, &groupScalingFactorsPtr,
                 &groupEnergiesPtr, &groupDesolvPtr, &groupUnscaledEnergiesPtr
             };

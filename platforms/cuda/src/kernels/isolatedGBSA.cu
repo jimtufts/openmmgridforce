@@ -2173,8 +2173,9 @@ extern "C" __global__ void computeBornRadiiHCT(
     real psi = 0.5f * R_i_off * hctTotal;
     real denom = 1.0f / R_i_off - psi;
 
-    real bornRadius = (denom > 1e-6f) ? (1.0f / denom) : 50.0f;
-    bornRadius = fmin(bornRadius, (real)50.0);
+    // Match vanilla: direct 1/denom, no clamp (only trapped by explicit denom<=1e-6).
+    // Retain the near-zero denom guard to avoid divide-by-zero blowup.
+    real bornRadius = (denom > 1e-6f) ? (1.0f / denom) : (real)1.0e10;
 
     bornRadii[idx] = bornRadius;
 }
@@ -2207,9 +2208,10 @@ extern "C" __global__ void computeBornRadiiOBC(
     real tanhVal = tanh(tanhArg);
 
     real denom = 1.0f / R_i_off - tanhVal / R_i;
-    real bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
-
-    bornRadius = fmin(bornRadius, (real)50.0);
+    // Match vanilla ReferenceObc: direct 1/denom, no clamp, no fallback.
+    // Prior fmin/fallback caused systematic Born-radii divergence from
+    // vanilla for highly charged systems (~64 kJ/mol on 1jje lig-alone GB).
+    real bornRadius = 1.0f / denom;
 
     bornRadii[idx] = bornRadius;
 }
@@ -3103,8 +3105,8 @@ extern "C" __global__ void computeReceptorBornRadiiReference(
     real tanhVal = tanh(tanhArg);
 
     real denom = 1.0f / R_i_off - tanhVal / R_i;
-    real bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
-    bornRadius = fmin(bornRadius, (real)50.0);
+    // Match vanilla ReferenceObc: direct 1/denom, no clamp, no fallback.
+    real bornRadius = 1.0f / denom;
 
     receptorBornRadiiRef[i] = bornRadius;
 }
@@ -3326,8 +3328,8 @@ extern "C" __global__ void computeReceptorBornRadiiWithLigand(
     real tanhVal = tanh(tanhArg);
 
         real denom = 1.0f / R_i_off - tanhVal / R_i;
-        real bornRadius = (denom > 0.0f) ? (1.0f / denom) : R_i;
-        bornRadius = fmin(bornRadius, (real)50.0);
+        // Match vanilla ReferenceObc: direct 1/denom, no clamp, no fallback.
+        real bornRadius = 1.0f / denom;
 
         receptorBornRadii[groupIdx * numReceptorAtoms + i] = bornRadius;
     }
@@ -4457,7 +4459,7 @@ extern "C" __global__ void computeCrossTermChainRuleForces(
  */
 extern "C" __global__ void accumulateDesolvationOnGPU(
     const real* __restrict__ receptorEnergy,
-    real referenceEnergy,
+    const real* __restrict__ referenceEnergyPtr,   // device pointer, replaces cached scalar
     int groupIdx,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors,
@@ -4467,7 +4469,11 @@ extern "C" __global__ void accumulateDesolvationOnGPU(
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    real desolvation = receptorEnergy[0] - referenceEnergy;
+    // Reference energy is now computed fresh each step by the same
+    // computeReceptorGBEnergyTiled kernel that produces receptorEnergy,
+    // so the subtraction cancels any per-launch rounding that a cached
+    // (init-time) reference would otherwise leak.
+    real desolvation = receptorEnergy[0] - referenceEnergyPtr[0];
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
 
     groupReceptorDesolvations[groupIdx] = desolvation * scale;

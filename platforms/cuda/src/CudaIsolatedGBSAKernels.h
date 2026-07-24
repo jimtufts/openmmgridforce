@@ -103,7 +103,8 @@ private:
     OpenMM::CudaArray receptorSelfHCT;          // [N_rec] - receptor-receptor HCT (constant, float)
     OpenMM::CudaArray receptorSelfHCTFixed;     // [N_rec] - receptor-receptor HCT (fixed-point for tiled kernel)
     OpenMM::CudaArray receptorBornRadiiRef;     // [N_rec] - receptor Born radii without ligand
-    OpenMM::CudaArray receptorReferenceEnergy;  // [1] - scalar reference energy
+    OpenMM::CudaArray receptorReferenceEnergy;  // [1] - scalar reference energy (init-time; kept for compat)
+    OpenMM::CudaArray receptorEnergyRef;        // [1] - per-step recomputed reference energy
     OpenMM::CudaArray ligandToReceptorHCT;      // [N_rec * numGroups] - per-group ligand screening
     OpenMM::CudaArray receptorBornRadii;        // [K * N_rec] - per-group Born radii with ligand
     OpenMM::CudaArray receptorEnergy;           // [K] - per-group receptor energy working buffer
