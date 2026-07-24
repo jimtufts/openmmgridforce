@@ -1275,12 +1275,16 @@ extern "C" __global__ void pairwiseRecBornDouble(
 extern "C" __global__ void pairwiseRecCouplingDouble(
     const real4* __restrict__ receptorPositions,
     const real* __restrict__ receptorCharges,
+    const real* __restrict__ receptorRadii,
     const double* __restrict__ recBorn,
     const double* __restrict__ recDRdPsi,
     const double* __restrict__ recD2RdPsi2,
     int numGroups,
     int numReceptorAtoms,
     float prefactor,
+    int includeSA,
+    float surfaceTension,
+    float probeRadiusVal,
     double* __restrict__ recDeDR,
     double* __restrict__ MR)        // [K * Nr * Nr]
 {
@@ -1299,6 +1303,25 @@ extern "C" __global__ void pairwiseRecCouplingDouble(
 
     double deDR = -0.5 * pf * qj*qj / (Rj*Rj);
     double diag = pf * qj*qj / (Rj*Rj*Rj) * dRj * dRj;   // self curvature
+
+    // Receptor SA contribution to dE/dR_born_rec and the Born-Born coupling
+    // diagonal. Mirrors the ligand-side d²E_SA term in
+    // computeBornCouplingMatrixDouble; closes the F != -grad E gap on the
+    // receptor path that the Force fix addressed for the runtime path.
+    if (includeSA) {
+        double R_intr = (double)receptorRadii[j];
+        double Rprobe = R_intr + (double)probeRadiusVal;
+        double ratio = R_intr / Rj;
+        double ratio2 = ratio * ratio;
+        double ratio6 = ratio2 * ratio2 * ratio2;
+        double E_SA = (double)surfaceTension * 4.0 * 3.14159265358979323846
+                    * Rprobe * Rprobe * ratio6;
+        // dE_SA/dR = -6 * E_SA / R  (note E_SA carries the (R_intr/R)^6 already)
+        deDR += -6.0 * E_SA / Rj;
+        // d²E_SA/dR² = 42 * E_SA / R²
+        double d2E_SA = 42.0 * E_SA / (Rj * Rj);
+        diag += d2E_SA * dRj * dRj;
+    }
 
     for (int m = 0; m < Nr; m++) {
         MR[mrBase + (size_t)j*Nr + m] = 0.0;

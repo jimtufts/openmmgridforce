@@ -1884,10 +1884,13 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& cont
                          numBlocksRec * blockSize, blockSize);
 
         // R2: receptor dE/dR + coupling matrix MR.
+        int hessIncludeSAInt = includeSurfaceArea ? 1 : 0;
+        float hessProbeRadius = 0.14f;
         void* recCoupArgs[] = {
-            &receptorPosPtr, &receptorChargesPtr,
+            &receptorPosPtr, &receptorChargesPtr, &receptorRadiiPtr,
             &recBornPtr, &recDRdPsiPtr, &recD2RdPsi2Ptr,
             &numParticleGroups, &numReceptorAtoms, &prefactorHessF,
+            &hessIncludeSAInt, &surfaceTension, &hessProbeRadius,
             &recDeDRPtr, &recMRPtr
         };
         cu.executeKernel(pairwiseRecCouplingDoubleKernel, recCoupArgs,
