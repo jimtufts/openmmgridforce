@@ -2473,8 +2473,11 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
     real prefactor,
     real* __restrict__ dE_dR,
     float globalScalingFactor,
-    const float* __restrict__ groupScalingFactors
+    const float* __restrict__ groupScalingFactors,
+    float cutoffDistance
 ) {
+    const bool useCutoff = (cutoffDistance > 0.0f);
+    const real cutoff2 = cutoffDistance * cutoffDistance;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     int groupIdx = 0;
@@ -2527,6 +2530,8 @@ extern "C" __global__ void accumulateIsolatedBornRadiiDerivatives(
         real dy = pos_j.y - pos_i.y;
         real dz = pos_j.z - pos_i.z;
         real r2 = dx*dx + dy*dy + dz*dz;
+        // Must match cutoff filter in computeIsolatedGBEnergy so F = -grad E.
+        if (useCutoff && r2 > cutoff2) continue;
 
         real RiRj = R_i * R_j;
         real expArg = -r2 / (4.0f * RiRj);
@@ -3404,8 +3409,12 @@ extern "C" __global__ void computeCrossTermGBEnergy(
 
     // Loop over all receptor atoms (cross-term is Coulomb-like — not pruned)
     // isActiveRecAtom parameter kept in signature for interface consistency but ignored
-    // Minimum distance floor to prevent singularity when ligand overlaps receptor
-    const real MIN_CROSS_R2 = 0.01f;  // 0.1 nm = 1 Angstrom
+    // Numerical safety floor only — 1e-8 nm² = 1e-4 nm = 0.001 Å is well below
+    // any physical MD distance. A larger floor (previously 0.01) creates a
+    // step discontinuity in E and F when pairs cross the threshold during MD,
+    // breaking HMC energy conservation. Vanilla OpenMM GBSAOBCForce has no
+    // such clamp — trusts the Still equation.
+    const real MIN_CROSS_R2 = 1e-8f;
     for (int j = 0; j < numReceptorAtoms; j++) {
         real4 pos_rec = receptorPositions[j];
         real q_rec = receptorCharges[j];
@@ -3505,7 +3514,8 @@ extern "C" __global__ void accumulateCrossTermBornDerivatives(
     real R_lig = ligandBornRadii[idx];
 
     real dEdR_accum = 0.0f;
-    const real MIN_CROSS_R2 = 0.01f;
+    // See MIN_CROSS_R2 comment above (near 3413) — numerical safety only.
+    const real MIN_CROSS_R2 = 1e-8f;
     // Per-pair distance cutoff. The integrand carries exp(-r^2/(4 R_i R_j))
     // which for r >= 1.2 nm and typical Born radii is ~1e-4 of near-atom
     // contributions; a 1.2 nm cutoff gives sub-milli-kcal/mol error while
@@ -3748,10 +3758,14 @@ extern "C" __global__ void accumulateCrossTermReceptorDeDR(
     int numReceptorAtoms,
     int templateNumAtoms,
     real prefactor,
-    real* __restrict__ receptorDeDR                // [K * N_rec] output (+=)
+    real* __restrict__ receptorDeDR,               // [K * N_rec] output (+=)
+    float cutoffDistance
 ) {
     int totalWork = numGroups * numReceptorAtoms;
-    const float MIN_R2 = 0.01f;
+    // Numerical safety floor only — see MIN_CROSS_R2 comment near line 3413.
+    const float MIN_R2 = 1e-8f;
+    const bool useCutoff = (cutoffDistance > 0.0f);
+    const real cutoff2 = cutoffDistance * cutoffDistance;
 
     for (int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
          globalIdx < totalWork;
@@ -3783,6 +3797,8 @@ extern "C" __global__ void accumulateCrossTermReceptorDeDR(
             real dz = p.z - recPos.z;
             real r2 = dx * dx + dy * dy + dz * dz;
             if (r2 < MIN_R2) continue;
+            // Must match cutoff filter in computePairwiseGBForceTiled so F = -grad E.
+            if (useCutoff && r2 > cutoff2) continue;
 
             real RiRj = R_lig_born * R_rec_born;
             real D = r2 / (4.0f * RiRj);
@@ -3922,7 +3938,8 @@ extern "C" __global__ void computeFusedReceptorForces(
     real4 force_lig = make_real4(0.0f, 0.0f, 0.0f, 0);
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
-    const float MIN_R2 = 0.01f;
+    // Numerical safety floor only — see MIN_CROSS_R2 comment near line 3413.
+    const float MIN_R2 = 1e-8f;
 
     // ===== PASS 1: Desolvation forces + dE_cross/dR_born_lig =====
     real dEdR_lig = 0.0f;
@@ -5103,7 +5120,8 @@ extern "C" __global__ void computePairwiseGBForceTiled(
     float cutoff2 = cutoffDistance * cutoffDistance;
     bool useCutoff = (cutoffDistance > 0.0f);
     bool useTileSkip = (localityCutoff > 0.0f);
-    const float MIN_R2 = 0.01f;
+    // Numerical safety floor only — see MIN_CROSS_R2 comment near line 3413.
+    const float MIN_R2 = 1e-8f;
 
     for (int tileIdx = warp; tileIdx < totalTiles; tileIdx += totalWarps) {
         int groupIdx = tileIdx / numRecBlocks;

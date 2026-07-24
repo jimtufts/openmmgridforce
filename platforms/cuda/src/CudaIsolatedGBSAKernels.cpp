@@ -990,7 +990,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &ligandChargesPtrC, &ligandBornRadiiPtrC,
                 &receptorChargesPtrC, &receptorBornRadiiPtr,
                 &groupStartPtr, &numParticleGroups, &numReceptorAtoms,
-                &numAtoms, prefactorArg, &receptorDeDRPtr
+                &numAtoms, prefactorArg, &receptorDeDRPtr, &cutoffDistance
             };
             cu.executeKernel(accumulateCrossTermReceptorDeDRKernel,
                              crossDedrArgs, crossBlocks * blockSize, blockSize);
@@ -1063,7 +1063,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
             &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
             &dE_dRPtr_for_reduce,
-            &globalScalingFactor, &groupScalingFactorsPtr
+            &globalScalingFactor, &groupScalingFactorsPtr,
+            &cutoffDistance
         };
         cu.executeKernel(accumulateBornRadiiDerivativesKernel,
                          bornDerivArgsEarly, numBlocks * blockSize, blockSize);
@@ -1162,7 +1163,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
                 &groupStartPtr, &numParticleGroups, &numAtoms, prefactorArg,
                 &dE_dRPtr,
-                &globalScalingFactor, &groupScalingFactorsPtr
+                &globalScalingFactor, &groupScalingFactorsPtr,
+                &cutoffDistance
             };
             cu.executeKernel(accumulateBornRadiiDerivativesKernel,
                              bornDerivArgs, numBlocks * blockSize, blockSize);
