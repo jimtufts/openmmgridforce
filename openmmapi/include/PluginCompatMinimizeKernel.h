@@ -19,6 +19,10 @@
 #include "openmm/kernels.h"
 #include "openmm/common/ComputeContext.h"
 
+#ifdef GRIDFORCE_HAVE_MINIMIZE_KERNEL
+
+#include "openmm/LocalEnergyMinimizer.h"
+
 namespace GridForcePlugin {
 
 class PluginCompatMinimizeKernel : public OpenMM::MinimizeKernel {
@@ -108,5 +112,7 @@ private:
 };
 
 } // namespace GridForcePlugin
+
+#endif  // GRIDFORCE_HAVE_MINIMIZE_KERNEL
 
 #endif // OPENMM_PLUGINCOMPATMINIMIZEKERNEL_H_

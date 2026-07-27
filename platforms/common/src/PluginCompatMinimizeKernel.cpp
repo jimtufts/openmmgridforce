@@ -28,6 +28,8 @@
  * -------------------------------------------------------------------------- */
 
 #include "PluginCompatMinimizeKernel.h"
+
+#ifdef GRIDFORCE_HAVE_MINIMIZE_KERNEL
 #include "CommonGridForceKernelSources.h"
 #include "openmm/common/ContextSelector.h"
 #include <map>
@@ -756,3 +758,5 @@ void PluginCompatMinimizeKernel::runLineSearchKernels() {
     lineSearchDotKernel->execute(numVariables);
     lineSearchContinueKernel->execute(1);
 }
+
+#endif  // GRIDFORCE_HAVE_MINIMIZE_KERNEL

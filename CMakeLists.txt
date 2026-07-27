@@ -36,6 +36,24 @@ IF(NOT OPENMM_CONTEXT_H)
     MESSAGE(FATAL_ERROR "Could not find OpenMM headers in ${OPENMM_DIR}/include")
 ENDIF()
 
+# OpenMM 8.2 moved local energy minimization out of the kernel system, so
+# MinimizeKernel no longer exists. PluginCompatMinimizeKernel (a copy of
+# CommonMinimizeKernel carrying a pre-Pascal atomicAdd(double*) fallback) is
+# only buildable against versions that still declare it.
+INCLUDE(CheckCXXSourceCompiles)
+SET(CMAKE_REQUIRED_INCLUDES "${OPENMM_DIR}/include")
+CHECK_CXX_SOURCE_COMPILES("
+#include \"openmm/kernels.h\"
+OpenMM::MinimizeKernel* p = 0;
+int main() { return 0; }
+" GRIDFORCE_HAVE_MINIMIZE_KERNEL)
+UNSET(CMAKE_REQUIRED_INCLUDES)
+IF(GRIDFORCE_HAVE_MINIMIZE_KERNEL)
+    ADD_DEFINITIONS(-DGRIDFORCE_HAVE_MINIMIZE_KERNEL)
+ELSE()
+    MESSAGE(STATUS "OpenMM has no MinimizeKernel - skipping PluginCompatMinimizeKernel")
+ENDIF()
+
 # Specify the C++ version we are building for.
 SET(CMAKE_CXX_STANDARD 11)
 SET(CMAKE_CUDA_STANDARD 11)

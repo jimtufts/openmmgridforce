@@ -44,11 +44,13 @@ extern "C" OPENMM_EXPORT void registerKernelFactories() {
         platform.registerKernelFactory(IntegrateMultiGroupHMCStepKernel::Name(), factory);
         platform.registerKernelFactory(IntegrateMultiGroupNUTSStepKernel::Name(), factory);
         platform.registerKernelFactory(CalcLinearSolverKernel::Name(), factory);
+#ifdef GRIDFORCE_HAVE_MINIMIZE_KERNEL
         // Replace stock CUDA MinimizeKernel factory with our compat version
         // (byte-identical on sm >= 60; carries a software atomicAdd(double*)
         // fallback for pre-Pascal). openmm.LocalEnergyMinimizer.minimize()
         // automatically routes through this whenever the plugin is loaded.
         platform.registerKernelFactory(MinimizeKernel::Name(), factory);
+#endif
     }
     catch (...) {
     }
@@ -77,8 +79,10 @@ KernelImpl* CudaGridForceKernelFactory::createKernelImpl(std::string name, const
         return new CudaIntegrateMultiGroupHMCStepKernel(name, platform, cu);
     if (name == IntegrateMultiGroupNUTSStepKernel::Name())
         return new CudaIntegrateMultiGroupNUTSStepKernel(name, platform, cu);
+#ifdef GRIDFORCE_HAVE_MINIMIZE_KERNEL
     if (name == MinimizeKernel::Name())
         return new PluginCompatMinimizeKernel(name, platform, cu);
+#endif
     if (name == CalcLinearSolverKernel::Name())
         return new CudaCalcLinearSolverKernel(name, platform, cu);
     throw OpenMMException((std::string("Tried to create kernel with illegal kernel name '") + name + "'").c_str());
