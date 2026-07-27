@@ -6,6 +6,7 @@
 #define CUDA_ISOLATEDGBSAFORCE_KERNELS_H_
 
 #include "IsolatedGBSAForceKernels.h"
+#include "SolvationFieldGrid.h"
 #include "openmm/cuda/CudaContext.h"
 #include "openmm/cuda/CudaArray.h"
 #include <cuda.h>
@@ -88,9 +89,56 @@ private:
 
     // Cross-term scalar-field grid (GRID mode augment)
     bool computeCrossTermGrid;
+    IsolatedGBSAForce::CrossMode crossMode;
+    IsolatedGBSAForce::MirrorMode mirrorMode;
     int crossTermNumBins;                  // = numAtoms (one bin per template atom)
     OpenMM::CudaArray crossTermGrid;       // [numBins * totalGridPoints] float
     OpenMM::CudaArray crossTermBinRLig;    // [numBins] float
+
+    // GRID-mode receptor add-ons: radius-sliced cross field, mirror field,
+    // and the pocket cell list their near shells run off.
+    double nearShellCutoff, fieldSwitchOn, fieldSwitchOff, mirrorScale;
+    double mirrorFieldCutoff, pocketPadding;
+    int fieldInterpolationMethod;
+    int numCrossSlices, numMirrorSlices, numPocket;
+    int gridCountsHost[3];
+    OpenMM::CudaArray crossFieldData;      // [numCrossSlices * totalGridPoints] float
+    OpenMM::CudaArray crossSliceRadii;     // [numCrossSlices] float
+    OpenMM::CudaArray mirrorFieldData;     // [numMirrorSlices * totalGridPoints] float
+    OpenMM::CudaArray mirrorSliceRadii;    // [numMirrorSlices] float
+    OpenMM::CudaArray atomMirrorSlice;     // [numAtoms] int
+    OpenMM::CudaArray pocketPositions;     // [numPocket] real4
+    OpenMM::CudaArray pocketCharges;       // [numPocket] real
+    OpenMM::CudaArray pocketRadii;         // [numPocket] real
+    OpenMM::CudaArray pocketApoHCT;        // [numPocket] real
+    OpenMM::CudaArray pocketBornApo;       // [numPocket] real
+    OpenMM::CudaArray pocketWeights;       // [numPocket] real
+    OpenMM::CudaArray cellStartArr;        // [nCells + 1] int
+    OpenMM::CudaArray cellAtomsArr;        // [numPocket] int, pocket-local indices
+    // The mirror near shell reaches only to switchOff, so it gets its own,
+    // finer cell list; sharing the cross term's would scan ~30x more atoms.
+    OpenMM::CudaArray mirrorCellStartArr;
+    OpenMM::CudaArray mirrorCellAtomsArr;
+    double mirrorCellOrigin[3];
+    double mirrorCellSize;
+    int mirrorCellCounts[3];
+    OpenMM::CudaArray recDeltaHCT;         // [numGroups * numPocket] real
+    OpenMM::CudaArray dCrossDRrec;         // [numGroups * numPocket] real
+    OpenMM::CudaArray groupMirrorEnergies; // [numGroups] mixed
+    double cellOrigin[3];
+    double cellSize;
+    int cellCounts[3];
+    std::vector<double> groupMirrorEnergiesHost;
+
+    /** Set up the add-on fields, pocket arrays and cell list. */
+    void initializeGridReceptorTerms(const IsolatedGBSAForce& force);
+    /** Generate a field on the device and hand it back to the force. */
+    std::shared_ptr<SolvationFieldGrid> generateCrossFieldOnDevice(
+            const IsolatedGBSAForce& force, const std::vector<double>& sliceR,
+            const std::vector<double>& bornApo);
+    std::shared_ptr<SolvationFieldGrid> generateMirrorFieldOnDevice(
+            const IsolatedGBSAForce& force, const std::vector<double>& sliceR,
+            const std::vector<double>& weights);
 
     // Device arrays - receptor (for PAIRWISE mode)
     OpenMM::CudaArray receptorPositions;  // float3 array
@@ -277,6 +325,12 @@ private:
     // CUDA kernels
     CUfunction computeReceptorHCTGridKernel;      // Grid interpolation
     CUfunction generateCrossTermGridKernel;       // GRID mode augment: build cross-term scalar field
+    CUfunction generateCrossFieldSlicesKernel;
+    CUfunction generateMirrorFieldSlicesKernel;
+    CUfunction accumulateReceptorNearHCTKernel;
+    CUfunction computeCrossRadiusGridEnergyKernel;
+    CUfunction applyCrossReceptorChainRuleKernel;
+    CUfunction computeMirrorFromFieldKernel;
     CUfunction computeCrossTermFromGridKernel;    // GRID mode augment: runtime eval (phase 3)
     CUfunction computeCrossTermPairwiseKernel;    // GRID mode augment: direct pair-sum cross term
     CUfunction accumulateCrossTermBornDerivativesKernel; // GRID mode: dE_cross/dR_born chain rule

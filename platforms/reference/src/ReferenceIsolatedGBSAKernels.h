@@ -12,6 +12,8 @@
 #include "IsolatedGBSAForceKernels.h"
 #include "IsolatedGBSAForce.h"
 #include "DesolvationGrid.h"
+#include "SolvationFieldGrid.h"
+#include "internal/SolvationFieldBuilder.h"
 #include "openmm/Platform.h"
 #include <vector>
 #include <memory>
@@ -28,7 +30,16 @@ public:
           receptorMode(IsolatedGBSAForce::NONE),
           prefactor(0.0), includeSurfaceArea(false), surfaceTension(0.0),
           cutoffDistance(-1.0), globalScalingFactor(1.0),
-          interpolationMethod(0), numReceptorAtoms(0),
+          interpolationMethod(0),
+          crossMode(IsolatedGBSAForce::CROSS_NONE),
+          mirrorMode(IsolatedGBSAForce::MIRROR_NONE),
+          nearShellCutoff(SolvationFields::DEFAULT_NEAR_CUTOFF),
+          fieldSwitchOn(SolvationFields::DEFAULT_SWITCH_ON),
+          fieldSwitchOff(SolvationFields::DEFAULT_SWITCH_OFF),
+          mirrorScale(1.0),
+          mirrorFieldCutoff(SolvationFields::DEFAULT_MIRROR_BUILD_CUTOFF),
+          fieldInterpolationMethod(1),
+          numReceptorAtoms(0),
           receptorReferenceEnergy(0.0) {}
 
     void initialize(const OpenMM::System& system, const IsolatedGBSAForce& force) override;
@@ -89,6 +100,67 @@ protected:
     // GRID mode data
     int interpolationMethod;
     std::shared_ptr<DesolvationGrid> desolvationGrid;
+
+    // GRID mode add-ons: receptor-ligand cross term and receptor desolvation
+    IsolatedGBSAForce::CrossMode crossMode;
+    IsolatedGBSAForce::MirrorMode mirrorMode;
+    double nearShellCutoff;
+    double fieldSwitchOn;
+    double fieldSwitchOff;
+    double mirrorScale;
+    double mirrorFieldCutoff;
+    int fieldInterpolationMethod;
+    std::shared_ptr<SolvationFieldGrid> crossField;
+    std::shared_ptr<SolvationFieldGrid> mirrorField;
+    std::vector<double> receptorApoHCT;         // [numReceptorAtoms]
+    std::vector<double> receptorBornRadiiApo;   // [numReceptorAtoms]
+    std::vector<double> receptorMirrorWeights;  // [numReceptorAtoms]
+    std::vector<int> pocketAtoms;               // indices into the receptor arrays
+    SolvationFields::PocketCellList pocketCells;
+    std::vector<int> atomMirrorSlice;           // [numAtoms] mirror slice per atom
+
+    /**
+     * Load the receptor, derive its apo Born radii and mirror weights, build
+     * the pocket cell list, and generate any field the selected modes need
+     * and the force did not supply.
+     */
+    void initializeGridReceptorTerms(const IsolatedGBSAForce& force);
+
+    /** True when GRID mode has at least one receptor add-on enabled. */
+    bool usesGridReceptorTerms() const {
+        return receptorMode == IsolatedGBSAForce::GRID &&
+               (crossMode != IsolatedGBSAForce::CROSS_NONE ||
+                mirrorMode != IsolatedGBSAForce::MIRROR_NONE);
+    }
+
+    /**
+     * Receptor-ligand GB cross term in GRID mode.
+     *
+     * CROSS_EXACT sums over every receptor atom at apo radii.
+     * CROSS_RADIUS_GRID reads the far field from the radius-sliced grid and
+     * evaluates a near shell pairwise, re-solving the receptor Born radii
+     * there from the ligand-induced HCT. That perturbation depends on ligand
+     * positions, so it carries its own chain rule back onto the ligand,
+     * applied here rather than through the caller's.
+     *
+     * Adds the energy to crossEnergy, the explicit position forces to
+     * forceData, and the dE/dR_i coupling to dE_dR so the caller's
+     * Born-radius chain rule picks that part up.
+     */
+    void addGridCrossTerm(int g, const std::vector<OpenMM::Vec3>& posData,
+                          std::vector<OpenMM::Vec3>& forceData,
+                          const std::vector<double>& bornRadii, double scale,
+                          bool includeForces, double& crossEnergy,
+                          std::vector<double>& dE_dR) const;
+
+    /**
+     * Receptor desolvation in GRID mode from the linear-response field. Adds
+     * the energy to mirrorEnergy and its forces to forceData. Independent of
+     * the ligand Born radii, so it feeds no chain rule.
+     */
+    void addGridMirrorTerm(int g, const std::vector<OpenMM::Vec3>& posData,
+                           std::vector<OpenMM::Vec3>& forceData, double scale,
+                           bool includeForces, double& mirrorEnergy) const;
 
     // PAIRWISE mode data
     int numReceptorAtoms;

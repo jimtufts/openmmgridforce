@@ -27,6 +27,7 @@
 
 #include "internal/windowsExportGridForce.h"
 #include "DesolvationGrid.h"
+#include "SolvationFieldGrid.h"
 #include "openmm/Context.h"
 #include "openmm/Force.h"
 #include "openmm/Vec3.h"
@@ -50,6 +51,37 @@ public:
         NONE = 0,     /**< Ligand-only (no receptor) */
         GRID = 1,     /**< Receptor HCT from desolvation grid */
         PAIRWISE = 2  /**< Full pairwise receptor-ligand HCT */
+    };
+
+    /**
+     * How the receptor-ligand GB cross term is evaluated in GRID mode.
+     *
+     * The cross term is the solvent screening of receptor-ligand
+     * electrostatics. PAIRWISE mode computes it exactly, with receptor Born
+     * radii re-solved for the pose. CROSS_EXACT is the same sum with the
+     * receptor frozen at apo. CROSS_RADIUS_GRID reads the far field from a
+     * grid sliced in the ligand Born radius and evaluates a near shell
+     * pairwise, where it also re-solves the receptor radii -- so it is both
+     * cheaper and closer to PAIRWISE than CROSS_EXACT.
+     */
+    enum CrossMode {
+        CROSS_NONE = 0,        /**< Omit the cross term */
+        CROSS_EXACT = 1,       /**< Sum over every receptor atom, O(N_lig * N_rec) */
+        CROSS_RADIUS_GRID = 2  /**< Field lookup plus a near shell, O(N_lig * k) */
+    };
+
+    /**
+     * How the receptor desolvation ("mirror") term is evaluated in GRID mode.
+     *
+     * This is the change in receptor GB energy caused by the ligand raising
+     * nearby receptor Born radii -- what PAIRWISE reports as
+     * getGroupReceptorDesolvation(). LINEAR_GRID linearizes the OBC-II
+     * rescale about the apo receptor and collapses it into a field that is
+     * read with one lookup per ligand atom.
+     */
+    enum MirrorMode {
+        MIRROR_NONE = 0,        /**< Frozen receptor: the term is zero */
+        MIRROR_LINEAR_GRID = 1  /**< Linear-response field plus a near shell */
     };
 
     /**
@@ -266,39 +298,171 @@ public:
     int getInterpolationMethod() const { return interpolationMethod; }
     void setInterpolationMethod(int method);
 
-    // ========== Cross-term scalar-field grid (GRID mode augment) ==========
+    // ========== Cross term and mirror term (GRID mode add-ons) ==========
     //
-    // When enabled, the receptor-ligand GB cross term is evaluated from a
-    // precomputed scalar field G_b(r) = Σ_j q_j / f_gb(|r-r_j|, R_b, R_rec_j)
-    // built per ligand atom ("bin") with baseline OBC receptor Born radii.
-    // At runtime each ligand atom reads G_i(r_i) from its own slice, energy
-    // = Σ_i prefactor * q_i * G_i(r_i), forces from the trilinear gradient.
-    // Frozen-R_rec approximation; per-atom binning eliminates within-type
-    // variance. See AlGDock/mwe/compare_cross_term_grid.py for the Python
-    // reference that validated the approach.
-
-    bool getComputeCrossTermGrid() const { return computeCrossTermGrid; }
-    void setComputeCrossTermGrid(bool enable) { computeCrossTermGrid = enable; }
+    // GRID mode on its own reproduces only the ligand side of the complex:
+    // ligand Born radii descreened by the receptor, plus ligand self and
+    // ligand-ligand GB. These two add-ons supply the remaining pose-dependent
+    // blocks that PAIRWISE mode computes by direct summation, so a GRID-mode
+    // force with both enabled targets the same energy as PAIRWISE at a cost
+    // that does not scale with receptor size.
+    //
+    // Both require the receptor to be described via setNumReceptorAtoms /
+    // setReceptorAtomParameters / setReceptorPositions, even in GRID mode.
 
     /**
-     * Set the per-atom cross-term grid bin values (R_lig in nm).
-     * Must have length numAtoms. Each value is the calibration-mean OBC2
-     * Born radius of that ligand template atom (typically computed from
-     * dock6 ensemble via Python HCT+OBC helper).
+     * Get the cross-term evaluation mode. Default is CROSS_NONE.
      */
-    void setCrossTermBinValues(const std::vector<double>& binValues);
-    const std::vector<double>& getCrossTermBinValues() const {
-        return crossTermBinValues;
+    CrossMode getCrossMode() const { return crossMode; }
+
+    /**
+     * Set the cross-term evaluation mode.
+     *
+     * CROSS_RADIUS_GRID needs a cross field covering the ligand's accessible
+     * region; one is generated from the receptor at the desolvation grid's
+     * geometry if none is supplied.
+     */
+    void setCrossMode(CrossMode mode) { crossMode = mode; }
+
+    /**
+     * @deprecated Use setCrossMode(). true selects CROSS_EXACT.
+     */
+    bool getComputeCrossTermGrid() const { return crossMode != CROSS_NONE; }
+
+    /**
+     * @deprecated Use setCrossMode(). true selects CROSS_EXACT.
+     */
+    void setComputeCrossTermGrid(bool enable) {
+        crossMode = enable ? CROSS_EXACT : CROSS_NONE;
     }
 
     /**
-     * Set precomputed baseline receptor OBC2 Born radii (nm).
-     * Must have length numReceptorAtoms. Used by the cross-term grid
-     * generator as R_rec_j values (pose-independent).
+     * Get the mirror (receptor desolvation) mode. Default is MIRROR_NONE.
+     */
+    MirrorMode getMirrorMode() const { return mirrorMode; }
+
+    /**
+     * Set the mirror mode. MIRROR_LINEAR_GRID generates a mirror field from
+     * the receptor at the desolvation grid's geometry if none is supplied.
+     */
+    void setMirrorMode(MirrorMode mode) { mirrorMode = mode; }
+
+    /**
+     * Get the near-shell cutoff (nm) used by CROSS_RADIUS_GRID. Receptor
+     * atoms within this distance of a ligand atom are evaluated pairwise,
+     * with their Born radii re-solved for the pose; the rest come from the
+     * field at apo radii. It must reach past where the ligand perturbs the
+     * receptor, not merely past the switch, or the mixed radii are
+     * inconsistent and accuracy drops.
+     */
+    double getNearShellCutoff() const { return nearShellCutoff; }
+
+    /**
+     * Set the near-shell cutoff (nm). Must be at least the switch-off
+     * radius. Default 0.6 nm.
+     */
+    void setNearShellCutoff(double distance);
+
+    /**
+     * Radii (nm) of the smootherstep switch that splits each field into a
+     * gridded far part and a pairwise near part. The switch removes the
+     * near-contact cusps that a lattice cannot represent, so the near shell
+     * carries them exactly instead. Defaults are 0.15 and 0.35 nm.
+     */
+    void setFieldSwitchRadii(double switchOn, double switchOff);
+    double getFieldSwitchOn() const { return fieldSwitchOn; }
+    double getFieldSwitchOff() const { return fieldSwitchOff; }
+
+    /**
+     * Interpolation method used to read the cross and mirror fields:
+     * TRILINEAR (0) or TRICUBIC_BSPLINE (1). Independent of the desolvation
+     * grid's method because these fields carry sharper features; trilinear
+     * on a 0.04 nm lattice leaves several kJ/mol of error in the cross term
+     * and has a discontinuous gradient. Default is TRICUBIC_BSPLINE.
+     *
+     * A field built for one method cannot be read with the other: the
+     * B-spline form stores prefiltered coefficients, not node values.
+     */
+    int getFieldInterpolationMethod() const { return fieldInterpolationMethod; }
+    void setFieldInterpolationMethod(int method);
+
+    /**
+     * Global scale applied to the mirror term, absorbing the systematic
+     * under-count of the linear response on deeply buried receptor atoms.
+     * Fit once per receptor against PAIRWISE over a pose set. Default 1.0.
+     */
+    double getMirrorScale() const { return mirrorScale; }
+    void setMirrorScale(double scale) { mirrorScale = scale; }
+
+    /**
+     * Padding (nm) beyond the grid box within which receptor atoms are kept
+     * for the runtime near lists. Must be at least the near-shell cutoff.
+     * Default 1.0 nm.
+     */
+    double getPocketPadding() const { return pocketPadding; }
+    void setPocketPadding(double padding);
+
+    /**
+     * Range (nm) over which receptor atoms contribute to the mirror field.
+     * Truncating it biases the term low by a pose-dependent amount that a
+     * global mirror scale only partly absorbs, so it is deliberately wider
+     * than the near-shell cutoff; the cost is offline only. Default 1.6 nm.
+     */
+    double getMirrorFieldCutoff() const { return mirrorFieldCutoff; }
+    void setMirrorFieldCutoff(double cutoff);
+
+    /**
+     * Cross-term far field, one slice per probe Born radius. Generated from
+     * the receptor at initialization when CROSS_RADIUS_GRID is selected and
+     * none has been set; retrieve it afterwards to save it and skip the
+     * rebuild next time.
+     */
+    void setCrossField(std::shared_ptr<SolvationFieldGrid> field);
+    std::shared_ptr<SolvationFieldGrid> getCrossField() const { return crossField; }
+    void loadCrossField(const std::string& filename);
+
+    /**
+     * Probe Born radii the cross field is sliced at (nm, ascending). Left
+     * empty by default, in which case they are log-spaced across the range
+     * the ligand template can reach: from the smallest offset radius to the
+     * largest OBC2 ceiling. Four to six slices saturate the achievable
+     * accuracy; more do not help because the residual is the frozen apo
+     * receptor radii beyond the near shell, not the radius axis.
+     */
+    void setCrossFieldRadii(const std::vector<double>& radii);
+    const std::vector<double>& getCrossFieldRadii() const { return crossFieldRadii; }
+
+    /** Slice count used when getCrossFieldRadii() is empty. Default 6. */
+    int getNumCrossFieldSlices() const { return numCrossFieldSlices; }
+    void setNumCrossFieldSlices(int n);
+
+    /**
+     * Mirror linear-response field, one slice per distinct ligand descreener
+     * scaled radius. Generated at initialization when MIRROR_LINEAR_GRID is
+     * selected and none has been set.
+     */
+    void setMirrorField(std::shared_ptr<SolvationFieldGrid> field);
+    std::shared_ptr<SolvationFieldGrid> getMirrorField() const { return mirrorField; }
+    void loadMirrorField(const std::string& filename);
+
+    /**
+     * Set precomputed apo receptor OBC2 Born radii (nm), length
+     * numReceptorAtoms. Optional: they are computed from the receptor
+     * parameters at initialization when not supplied.
      */
     void setReceptorBornRadiiBaseline(const std::vector<double>& radii);
     const std::vector<double>& getReceptorBornRadiiBaseline() const {
         return receptorBornRadiiBaseline;
+    }
+
+    /**
+     * @deprecated The cross term no longer bins ligand atoms by radius; it
+     * uses the per-atom Born radii the GRID path already computes. Retained
+     * so existing setup code keeps working. The values are ignored.
+     */
+    void setCrossTermBinValues(const std::vector<double>& binValues);
+    const std::vector<double>& getCrossTermBinValues() const {
+        return crossTermBinValues;
     }
 
     // ========== Receptor Configuration (PAIRWISE mode) ==========
@@ -428,15 +592,19 @@ public:
     double getGroupReceptorContribution(int groupIndex) const;
 
     /**
-     * Get the receptor desolvation energy (PAIRWISE mode only).
-     * (Change in receptor GB energy due to ligand screening)
+     * Get the receptor desolvation energy: the change in receptor GB energy
+     * caused by the ligand screening it. Computed exactly in PAIRWISE mode,
+     * and from the mirror field in GRID mode when MIRROR_LINEAR_GRID is set.
+     * Zero otherwise.
      */
     double getGroupReceptorDesolvation(int groupIndex) const;
 
     /**
-     * Get the cross-term energy (receptor-ligand GB pairs, PAIRWISE mode only).
+     * Get the cross-term energy (receptor-ligand GB pairs).
      * This is the solvent screening contribution to receptor-ligand electrostatics.
      * This is NOT the direct Coulomb - it's the implicit solvent correction.
+     * Populated in PAIRWISE mode, and in GRID mode when getCrossMode() is not
+     * CROSS_NONE.
      */
     double getGroupCrossTermEnergy(int groupIndex) const;
 
@@ -564,9 +732,21 @@ private:
     std::shared_ptr<DesolvationGrid> desolvationGrid;
     int interpolationMethod;
 
-    // Cross-term grid configuration (augment on top of GRID mode)
-    bool computeCrossTermGrid;
-    std::vector<double> crossTermBinValues;       // [numAtoms], nm
+    // Cross-term and mirror-term configuration (GRID mode add-ons)
+    CrossMode crossMode;
+    MirrorMode mirrorMode;
+    double nearShellCutoff;
+    double fieldSwitchOn;
+    double fieldSwitchOff;
+    double mirrorScale;
+    double pocketPadding;
+    double mirrorFieldCutoff;
+    int fieldInterpolationMethod;
+    std::shared_ptr<SolvationFieldGrid> crossField;
+    std::shared_ptr<SolvationFieldGrid> mirrorField;
+    std::vector<double> crossFieldRadii;
+    int numCrossFieldSlices;
+    std::vector<double> crossTermBinValues;        // deprecated, unused
     std::vector<double> receptorBornRadiiBaseline; // [numReceptorAtoms], nm
 
     // Pairwise mode configuration

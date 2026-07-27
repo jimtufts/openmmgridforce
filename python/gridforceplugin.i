@@ -46,6 +46,7 @@ namespace std {
 #include "GBSAGridForceKernels.h"
 #include "IsolatedGBSAForce.h"
 #include "IsolatedGBSAForceKernels.h"
+#include "SolvationFieldGrid.h"
 #include "BondedHessian.h"
 #include "NewtonMinimizer.h"
 #include "RFOMinimizer.h"
@@ -86,6 +87,7 @@ using namespace OpenMM;
 // Declare shared_ptr support for GridData, DesolvationGrid (must be outside namespace)
 %shared_ptr(GridForcePlugin::GridData)
 %shared_ptr(GridForcePlugin::DesolvationGrid)
+%shared_ptr(GridForcePlugin::SolvationFieldGrid)
 
 %pythoncode %{
 def _openmm_GridForce_director_call(force):
@@ -455,6 +457,62 @@ public:
 };
 
 /**
+ * SolvationFieldGrid holds the gridded far-field parts of the GRID-mode
+ * cross and mirror terms.
+ */
+class SolvationFieldGrid {
+public:
+    static const int NUM_DERIVATIVES;
+
+    enum FieldType {
+        CROSS_GB = 0,
+        MIRROR   = 1
+    };
+
+    SolvationFieldGrid();
+    SolvationFieldGrid(int nx, int ny, int nz, double spacing, int numSlices,
+                       FieldType type, int interpMethod);
+
+    static std::shared_ptr<SolvationFieldGrid> loadFromFile(const std::string& filename);
+    void saveToFile(const std::string& filename) const;
+
+    int getNx() const;
+    int getNy() const;
+    int getNz() const;
+    %apply int& OUTPUT {int& nx};
+    %apply int& OUTPUT {int& ny};
+    %apply int& OUTPUT {int& nz};
+    void getCounts(int& nx, int& ny, int& nz) const;
+    %clear int& nx;
+    %clear int& ny;
+    %clear int& nz;
+
+    double getSpacing() const;
+
+    %apply double& OUTPUT {double& ox};
+    %apply double& OUTPUT {double& oy};
+    %apply double& OUTPUT {double& oz};
+    void getOrigin(double& ox, double& oy, double& oz) const;
+    %clear double& ox;
+    %clear double& oy;
+    %clear double& oz;
+    void setOrigin(double x, double y, double z);
+
+    int getNumPoints() const;
+    FieldType getFieldType() const;
+    int getNumSlices() const;
+    const std::vector<double>& getSliceParameters() const;
+    void setSliceParameters(const std::vector<double>& params);
+    double getSwitchOn() const;
+    double getSwitchOff() const;
+    void setSwitchRadii(double switchOn, double switchOff);
+    const std::vector<float>& getData() const;
+    int getInterpolationMethod() const;
+    bool hasDerivatives() const;
+    size_t getMemoryBytes() const;
+};
+
+/**
  * IsolatedGBSAForce computes pairwise GBSA solvation for isolated particle groups.
  */
 class IsolatedGBSAForce : public OpenMM::Force {
@@ -470,6 +528,19 @@ public:
         NONE = 0,     // Ligand-only (no receptor)
         GRID = 1,     // Receptor HCT from desolvation grid
         PAIRWISE = 2  // Full pairwise receptor-ligand HCT
+    };
+
+    // Cross-term evaluation mode (GRID mode add-on)
+    enum CrossMode {
+        CROSS_NONE = 0,          // Omit the cross term
+        CROSS_EXACT = 1,         // Sum over every receptor atom
+        CROSS_RADIUS_GRID = 2    // Field lookup plus a near shell
+    };
+
+    // Receptor desolvation ("mirror") mode (GRID mode add-on)
+    enum MirrorMode {
+        MIRROR_NONE = 0,         // Frozen receptor: the term is zero
+        MIRROR_LINEAR_GRID = 1   // Linear-response field plus a near shell
     };
 
     // Storage precision for the analytical Hessian
@@ -546,13 +617,40 @@ public:
     int getInterpolationMethod() const;
     void setInterpolationMethod(int method);
 
-    // Cross-term scalar-field grid (GRID-mode augment)
+    // Cross term and mirror term (GRID-mode add-ons)
+    CrossMode getCrossMode() const;
+    void setCrossMode(CrossMode mode);
+    MirrorMode getMirrorMode() const;
+    void setMirrorMode(MirrorMode mode);
+    double getNearShellCutoff() const;
+    void setNearShellCutoff(double distance);
+    void setFieldSwitchRadii(double switchOn, double switchOff);
+    double getFieldSwitchOn() const;
+    double getFieldSwitchOff() const;
+    int getFieldInterpolationMethod() const;
+    void setFieldInterpolationMethod(int method);
+    double getMirrorScale() const;
+    void setMirrorScale(double scale);
+    double getPocketPadding() const;
+    void setPocketPadding(double padding);
+    double getMirrorFieldCutoff() const;
+    void setMirrorFieldCutoff(double cutoff);
+    void setCrossField(std::shared_ptr<SolvationFieldGrid> field);
+    std::shared_ptr<SolvationFieldGrid> getCrossField() const;
+    void loadCrossField(const std::string& filename);
+    void setCrossFieldRadii(const std::vector<double>& radii);
+    const std::vector<double>& getCrossFieldRadii() const;
+    int getNumCrossFieldSlices() const;
+    void setNumCrossFieldSlices(int n);
+    void setMirrorField(std::shared_ptr<SolvationFieldGrid> field);
+    std::shared_ptr<SolvationFieldGrid> getMirrorField() const;
+    void loadMirrorField(const std::string& filename);
+    void setReceptorBornRadiiBaseline(const std::vector<double>& radii);
+    const std::vector<double>& getReceptorBornRadiiBaseline() const;
     bool getComputeCrossTermGrid() const;
     void setComputeCrossTermGrid(bool enable);
     void setCrossTermBinValues(const std::vector<double>& binValues);
     const std::vector<double>& getCrossTermBinValues() const;
-    void setReceptorBornRadiiBaseline(const std::vector<double>& radii);
-    const std::vector<double>& getReceptorBornRadiiBaseline() const;
 
     // Pairwise mode configuration
     void setNumReceptorAtoms(int n);

@@ -202,11 +202,26 @@ void ReferenceCalcIsolatedGBSAForceKernel::initialize(
     }
 
     // GRID mode setup
+    crossMode = force.getCrossMode();
+    mirrorMode = force.getMirrorMode();
+    nearShellCutoff = force.getNearShellCutoff();
+    fieldSwitchOn = force.getFieldSwitchOn();
+    fieldSwitchOff = force.getFieldSwitchOff();
+    mirrorScale = force.getMirrorScale();
+    fieldInterpolationMethod = force.getFieldInterpolationMethod();
+    mirrorFieldCutoff = force.getMirrorFieldCutoff();
+
     if (receptorMode == IsolatedGBSAForce::GRID) {
         desolvationGrid = force.getDesolvationGrid();
         if (!desolvationGrid)
             throw OpenMMException("IsolatedGBSAForce: GRID mode requires a desolvation grid");
+    } else {
+        crossMode = IsolatedGBSAForce::CROSS_NONE;
+        mirrorMode = IsolatedGBSAForce::MIRROR_NONE;
     }
+
+    if (usesGridReceptorTerms())
+        initializeGridReceptorTerms(force);
 
     // PAIRWISE mode setup
     if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
@@ -288,6 +303,433 @@ void ReferenceCalcIsolatedGBSAForceKernel::initialize(
     groupBornRadii_.resize(numParticleGroups);
     groupAtomEnergies_.resize(numParticleGroups);
     groupReceptorBornRadii_.resize(numParticleGroups);
+}
+
+// ==================== GRID mode receptor add-ons ====================
+
+void ReferenceCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
+        const IsolatedGBSAForce& force) {
+
+    numReceptorAtoms = force.getNumReceptorAtoms();
+    if (numReceptorAtoms == 0)
+        throw OpenMMException(
+            "IsolatedGBSAForce: the GRID-mode cross and mirror terms require "
+            "receptor atoms (setNumReceptorAtoms / setReceptorAtomParameters / "
+            "setReceptorPositions)");
+
+    receptorPositions = force.getReceptorPositions();
+    if ((int)receptorPositions.size() != 3 * numReceptorAtoms)
+        throw OpenMMException("IsolatedGBSAForce: receptor positions size mismatch");
+
+    receptorCharges.resize(numReceptorAtoms);
+    receptorRadii.resize(numReceptorAtoms);
+    receptorScaleFactors.resize(numReceptorAtoms);
+    for (int j = 0; j < numReceptorAtoms; j++)
+        force.getReceptorAtomParameters(j, receptorCharges[j], receptorRadii[j],
+                                        receptorScaleFactors[j]);
+
+    const vector<double>& baseline = force.getReceptorBornRadiiBaseline();
+    const vector<double>* supplied =
+        ((int)baseline.size() == numReceptorAtoms) ? &baseline : nullptr;
+
+    SolvationFields::computeApoReceptor(
+        receptorPositions, receptorCharges, receptorRadii, receptorScaleFactors,
+        gbMethod == IsolatedGBSAForce::OBC_II, prefactor, cutoffDistance,
+        includeSurfaceArea, surfaceTension, supplied,
+        receptorApoHCT, receptorBornRadiiApo, receptorMirrorWeights);
+
+    // Pocket set and cell list, sized by the widest near shell in use.
+    double ox, oy, oz;
+    desolvationGrid->getOrigin(ox, oy, oz);
+    double origin[3] = {ox, oy, oz};
+    int nx, ny, nz;
+    desolvationGrid->getCounts(nx, ny, nz);
+    int counts[3] = {nx, ny, nz};
+    double spacing = desolvationGrid->getSpacing();
+    double padding = force.getPocketPadding();
+
+    pocketAtoms = SolvationFields::selectPocketAtoms(receptorPositions, origin,
+                                                     spacing, counts, padding);
+    double cellSize = (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID)
+                      ? nearShellCutoff : fieldSwitchOff;
+    SolvationFields::buildPocketCellList(receptorPositions, pocketAtoms, cellSize,
+                                         pocketCells);
+
+    if (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID) {
+        crossField = force.getCrossField();
+        if (!crossField) {
+            vector<double> sliceR = force.getCrossFieldRadii();
+            if (sliceR.empty())
+                sliceR = SolvationFields::defaultCrossFieldRadii(
+                    radii, force.getNumCrossFieldSlices());
+            // The field decays like 1/r, so truncating it at the pocket
+            // boundary would drop a real contribution; use every atom.
+            vector<int> allAtoms(numReceptorAtoms);
+            for (int j = 0; j < numReceptorAtoms; j++)
+                allAtoms[j] = j;
+            crossField = SolvationFields::buildCrossField(
+                receptorPositions, receptorCharges, receptorBornRadiiApo,
+                allAtoms, sliceR, origin, spacing, counts,
+                fieldSwitchOn, fieldSwitchOff, fieldInterpolationMethod);
+            const_cast<IsolatedGBSAForce&>(force).setCrossField(crossField);
+        }
+        if (crossField->getInterpolationMethod() != fieldInterpolationMethod)
+            throw OpenMMException(
+                "IsolatedGBSAForce: the cross field was built for a different "
+                "interpolation method than the force is configured with");
+        if (crossField->getNumSlices() < 2)
+            throw OpenMMException(
+                "IsolatedGBSAForce: the cross field needs at least two radius slices");
+    }
+
+    if (mirrorMode == IsolatedGBSAForce::MIRROR_LINEAR_GRID) {
+        vector<double> sliceValues =
+            SolvationFields::distinctScaledRadii(radii, scaleFactors);
+        atomMirrorSlice.resize(numAtoms);
+        for (int i = 0; i < numAtoms; i++) {
+            double s = (radii[i] - DIELECTRIC_OFFSET) * scaleFactors[i];
+            atomMirrorSlice[i] = SolvationFields::sliceForScaledRadius(sliceValues, s);
+        }
+
+        mirrorField = force.getMirrorField();
+        if (!mirrorField) {
+            // The mirror field reaches further than the runtime near lists,
+            // so it gets its own, wider atom selection.
+            vector<int> mirrorAtoms = SolvationFields::selectPocketAtoms(
+                receptorPositions, origin, spacing, counts, mirrorFieldCutoff);
+            mirrorField = SolvationFields::buildMirrorField(
+                receptorPositions, receptorRadii, receptorMirrorWeights,
+                mirrorAtoms, sliceValues, origin, spacing, counts,
+                fieldSwitchOn, fieldSwitchOff, mirrorFieldCutoff,
+                fieldInterpolationMethod);
+            const_cast<IsolatedGBSAForce&>(force).setMirrorField(mirrorField);
+        }
+        if (mirrorField->getNumSlices() != (int)sliceValues.size())
+            throw OpenMMException(
+                "IsolatedGBSAForce: the mirror field slice count does not match "
+                "the ligand template's distinct descreener radii");
+        if (mirrorField->getInterpolationMethod() != fieldInterpolationMethod)
+            throw OpenMMException(
+                "IsolatedGBSAForce: the mirror field was built for a different "
+                "interpolation method than the force is configured with");
+    }
+}
+
+void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
+        int g, const vector<Vec3>& posData, vector<Vec3>& forceData,
+        const vector<double>& bornRadii, double scale, bool includeForces,
+        double& crossEnergy, vector<double>& dE_dR) const {
+
+    // Distance floor matching the PAIRWISE cross term.
+    static constexpr double MIN_CROSS_R2 = 0.01;
+
+    const vector<int>& particles = groupParticleIndices[g];
+    bool exact = (crossMode == IsolatedGBSAForce::CROSS_EXACT);
+    double nearCutoff2 = nearShellCutoff * nearShellCutoff;
+
+    // ---- Ligand-induced descreening of the near-shell receptor atoms ----
+    // The far field is built at apo receptor radii, so only the near shell
+    // can afford re-solved ones; the cutoff must therefore reach past where
+    // the ligand still moves them.
+    vector<double> recHCT, recBorn, recDRdHCT, dCross_dRrec;
+    vector<char> touched;
+    if (!exact) {
+        touched.assign(numReceptorAtoms, 0);
+        recBorn = receptorBornRadiiApo;
+        recHCT.assign(numReceptorAtoms, 0.0);
+
+        for (int i = 0; i < numAtoms; i++) {
+            int pi = particles[i];
+            double s_i = (radii[i] - DIELECTRIC_OFFSET) * scaleFactors[i];
+            SolvationFields::forEachNearPocketAtom(
+                pocketCells, posData[pi][0], posData[pi][1], posData[pi][2],
+                [&](int j) {
+                    double dx = posData[pi][0] - receptorPositions[j * 3];
+                    double dy = posData[pi][1] - receptorPositions[j * 3 + 1];
+                    double dz = posData[pi][2] - receptorPositions[j * 3 + 2];
+                    double r2 = dx * dx + dy * dy + dz * dz;
+                    if (r2 > nearCutoff2)
+                        return;
+                    double r = sqrt(r2);
+                    if (r < 1e-10)
+                        return;
+                    double Rj_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+                    recHCT[j] += computeHCTTerm(r, Rj_off, s_i, 1.0);
+                    touched[j] = 1;
+                });
+        }
+
+        // Re-solve the Born radii of the touched atoms from apo HCT + dI.
+        for (int j = 0; j < numReceptorAtoms; j++) {
+            if (!touched[j])
+                continue;
+            double R_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+            if (R_off <= 0.0)
+                continue;
+            double total = receptorApoHCT[j] + recHCT[j];
+            if (gbMethod == IsolatedGBSAForce::HCT) {
+                double inner = 1.0 / R_off - 0.5 * R_off * total;
+                recBorn[j] = (inner > 0.0) ? 1.0 / inner : 500.0;
+            } else {
+                double psi = 0.5 * R_off * total;
+                double t = tanh(OBC_ALPHA * psi - OBC_BETA * psi * psi
+                                + OBC_GAMMA * psi * psi * psi);
+                double inner = 1.0 / R_off - t / receptorRadii[j];
+                recBorn[j] = (inner > 0.0) ? 1.0 / inner : 500.0;
+            }
+        }
+
+        if (includeForces) {
+            dCross_dRrec.assign(numReceptorAtoms, 0.0);
+            recDRdHCT.assign(numReceptorAtoms, 0.0);
+            for (int j = 0; j < numReceptorAtoms; j++) {
+                if (!touched[j])
+                    continue;
+                double R_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+                if (R_off <= 0.0)
+                    continue;
+                double total = receptorApoHCT[j] + recHCT[j];
+                if (gbMethod == IsolatedGBSAForce::HCT) {
+                    recDRdHCT[j] = 0.5 * R_off * recBorn[j] * recBorn[j];
+                } else {
+                    double psi = 0.5 * R_off * total;
+                    double t = tanh(OBC_ALPHA * psi - OBC_BETA * psi * psi
+                                    + OBC_GAMMA * psi * psi * psi);
+                    double dtanh = (1.0 - t * t)
+                                   * (OBC_ALPHA - 2.0 * OBC_BETA * psi
+                                      + 3.0 * OBC_GAMMA * psi * psi);
+                    recDRdHCT[j] = recBorn[j] * recBorn[j] * dtanh * 0.5 * R_off
+                                   / receptorRadii[j];
+                }
+            }
+        }
+    }
+
+    const vector<double>& sliceR = exact ? receptorBornRadiiApo
+                                         : crossField->getSliceParameters();
+    int numSlices = exact ? 0 : static_cast<int>(sliceR.size());
+
+    for (int i = 0; i < numAtoms; i++) {
+        int pi = particles[i];
+        double xi = posData[pi][0], yi = posData[pi][1], zi = posData[pi][2];
+        double qi = charges[i];
+        double Ri = bornRadii[i];
+
+        // ---- Far field: bracket R_i between two slices, linear in R ----
+        int k = 0;
+        double wHi = 0.0, invDeltaR = 0.0, Rlo = 0.0, Rhi = 0.0;
+        if (!exact) {
+            double Rc = min(max(Ri, sliceR.front()), sliceR.back());
+            k = numSlices - 2;
+            for (int t = 0; t + 1 < numSlices; t++) {
+                if (Rc <= sliceR[t + 1]) { k = t; break; }
+            }
+            Rlo = sliceR[k];
+            Rhi = sliceR[k + 1];
+            invDeltaR = 1.0 / (Rhi - Rlo);
+            wHi = (Rc - Rlo) * invDeltaR;
+
+            double gxL = 0.0, gyL = 0.0, gzL = 0.0, gxH = 0.0, gyH = 0.0, gzH = 0.0;
+            double phiLo = SolvationFields::interpolateField(
+                *crossField, k, xi, yi, zi, fieldInterpolationMethod,
+                includeForces, gxL, gyL, gzL);
+            double phiHi = SolvationFields::interpolateField(
+                *crossField, k + 1, xi, yi, zi, fieldInterpolationMethod,
+                includeForces, gxH, gyH, gzH);
+
+            double phi = (1.0 - wHi) * phiLo + wHi * phiHi;
+            crossEnergy += prefactor * qi * phi;
+
+            if (includeForces) {
+                forceData[pi][0] -= scale * prefactor * qi
+                                    * ((1.0 - wHi) * gxL + wHi * gxH);
+                forceData[pi][1] -= scale * prefactor * qi
+                                    * ((1.0 - wHi) * gyL + wHi * gyH);
+                forceData[pi][2] -= scale * prefactor * qi
+                                    * ((1.0 - wHi) * gzL + wHi * gzH);
+                // Radius axis: dPhi/dR_i, zero where R_i is clamped outside
+                // the bracket, feeding the caller's Born chain rule.
+                if (Ri > sliceR.front() && Ri < sliceR.back())
+                    dE_dR[i] += prefactor * qi * (phiHi - phiLo) * invDeltaR;
+            }
+        }
+
+        // ---- Near shell, or every receptor atom in CROSS_EXACT ----
+        auto handleReceptorAtom = [&](int j) {
+            double dx = xi - receptorPositions[j * 3];
+            double dy = yi - receptorPositions[j * 3 + 1];
+            double dz = zi - receptorPositions[j * 3 + 2];
+            double r2 = dx * dx + dy * dy + dz * dz;
+            if (r2 < MIN_CROSS_R2)
+                return;
+            if (!exact && r2 > nearCutoff2)
+                return;
+
+            double r = sqrt(r2);
+            double Rj = exact ? receptorBornRadiiApo[j] : recBorn[j];
+            double D = Ri * Rj;
+            double alpha = r2 / (4.0 * D);
+            double expAlpha = exp(-alpha);
+            double fgb2 = r2 + D * expAlpha;
+            double fgb = sqrt(fgb2);
+            double qq = prefactor * qi * receptorCharges[j];
+
+            // The far field already supplied S/f_GB at the bracketing slices
+            // and apo receptor radii; subtract exactly that back out.
+            double sw = 0.0, farLo = 0.0, farHi = 0.0, farTerm = 0.0;
+            if (!exact) {
+                sw = SolvationFields::switchValue(r, fieldSwitchOn, fieldSwitchOff);
+                if (sw != 0.0) {
+                    double Ra = receptorBornRadiiApo[j];
+                    double Dlo = Rlo * Ra, Dhi = Rhi * Ra;
+                    farLo = 1.0 / sqrt(r2 + Dlo * exp(-r2 / (4.0 * Dlo)));
+                    farHi = 1.0 / sqrt(r2 + Dhi * exp(-r2 / (4.0 * Dhi)));
+                    farTerm = sw * ((1.0 - wHi) * farLo + wHi * farHi);
+                }
+            }
+            crossEnergy += qq * (1.0 / fgb - farTerm);
+
+            if (!includeForces)
+                return;
+
+            // Explicit r-dependence of both the exact term and what we
+            // subtracted, so the pair contributes no force where they cancel.
+            double dfgb_dr = r * (4.0 - expAlpha) / (4.0 * fgb);
+            double dTerm_dr = -dfgb_dr / fgb2;
+            if (!exact && sw != 0.0) {
+                double dsw = SolvationFields::switchDerivative(r, fieldSwitchOn,
+                                                               fieldSwitchOff);
+                double Ra = receptorBornRadiiApo[j];
+                double Dlo = Rlo * Ra, Dhi = Rhi * Ra;
+                double aLo = r2 / (4.0 * Dlo), aHi = r2 / (4.0 * Dhi);
+                double fLo = 1.0 / farLo, fHi = 1.0 / farHi;
+                double dLo = -r * (4.0 - exp(-aLo)) / (4.0 * fLo * fLo * fLo);
+                double dHi = -r * (4.0 - exp(-aHi)) / (4.0 * fHi * fHi * fHi);
+                double farVal = (1.0 - wHi) * farLo + wHi * farHi;
+                dTerm_dr -= dsw * farVal
+                            + sw * ((1.0 - wHi) * dLo + wHi * dHi);
+            }
+            double dE_dr = qq * dTerm_dr;
+            double invR = 1.0 / r;
+            forceData[pi][0] -= scale * dE_dr * dx * invR;
+            forceData[pi][1] -= scale * dE_dr * dy * invR;
+            forceData[pi][2] -= scale * dE_dr * dz * invR;
+
+            // Ligand Born radius: the caller applies dR_i/dx.
+            double dfgb_dRi = Rj * expAlpha * (1.0 + alpha) / (2.0 * fgb);
+            dE_dR[i] += -qq / fgb2 * dfgb_dRi;
+            if (!exact && sw != 0.0 && Ri > sliceR.front() && Ri < sliceR.back())
+                dE_dR[i] -= qq * sw * (farHi - farLo) * invDeltaR;
+
+            // Receptor Born radius: only the near shell re-solves it, and it
+            // moves with the ligand, so it needs its own chain rule below.
+            if (!exact) {
+                double dfgb_dRj = Ri * expAlpha * (1.0 + alpha) / (2.0 * fgb);
+                dCross_dRrec[j] += -qq / fgb2 * dfgb_dRj;
+            }
+        };
+
+        if (exact) {
+            for (int j = 0; j < numReceptorAtoms; j++)
+                handleReceptorAtom(j);
+        } else {
+            SolvationFields::forEachNearPocketAtom(pocketCells, xi, yi, zi,
+                                                   handleReceptorAtom);
+        }
+    }
+
+    // ---- Chain rule through the ligand-induced receptor descreening ----
+    // dE/dR_j * dR_j/dhct_j * dhct_j/dx_i, receptor held fixed in space.
+    if (!exact && includeForces) {
+        for (int i = 0; i < numAtoms; i++) {
+            int pi = particles[i];
+            double s_i = (radii[i] - DIELECTRIC_OFFSET) * scaleFactors[i];
+            double xi = posData[pi][0], yi = posData[pi][1], zi = posData[pi][2];
+            SolvationFields::forEachNearPocketAtom(pocketCells, xi, yi, zi,
+                                                   [&](int j) {
+                if (!touched[j])
+                    return;
+                double factor = dCross_dRrec[j] * recDRdHCT[j];
+                if (factor == 0.0)
+                    return;
+                double dx = xi - receptorPositions[j * 3];
+                double dy = yi - receptorPositions[j * 3 + 1];
+                double dz = zi - receptorPositions[j * 3 + 2];
+                double r2 = dx * dx + dy * dy + dz * dz;
+                if (r2 > nearCutoff2)
+                    return;
+                double r = sqrt(r2);
+                if (r < 1e-10)
+                    return;
+                double Rj_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+                double dHCT = computeHCTTermDerivative(r, Rj_off, s_i, 1.0);
+                double mag = scale * factor * dHCT / r;
+                forceData[pi][0] -= mag * dx;
+                forceData[pi][1] -= mag * dy;
+                forceData[pi][2] -= mag * dz;
+            });
+        }
+    }
+}
+
+void ReferenceCalcIsolatedGBSAForceKernel::addGridMirrorTerm(
+        int g, const vector<Vec3>& posData, vector<Vec3>& forceData, double scale,
+        bool includeForces, double& mirrorEnergy) const {
+
+    const vector<int>& particles = groupParticleIndices[g];
+    const vector<double>& sliceValues = mirrorField->getSliceParameters();
+    double nearCutoff2 = fieldSwitchOff * fieldSwitchOff;
+
+    for (int i = 0; i < numAtoms; i++) {
+        int pi = particles[i];
+        double xi = posData[pi][0], yi = posData[pi][1], zi = posData[pi][2];
+        int slice = atomMirrorSlice[i];
+        double s_i = sliceValues[slice];
+
+        double gx = 0.0, gy = 0.0, gz = 0.0;
+        mirrorEnergy += SolvationFields::interpolateField(
+            *mirrorField, slice, xi, yi, zi, fieldInterpolationMethod,
+            includeForces, gx, gy, gz);
+        if (includeForces) {
+            forceData[pi][0] -= scale * mirrorScale * gx;
+            forceData[pi][1] -= scale * mirrorScale * gy;
+            forceData[pi][2] -= scale * mirrorScale * gz;
+        }
+
+        // Near shell: the part of the descreening the switch removed.
+        SolvationFields::forEachNearPocketAtom(pocketCells, xi, yi, zi, [&](int j) {
+            double w = receptorMirrorWeights[j];
+            if (w == 0.0)
+                return;
+            double dx = xi - receptorPositions[j * 3];
+            double dy = yi - receptorPositions[j * 3 + 1];
+            double dz = zi - receptorPositions[j * 3 + 2];
+            double r2 = dx * dx + dy * dy + dz * dz;
+            if (r2 > nearCutoff2)
+                return;
+            double r = sqrt(r2);
+            if (r < 1e-10)
+                return;
+
+            double Rj_off = receptorRadii[j] - DIELECTRIC_OFFSET;
+            double sw = SolvationFields::switchValue(r, fieldSwitchOn, fieldSwitchOff);
+            double H = computeHCTTerm(r, Rj_off, s_i, 1.0);
+            mirrorEnergy += w * H * (1.0 - sw);
+
+            if (!includeForces)
+                return;
+            double dH = computeHCTTermDerivative(r, Rj_off, s_i, 1.0);
+            double dsw = SolvationFields::switchDerivative(r, fieldSwitchOn,
+                                                           fieldSwitchOff);
+            double dE_dr = w * (dH * (1.0 - sw) - H * dsw);
+            double invR = 1.0 / r;
+            forceData[pi][0] -= scale * mirrorScale * dE_dr * dx * invR;
+            forceData[pi][1] -= scale * mirrorScale * dE_dr * dy * invR;
+            forceData[pi][2] -= scale * mirrorScale * dE_dr * dz * invR;
+        });
+    }
+
+    mirrorEnergy *= mirrorScale;
 }
 
 // ==================== execute ====================
@@ -418,6 +860,25 @@ void ReferenceCalcIsolatedGBSAForceKernel::computeGroup(
             // Add SA derivatives to full dE/dR
             for (int i = 0; i < numAtoms; i++)
                 dE_dR_full[i] += dE_dR_sa[i];
+        }
+
+        // ---- Step 5b: GRID-mode receptor add-ons ----
+        // Run before the force chain rule so the cross term's dE/dR_i rides
+        // the same pass as the GB and SA contributions.
+        if (crossMode != IsolatedGBSAForce::CROSS_NONE) {
+            double crossEnergy = 0.0;
+            addGridCrossTerm(g, posData, forceData, bornRadiiFull, scale,
+                             includeForces, crossEnergy, dE_dR_full);
+            groupCrossTermEnergies_[g] = crossEnergy * scale;
+            groupEnergies_[g] += crossEnergy * scale;
+        }
+
+        if (mirrorMode == IsolatedGBSAForce::MIRROR_LINEAR_GRID) {
+            double mirrorEnergy = 0.0;
+            addGridMirrorTerm(g, posData, forceData, scale, includeForces,
+                              mirrorEnergy);
+            groupReceptorDesolvations_[g] = mirrorEnergy * scale;
+            groupEnergies_[g] += mirrorEnergy * scale;
         }
 
         // ---- Step 6: Forces (chain rule through Born radii) ----
@@ -1140,7 +1601,10 @@ vector<double> ReferenceCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl&
     bool isHCT = (gbMethod == IsolatedGBSAForce::HCT);
     bool pairwise = (receptorMode == IsolatedGBSAForce::PAIRWISE);
     if (receptorMode == IsolatedGBSAForce::GRID)
-        throw OpenMMException("IsolatedGBSAForce: GRID-mode Hessian not implemented");
+        throw OpenMMException("IsolatedGBSAForce: GRID-mode Hessian not implemented "
+                              "on the Reference platform (the cross and mirror "
+                              "add-ons contribute second derivatives no platform "
+                              "currently carries)");
 
     // Each group is isolated -> block diagonal in the global (3*totalParticles)
     // matrix. We compute the per-group block in local indexing then scatter.

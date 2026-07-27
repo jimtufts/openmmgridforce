@@ -4,6 +4,8 @@
 
 #include "IsolatedGBSAForce.h"
 #include "internal/IsolatedGBSAForceImpl.h"
+#include "internal/SolvationFieldBuilder.h"
+#include "GridForceTypes.h"
 #include "openmm/OpenMMException.h"
 
 using namespace GridForcePlugin;
@@ -33,22 +35,110 @@ IsolatedGBSAForce::IsolatedGBSAForce()
       receptorLocalityCutoff(NO_LOCALITY_CUTOFF),
       receptorMode(NONE),
       interpolationMethod(0),
-      computeCrossTermGrid(false),
+      crossMode(CROSS_NONE),
+      mirrorMode(MIRROR_NONE),
+      nearShellCutoff(SolvationFields::DEFAULT_NEAR_CUTOFF),
+      fieldSwitchOn(SolvationFields::DEFAULT_SWITCH_ON),
+      fieldSwitchOff(SolvationFields::DEFAULT_SWITCH_OFF),
+      mirrorScale(1.0),
+      pocketPadding(SolvationFields::DEFAULT_POCKET_PADDING),
+      mirrorFieldCutoff(SolvationFields::DEFAULT_MIRROR_BUILD_CUTOFF),
+      fieldInterpolationMethod(InterpolationMethod::TRICUBIC_BSPLINE),
+      numCrossFieldSlices(6),
       numReceptorAtoms(0),
       globalScalingFactor(1.0) {
 }
 
-void IsolatedGBSAForce::setCrossTermBinValues(const vector<double>& binValues) {
-    if ((int)binValues.size() != numAtoms) {
+void IsolatedGBSAForce::setNearShellCutoff(double distance) {
+    if (distance < fieldSwitchOff) {
         throw OpenMMException(
-            "IsolatedGBSAForce: crossTermBinValues must have length numAtoms");
+            "IsolatedGBSAForce: nearShellCutoff must be at least the field "
+            "switch-off radius");
     }
-    for (double v : binValues) {
-        if (!(v > 0)) {
+    nearShellCutoff = distance;
+}
+
+void IsolatedGBSAForce::setFieldSwitchRadii(double switchOn, double switchOff) {
+    if (switchOn < 0.0 || switchOff < switchOn) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: require 0 <= switchOn <= switchOff");
+    }
+    if (switchOff > nearShellCutoff) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: switchOff must not exceed nearShellCutoff");
+    }
+    fieldSwitchOn = switchOn;
+    fieldSwitchOff = switchOff;
+}
+
+void IsolatedGBSAForce::setFieldInterpolationMethod(int method) {
+    if (method != InterpolationMethod::TRILINEAR &&
+        method != InterpolationMethod::TRICUBIC_BSPLINE) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: fieldInterpolationMethod must be 0 (trilinear) "
+            "or 1 (tricubic B-spline)");
+    }
+    fieldInterpolationMethod = method;
+}
+
+void IsolatedGBSAForce::setPocketPadding(double padding) {
+    if (padding < 0.0) {
+        throw OpenMMException("IsolatedGBSAForce: pocketPadding must be non-negative");
+    }
+    pocketPadding = padding;
+}
+
+void IsolatedGBSAForce::setMirrorFieldCutoff(double cutoff) {
+    if (cutoff <= 0.0) {
+        throw OpenMMException("IsolatedGBSAForce: mirrorFieldCutoff must be positive");
+    }
+    mirrorFieldCutoff = cutoff;
+}
+
+void IsolatedGBSAForce::setCrossField(shared_ptr<SolvationFieldGrid> field) {
+    if (field && field->getFieldType() != SolvationFieldGrid::CROSS_GB) {
+        throw OpenMMException("IsolatedGBSAForce: field is not a CROSS_GB field");
+    }
+    crossField = field;
+}
+
+void IsolatedGBSAForce::loadCrossField(const string& filename) {
+    setCrossField(SolvationFieldGrid::loadFromFile(filename));
+}
+
+void IsolatedGBSAForce::setCrossFieldRadii(const vector<double>& radii) {
+    for (size_t k = 1; k < radii.size(); k++) {
+        if (!(radii[k] > radii[k - 1])) {
             throw OpenMMException(
-                "IsolatedGBSAForce: cross-term bin values must be positive");
+                "IsolatedGBSAForce: crossFieldRadii must be strictly ascending");
         }
     }
+    if (!radii.empty() && (radii.size() < 2 || radii.front() <= 0.0)) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: crossFieldRadii needs at least two positive values");
+    }
+    crossFieldRadii = radii;
+}
+
+void IsolatedGBSAForce::setNumCrossFieldSlices(int n) {
+    if (n < 2) {
+        throw OpenMMException("IsolatedGBSAForce: numCrossFieldSlices must be >= 2");
+    }
+    numCrossFieldSlices = n;
+}
+
+void IsolatedGBSAForce::setMirrorField(shared_ptr<SolvationFieldGrid> field) {
+    if (field && field->getFieldType() != SolvationFieldGrid::MIRROR) {
+        throw OpenMMException("IsolatedGBSAForce: field is not a MIRROR field");
+    }
+    mirrorField = field;
+}
+
+void IsolatedGBSAForce::loadMirrorField(const string& filename) {
+    setMirrorField(SolvationFieldGrid::loadFromFile(filename));
+}
+
+void IsolatedGBSAForce::setCrossTermBinValues(const vector<double>& binValues) {
     crossTermBinValues = binValues;
 }
 

@@ -3,6 +3,9 @@
  * -------------------------------------------------------------------------- */
 
 #include "CudaIsolatedGBSAKernels.h"
+#include "internal/SolvationFieldBuilder.h"
+#include "GridForceTypes.h"
+#include "BSplinePrefilter.h"
 #include "CudaGridForceKernelSources.h"
 #include "openmm/internal/ContextImpl.h"
 #include "openmm/cuda/CudaBondedUtilities.h"
@@ -110,6 +113,8 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       numBins(0), interpolationMethod(0), hasHctDerivatives(false),
       useKDECorrections(false), hasBinnedKDEDerivatives(false),
       computeCrossTermGrid(false), crossTermNumBins(0),
+      crossMode(IsolatedGBSAForce::CROSS_NONE),
+      mirrorMode(IsolatedGBSAForce::MIRROR_NONE),
       numReceptorAtoms(0), receptorReferenceEnergyValue(0.0f),
       computeReceptorHCTGridKernel(nullptr),
       generateCrossTermGridKernel(nullptr),
@@ -220,6 +225,8 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         vector<int> counts = {nx, ny, nz};
         gridCounts.initialize<int>(cu, 3, "isolatedGbsaGridCounts");
         gridCounts.upload(counts);
+        for (int d = 0; d < 3; d++)
+            gridCountsHost[d] = counts[d];
 
         // Upload grid data
         int numPoints = nx * ny * nz;
@@ -267,8 +274,22 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         // Uses the existing computeCrossTermGBEnergy kernel with
         // ligand Born radii from the HCT grid (already computed)
         // and baseline receptor Born radii (frozen, precomputed once).
-        computeCrossTermGrid = force.getComputeCrossTermGrid();
-        if (computeCrossTermGrid) {
+        //
+        crossMode = force.getCrossMode();
+        mirrorMode = force.getMirrorMode();
+        nearShellCutoff = force.getNearShellCutoff();
+        fieldSwitchOn = force.getFieldSwitchOn();
+        fieldSwitchOff = force.getFieldSwitchOff();
+        mirrorScale = force.getMirrorScale();
+        mirrorFieldCutoff = force.getMirrorFieldCutoff();
+        pocketPadding = force.getPocketPadding();
+        fieldInterpolationMethod = force.getFieldInterpolationMethod();
+        // CROSS_EXACT reuses the direct pairwise kernel below; the field-based
+        // modes are set up after the module is built (they need its kernels).
+        computeCrossTermGrid = (crossMode == IsolatedGBSAForce::CROSS_EXACT);
+        if (computeCrossTermGrid ||
+            crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID ||
+            mirrorMode != IsolatedGBSAForce::MIRROR_NONE) {
             int nRec = force.getNumReceptorAtoms();
             if (nRec == 0) {
                 throw OpenMMException(
@@ -282,11 +303,25 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
                 throw OpenMMException(
                     "IsolatedGBSAForce: receptor positions size mismatch.");
             }
-            const auto& recBornBaseline = force.getReceptorBornRadiiBaseline();
+            // Derive the apo receptor Born radii when they were not supplied,
+            // so GRID+CROSS_EXACT needs the same setup here as on Reference.
+            vector<double> recBornBaseline = force.getReceptorBornRadiiBaseline();
             if ((int)recBornBaseline.size() != nRec) {
-                throw OpenMMException(
-                    "IsolatedGBSAForce: receptorBornRadiiBaseline must "
-                    "have length numReceptorAtoms.");
+                if (!recBornBaseline.empty()) {
+                    throw OpenMMException(
+                        "IsolatedGBSAForce: receptorBornRadiiBaseline must "
+                        "have length numReceptorAtoms.");
+                }
+                vector<double> recQ(nRec), recR(nRec), recS(nRec);
+                for (int j = 0; j < nRec; j++)
+                    force.getReceptorAtomParameters(j, recQ[j], recR[j], recS[j]);
+                vector<double> apoHCT, apoWeights;
+                SolvationFields::computeApoReceptor(
+                    recPos, recQ, recR, recS,
+                    force.getGBMethod() == IsolatedGBSAForce::OBC_II,
+                    prefactor, force.getCutoffDistance(),
+                    force.getIncludeSurfaceArea(), force.getSurfaceTension(),
+                    nullptr, apoHCT, recBornBaseline, apoWeights);
             }
             numReceptorAtoms = nRec;
 
@@ -521,9 +556,21 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         CudaGridForceKernelSources::commonHeaders +
         CudaGridForceKernelSources::gbsaGridForceKernel +
         CudaGridForceKernelSources::gbsaGridGenerationKernel +
-        CudaGridForceKernelSources::isolatedGBSAKernel);
+        CudaGridForceKernelSources::isolatedGBSAKernel +
+        CudaGridForceKernelSources::isolatedGBSAFieldsKernel);
     computeLigandHCTKernel = cu.getKernel(module, "computeIsolatedLigandHCT");
     generateCrossTermGridKernel = cu.getKernel(module, "generateCrossTermGrid");
+    generateCrossFieldSlicesKernel = cu.getKernel(module, "generateCrossFieldSlices");
+    generateMirrorFieldSlicesKernel = cu.getKernel(module, "generateMirrorFieldSlices");
+    accumulateReceptorNearHCTKernel = cu.getKernel(module, "accumulateReceptorNearHCT");
+    computeCrossRadiusGridEnergyKernel = cu.getKernel(module, "computeCrossRadiusGridEnergy");
+    applyCrossReceptorChainRuleKernel = cu.getKernel(module, "applyCrossReceptorChainRule");
+    computeMirrorFromFieldKernel = cu.getKernel(module, "computeMirrorFromField");
+
+    if (receptorMode == IsolatedGBSAForce::GRID &&
+        (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID ||
+         mirrorMode != IsolatedGBSAForce::MIRROR_NONE))
+        initializeGridReceptorTerms(force);
     computeCrossTermFromGridKernel = cu.getKernel(module, "computeCrossTermFromGrid");
     computeCrossTermPairwiseKernel = cu.getKernel(module, "computeCrossTermGBEnergy");
     accumulateCrossTermBornDerivativesKernel = cu.getKernel(module, "accumulateCrossTermBornDerivatives");
@@ -884,6 +931,130 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         // groupEnergies too for the OpenMM total energy return path)
     }
 
+
+    // Step 4c: GRID mode add-ons — radius-sliced cross field and mirror field.
+    // Both run off one cell list over the pocket atoms. The cross term writes
+    // into dE_dR, so when forces are on it must land after the Born-radius
+    // derivatives are seeded and before the HCT chain rule consumes them;
+    // when they are off it can run here.
+    auto runGridAddOns = [&](CUdeviceptr dEdRTarget) {
+        if (receptorMode != IsolatedGBSAForce::GRID)
+            return;
+        bool doCross = (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID);
+        bool doMirror = (mirrorMode != IsolatedGBSAForce::MIRROR_NONE);
+        if (!doCross && !doMirror)
+            return;
+
+        int nx = gridCountsHost[0], ny = gridCountsHost[1], nz = gridCountsHost[2];
+        int totalPoints = nx * ny * nz;
+        float fox = originX, foy = originY, foz = originZ;
+        float sp = gridSpacing;
+        float son = (float) fieldSwitchOn, soff = (float) fieldSwitchOff;
+        float cellOx = (float) cellOrigin[0], cellOy = (float) cellOrigin[1],
+              cellOz = (float) cellOrigin[2];
+        float cellSz = (float) cellSize;
+        int ccx = cellCounts[0], ccy = cellCounts[1], ccz = cellCounts[2];
+        float nearCut = (float) nearShellCutoff;
+        int useOBC = (gbMethod == IsolatedGBSAForce::OBC_II) ? 1 : 0;
+        int interp = fieldInterpolationMethod;
+
+        CUdeviceptr pocketPosPtr = pocketPositions.getDevicePointer();
+        CUdeviceptr pocketQPtr = pocketCharges.getDevicePointer();
+        CUdeviceptr pocketRPtr = pocketRadii.getDevicePointer();
+        CUdeviceptr pocketHCTPtr = pocketApoHCT.getDevicePointer();
+        CUdeviceptr pocketBornPtr = pocketBornApo.getDevicePointer();
+        CUdeviceptr pocketWPtr = pocketWeights.getDevicePointer();
+        CUdeviceptr cellStartPtr = cellStartArr.getDevicePointer();
+        CUdeviceptr cellAtomsPtr = cellAtomsArr.getDevicePointer();
+        CUdeviceptr deltaPtr = recDeltaHCT.getDevicePointer();
+        CUdeviceptr dRrecPtr = dCrossDRrec.getDevicePointer();
+
+        if (doCross) {
+            cu.clearBuffer(recDeltaHCT);
+            cu.clearBuffer(dCrossDRrec);
+            cu.clearBuffer(groupCrossTermEnergies);
+            void* accArgs[] = {
+                &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+                &groupStartPtr, &numParticleGroups, &numAtoms, &totalParticles,
+                &pocketPosPtr, &pocketRPtr, &numPocket,
+                &cellStartPtr, &cellAtomsPtr,
+                &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
+                &nearCut, &deltaPtr
+            };
+            cu.executeKernel(accumulateReceptorNearHCTKernel, accArgs,
+                             numBlocks * blockSize, blockSize);
+
+            CUdeviceptr crossFieldPtr = crossFieldData.getDevicePointer();
+            CUdeviceptr crossRadiiPtr = crossSliceRadii.getDevicePointer();
+            CUdeviceptr groupCrossPtr = groupCrossTermEnergies.getDevicePointer();
+            void* crossArgs[] = {
+                &posqPtr, &particleIndicesPtr, &chargesPtr, &bornRadiiPtr,
+                &groupStartPtr, &numParticleGroups, &numAtoms, &totalParticles,
+                prefactorArg,
+                &crossFieldPtr, &crossRadiiPtr, &numCrossSlices, &totalPoints,
+                &fox, &foy, &foz, &nx, &ny, &nz, &sp, &interp,
+                &pocketPosPtr, &pocketQPtr, &pocketRPtr, &pocketHCTPtr,
+                &pocketBornPtr, &numPocket,
+                &cellStartPtr, &cellAtomsPtr,
+                &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
+                &nearCut, &son, &soff, &useOBC,
+                &deltaPtr, &dRrecPtr, &dEdRTarget,
+                &forcePtr, &paddedNumAtoms, &groupCrossPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
+            };
+            cu.executeKernel(computeCrossRadiusGridEnergyKernel, crossArgs,
+                             numBlocks * blockSize, blockSize);
+
+            if (includeForces) {
+                void* chainArgs[] = {
+                    &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
+                    &groupStartPtr, &numParticleGroups, &numAtoms, &totalParticles,
+                    &pocketPosPtr, &pocketRPtr, &pocketHCTPtr, &numPocket,
+                    &cellStartPtr, &cellAtomsPtr,
+                    &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
+                    &nearCut, &useOBC, &deltaPtr, &dRrecPtr,
+                    &forcePtr, &paddedNumAtoms,
+                    &globalScalingFactor, &groupScalingFactorsPtr
+                };
+                cu.executeKernel(applyCrossReceptorChainRuleKernel, chainArgs,
+                                 numBlocks * blockSize, blockSize);
+            }
+        }
+
+        if (doMirror) {
+            cu.clearBuffer(groupMirrorEnergies);
+            CUdeviceptr mCellStartPtr = mirrorCellStartArr.getDevicePointer();
+            CUdeviceptr mCellAtomsPtr = mirrorCellAtomsArr.getDevicePointer();
+            float mOx = (float) mirrorCellOrigin[0], mOy = (float) mirrorCellOrigin[1],
+                  mOz = (float) mirrorCellOrigin[2];
+            float mSz = (float) mirrorCellSize;
+            int mcx = mirrorCellCounts[0], mcy = mirrorCellCounts[1],
+                mcz = mirrorCellCounts[2];
+            CUdeviceptr mirrorFieldPtr = mirrorFieldData.getDevicePointer();
+            CUdeviceptr mirrorRadiiPtr = mirrorSliceRadii.getDevicePointer();
+            CUdeviceptr slicePtr = atomMirrorSlice.getDevicePointer();
+            CUdeviceptr groupMirrorPtr = groupMirrorEnergies.getDevicePointer();
+            float mscale = (float) mirrorScale;
+            void* mirrorArgs[] = {
+                &posqPtr, &particleIndicesPtr, &slicePtr,
+                &groupStartPtr, &numParticleGroups, &numAtoms, &totalParticles,
+                &mirrorFieldPtr, &mirrorRadiiPtr, &totalPoints,
+                &fox, &foy, &foz, &nx, &ny, &nz, &sp, &interp,
+                &pocketPosPtr, &pocketRPtr, &pocketWPtr, &numPocket,
+                &mCellStartPtr, &mCellAtomsPtr,
+                &mOx, &mOy, &mOz, &mSz, &mcx, &mcy, &mcz,
+                &son, &soff, &mscale,
+                &forcePtr, &paddedNumAtoms, &groupMirrorPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
+            };
+            cu.executeKernel(computeMirrorFromFieldKernel, mirrorArgs,
+                             numBlocks * blockSize, blockSize);
+        }
+    };
+
+    if (!includeForces)
+        runGridAddOns(dE_dR.getDevicePointer());
+
     // Step 4b: PAIRWISE mode - receptor desolvation and cross-term energy
     // All accumulation done on GPU to avoid host-device sync points.
     if (receptorMode == IsolatedGBSAForce::PAIRWISE) {
@@ -1243,6 +1414,9 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                              crossDerivArgs, numBlocks * blockSize, blockSize);
         }
 
+        if (includeForces)
+            runGridAddOns(dE_dRPtr);
+
         // Ligand-ligand HCT chain rule forces (scaling propagates via dE_dR)
         void* hctChainArgs[] = {
             &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
@@ -1315,9 +1489,14 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                     groupReceptorContributionsHost[g] =
                         groupLigandSelfEnergiesHost[g] - groupLigOnlyEnergiesHost[g];
             }
-        } else if (receptorMode == IsolatedGBSAForce::GRID
-                   && computeCrossTermGrid) {
-            downloadMixedEnergy(cu, groupCrossTermEnergies, groupCrossTermEnergiesHost);
+        } else if (receptorMode == IsolatedGBSAForce::GRID) {
+            if (crossMode != IsolatedGBSAForce::CROSS_NONE)
+                downloadMixedEnergy(cu, groupCrossTermEnergies, groupCrossTermEnergiesHost);
+            if (mirrorMode != IsolatedGBSAForce::MIRROR_NONE) {
+                downloadMixedEnergy(cu, groupMirrorEnergies, groupMirrorEnergiesHost);
+                for (int g = 0; g < numParticleGroups; g++)
+                    groupReceptorDesolvationsHost[g] = groupMirrorEnergiesHost[g];
+            }
         }
 
         // Sum total energy. In GRID+crossTerm mode the cross-term
@@ -1326,9 +1505,11 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         double totalEnergy = 0.0;
         for (int g = 0; g < numParticleGroups; g++) {
             totalEnergy += groupEnergiesHost[g];
-            if (receptorMode == IsolatedGBSAForce::GRID
-                && computeCrossTermGrid) {
-                totalEnergy += groupCrossTermEnergiesHost[g];
+            if (receptorMode == IsolatedGBSAForce::GRID) {
+                if (crossMode != IsolatedGBSAForce::CROSS_NONE)
+                    totalEnergy += groupCrossTermEnergiesHost[g];
+                if (mirrorMode != IsolatedGBSAForce::MIRROR_NONE)
+                    totalEnergy += groupMirrorEnergiesHost[g];
             }
         }
 
@@ -1495,7 +1676,330 @@ vector<double> CudaCalcIsolatedGBSAForceKernel::getParticleGroupUnscaledEnergies
     return result;
 }
 
+
+// ===========================================================================
+// GRID-mode receptor add-ons: field setup and generation
+// ===========================================================================
+
+shared_ptr<SolvationFieldGrid> CudaCalcIsolatedGBSAForceKernel::generateCrossFieldOnDevice(
+        const IsolatedGBSAForce& force, const vector<double>& sliceR,
+        const vector<double>& bornApo) {
+
+    auto grid = force.getDesolvationGrid();
+    int nx, ny, nz;
+    grid->getCounts(nx, ny, nz);
+    double ox, oy, oz;
+    grid->getOrigin(ox, oy, oz);
+    int totalPoints = nx * ny * nz;
+    int nSlices = (int) sliceR.size();
+
+    auto field = make_shared<SolvationFieldGrid>(
+        nx, ny, nz, grid->getSpacing(), nSlices,
+        SolvationFieldGrid::CROSS_GB, fieldInterpolationMethod);
+    field->setOrigin(ox, oy, oz);
+    field->setSwitchRadii(fieldSwitchOn, fieldSwitchOff);
+    field->setSliceParameters(sliceR);
+
+    CudaArray out, radiiBuf, bornBuf;
+    out.initialize<float>(cu, (size_t) nSlices * totalPoints, "isolatedGbsaCrossFieldGen");
+    vector<float> sliceF(sliceR.begin(), sliceR.end());
+    radiiBuf.initialize<float>(cu, nSlices, "isolatedGbsaCrossSliceGen");
+    radiiBuf.upload(sliceF);
+    uploadRealScalars(cu, bornBuf, bornApo, "isolatedGbsaRecBornApoGen");
+
+    CUdeviceptr outPtr = out.getDevicePointer();
+    CUdeviceptr posPtr = receptorPositions.getDevicePointer();
+    CUdeviceptr qPtr = receptorCharges.getDevicePointer();
+    CUdeviceptr bornPtr = bornBuf.getDevicePointer();
+    CUdeviceptr radiiPtr = radiiBuf.getDevicePointer();
+    float fox = (float) ox, foy = (float) oy, foz = (float) oz;
+    float sp = (float) grid->getSpacing();
+    float son = (float) fieldSwitchOn, soff = (float) fieldSwitchOff;
+    void* args[] = {&outPtr, &posPtr, &qPtr, &bornPtr, &numReceptorAtoms,
+                    &radiiPtr, &nSlices, &fox, &foy, &foz,
+                    &nx, &ny, &nz, &sp, &son, &soff, &totalPoints};
+    int blockSize = 128;
+    int blocks = min((totalPoints + blockSize - 1) / blockSize, 4096);
+    cu.executeKernel(generateCrossFieldSlicesKernel, args, blocks * blockSize, blockSize);
+
+    vector<float> data((size_t) nSlices * totalPoints);
+    out.download(data);
+    if (fieldInterpolationMethod == InterpolationMethod::TRICUBIC_BSPLINE) {
+        for (int k = 0; k < nSlices; k++) {
+            vector<float> slice(data.begin() + (size_t) k * totalPoints,
+                                data.begin() + (size_t) (k + 1) * totalPoints);
+            bsplinePrefilter3D(slice, nx, ny, nz);
+            copy(slice.begin(), slice.end(),
+                 data.begin() + (size_t) k * totalPoints);
+        }
+    }
+    field->setData(std::move(data));
+    return field;
+}
+
+shared_ptr<SolvationFieldGrid> CudaCalcIsolatedGBSAForceKernel::generateMirrorFieldOnDevice(
+        const IsolatedGBSAForce& force, const vector<double>& sliceR,
+        const vector<double>& weights) {
+
+    auto grid = force.getDesolvationGrid();
+    int nx, ny, nz;
+    grid->getCounts(nx, ny, nz);
+    double ox, oy, oz;
+    grid->getOrigin(ox, oy, oz);
+    int totalPoints = nx * ny * nz;
+    int nSlices = (int) sliceR.size();
+    int counts[3] = {nx, ny, nz};
+    double origin[3] = {ox, oy, oz};
+
+    // The mirror field reaches further than the runtime near lists, so it
+    // gets its own, wider atom selection.
+    const vector<double>& recPos = force.getReceptorPositions();
+    vector<int> sel = SolvationFields::selectPocketAtoms(
+        recPos, origin, grid->getSpacing(), counts, mirrorFieldCutoff);
+    int nSel = (int) sel.size();
+
+    auto field = make_shared<SolvationFieldGrid>(
+        nx, ny, nz, grid->getSpacing(), nSlices,
+        SolvationFieldGrid::MIRROR, fieldInterpolationMethod);
+    field->setOrigin(ox, oy, oz);
+    field->setSwitchRadii(fieldSwitchOn, fieldSwitchOff);
+    field->setSliceParameters(sliceR);
+
+    vector<double> selPos(3 * nSel), selRad(nSel), selW(nSel);
+    for (int a = 0; a < nSel; a++) {
+        int j = sel[a];
+        for (int d = 0; d < 3; d++) selPos[a * 3 + d] = recPos[j * 3 + d];
+        double q, r, sc;
+        force.getReceptorAtomParameters(j, q, r, sc);
+        selRad[a] = r;
+        selW[a] = weights[j];
+    }
+
+    CudaArray out, posBuf, radBuf, wBuf, radiiBuf;
+    out.initialize<float>(cu, (size_t) nSlices * totalPoints, "isolatedGbsaMirrorFieldGen");
+    uploadRealPositions(cu, posBuf, selPos, nSel, "isolatedGbsaMirrorGenPos");
+    uploadRealScalars(cu, radBuf, selRad, "isolatedGbsaMirrorGenRad");
+    uploadRealScalars(cu, wBuf, selW, "isolatedGbsaMirrorGenW");
+    vector<float> sliceF(sliceR.begin(), sliceR.end());
+    radiiBuf.initialize<float>(cu, nSlices, "isolatedGbsaMirrorSliceGen");
+    radiiBuf.upload(sliceF);
+
+    CUdeviceptr outPtr = out.getDevicePointer();
+    CUdeviceptr posPtr = posBuf.getDevicePointer();
+    CUdeviceptr radPtr = radBuf.getDevicePointer();
+    CUdeviceptr wPtr = wBuf.getDevicePointer();
+    CUdeviceptr radiiPtr = radiiBuf.getDevicePointer();
+    float fox = (float) ox, foy = (float) oy, foz = (float) oz;
+    float sp = (float) grid->getSpacing();
+    float son = (float) fieldSwitchOn, soff = (float) fieldSwitchOff;
+    float bcut = (float) mirrorFieldCutoff;
+    void* args[] = {&outPtr, &posPtr, &radPtr, &wPtr, &nSel,
+                    &radiiPtr, &nSlices, &fox, &foy, &foz,
+                    &nx, &ny, &nz, &sp, &son, &soff, &bcut, &totalPoints};
+    int blockSize = 128;
+    int blocks = min((totalPoints + blockSize - 1) / blockSize, 4096);
+    cu.executeKernel(generateMirrorFieldSlicesKernel, args, blocks * blockSize, blockSize);
+
+    vector<float> data((size_t) nSlices * totalPoints);
+    out.download(data);
+    if (fieldInterpolationMethod == InterpolationMethod::TRICUBIC_BSPLINE) {
+        for (int k = 0; k < nSlices; k++) {
+            vector<float> slice(data.begin() + (size_t) k * totalPoints,
+                                data.begin() + (size_t) (k + 1) * totalPoints);
+            bsplinePrefilter3D(slice, nx, ny, nz);
+            copy(slice.begin(), slice.end(),
+                 data.begin() + (size_t) k * totalPoints);
+        }
+    }
+    field->setData(std::move(data));
+    return field;
+}
+
+void CudaCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
+        const IsolatedGBSAForce& force) {
+
+    auto grid = force.getDesolvationGrid();
+    int nx, ny, nz;
+    grid->getCounts(nx, ny, nz);
+    double ox, oy, oz;
+    grid->getOrigin(ox, oy, oz);
+    int counts[3] = {nx, ny, nz};
+    double origin[3] = {ox, oy, oz};
+    int totalPoints = nx * ny * nz;
+    double spacing = grid->getSpacing();
+
+    const vector<double>& recPos = force.getReceptorPositions();
+    int nRec = force.getNumReceptorAtoms();
+    vector<double> recQ(nRec), recR(nRec), recS(nRec);
+    for (int j = 0; j < nRec; j++)
+        force.getReceptorAtomParameters(j, recQ[j], recR[j], recS[j]);
+
+    const vector<double>& supplied = force.getReceptorBornRadiiBaseline();
+    const vector<double>* suppliedPtr =
+        ((int) supplied.size() == nRec) ? &supplied : nullptr;
+    vector<double> apoHCT, apoBorn, weights;
+    SolvationFields::computeApoReceptor(
+        recPos, recQ, recR, recS, gbMethod == IsolatedGBSAForce::OBC_II,
+        prefactor, cutoffDistance, includeSurfaceArea, surfaceTension,
+        suppliedPtr, apoHCT, apoBorn, weights);
+
+    // Pocket set and cell list, sized by the widest near shell in use.
+    vector<int> pocket = SolvationFields::selectPocketAtoms(
+        recPos, origin, spacing, counts, pocketPadding);
+    numPocket = (int) pocket.size();
+    if (numPocket == 0)
+        throw OpenMMException("IsolatedGBSAForce: no receptor atoms near the grid box");
+
+    double cell = (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID)
+                  ? nearShellCutoff : fieldSwitchOff;
+    SolvationFields::PocketCellList cl;
+    SolvationFields::buildPocketCellList(recPos, pocket, cell, cl);
+    for (int d = 0; d < 3; d++) {
+        cellOrigin[d] = cl.origin[d];
+        cellCounts[d] = cl.counts[d];
+    }
+    cellSize = cl.cellSize;
+
+    // Pocket-local arrays: the per-group scratch then scales with the pocket,
+    // not the protein.
+    vector<int> recToPocket(nRec, -1);
+    for (int a = 0; a < numPocket; a++)
+        recToPocket[pocket[a]] = a;
+    vector<double> pPos(3 * numPocket), pQ(numPocket), pR(numPocket),
+                   pHCT(numPocket), pBorn(numPocket), pW(numPocket);
+    for (int a = 0; a < numPocket; a++) {
+        int j = pocket[a];
+        for (int d = 0; d < 3; d++) pPos[a * 3 + d] = recPos[j * 3 + d];
+        pQ[a] = recQ[j];
+        pR[a] = recR[j];
+        pHCT[a] = apoHCT[j];
+        pBorn[a] = apoBorn[j];
+        pW[a] = weights[j];
+    }
+    vector<int> cellAtomsLocal(cl.atoms.size());
+    for (size_t a = 0; a < cl.atoms.size(); a++)
+        cellAtomsLocal[a] = recToPocket[cl.atoms[a]];
+
+    uploadRealPositions(cu, pocketPositions, pPos, numPocket, "isolatedGbsaPocketPos");
+    uploadRealScalars(cu, pocketCharges, pQ, "isolatedGbsaPocketQ");
+    uploadRealScalars(cu, pocketRadii, pR, "isolatedGbsaPocketR");
+    uploadRealScalars(cu, pocketApoHCT, pHCT, "isolatedGbsaPocketApoHCT");
+    uploadRealScalars(cu, pocketBornApo, pBorn, "isolatedGbsaPocketBornApo");
+    uploadRealScalars(cu, pocketWeights, pW, "isolatedGbsaPocketW");
+    cellStartArr.initialize<int>(cu, (int) cl.cellStart.size(), "isolatedGbsaCellStart");
+    cellStartArr.upload(cl.cellStart);
+    cellAtomsArr.initialize<int>(cu, max((int) cellAtomsLocal.size(), 1), "isolatedGbsaCellAtoms");
+    if (!cellAtomsLocal.empty())
+        cellAtomsArr.upload(cellAtomsLocal);
+
+    if (mirrorMode != IsolatedGBSAForce::MIRROR_NONE) {
+        SolvationFields::PocketCellList mcl;
+        SolvationFields::buildPocketCellList(recPos, pocket, fieldSwitchOff, mcl);
+        for (int d = 0; d < 3; d++) {
+            mirrorCellOrigin[d] = mcl.origin[d];
+            mirrorCellCounts[d] = mcl.counts[d];
+        }
+        mirrorCellSize = mcl.cellSize;
+        vector<int> mLocal(mcl.atoms.size());
+        for (size_t a = 0; a < mcl.atoms.size(); a++)
+            mLocal[a] = recToPocket[mcl.atoms[a]];
+        mirrorCellStartArr.initialize<int>(cu, (int) mcl.cellStart.size(),
+                                           "isolatedGbsaMirrorCellStart");
+        mirrorCellStartArr.upload(mcl.cellStart);
+        mirrorCellAtomsArr.initialize<int>(cu, max((int) mLocal.size(), 1),
+                                           "isolatedGbsaMirrorCellAtoms");
+        if (!mLocal.empty())
+            mirrorCellAtomsArr.upload(mLocal);
+    }
+
+    initRealBuffer(cu, recDeltaHCT, numParticleGroups * numPocket, "isolatedGbsaRecDeltaHCT");
+    initRealBuffer(cu, dCrossDRrec, numParticleGroups * numPocket, "isolatedGbsaDCrossDRrec");
+    initMixedEnergyBuffer(cu, groupMirrorEnergies, numParticleGroups, "isolatedGbsaGroupMirror");
+    groupMirrorEnergiesHost.resize(numParticleGroups, 0.0);
+
+    if (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID) {
+        auto field = force.getCrossField();
+        if (!field) {
+            vector<double> sliceR = force.getCrossFieldRadii();
+            if (sliceR.empty()) {
+                vector<double> ligRadii(numAtoms);
+                for (int i = 0; i < numAtoms; i++) {
+                    double q, r, sc;
+                    force.getAtomParameters(i, q, r, sc);
+                    ligRadii[i] = r;
+                }
+                sliceR = SolvationFields::defaultCrossFieldRadii(
+                    ligRadii, force.getNumCrossFieldSlices());
+            }
+            field = generateCrossFieldOnDevice(force, sliceR, apoBorn);
+            const_cast<IsolatedGBSAForce&>(force).setCrossField(field);
+        }
+        if (field->getNumPoints() != totalPoints)
+            throw OpenMMException("IsolatedGBSAForce: cross field geometry does not "
+                                  "match the desolvation grid");
+        numCrossSlices = field->getNumSlices();
+        if (numCrossSlices > 16)
+            throw OpenMMException("IsolatedGBSAForce: at most 16 cross field slices "
+                                  "are supported on CUDA");
+        crossFieldData.initialize<float>(cu, (int) field->getData().size(),
+                                         "isolatedGbsaCrossField");
+        crossFieldData.upload(field->getData());
+        vector<float> sr(field->getSliceParameters().begin(),
+                         field->getSliceParameters().end());
+        crossSliceRadii.initialize<float>(cu, numCrossSlices, "isolatedGbsaCrossSliceR");
+        crossSliceRadii.upload(sr);
+        fieldInterpolationMethod = field->getInterpolationMethod();
+    }
+
+    if (mirrorMode != IsolatedGBSAForce::MIRROR_NONE) {
+        vector<double> ligRadii(numAtoms), ligScales(numAtoms);
+        for (int i = 0; i < numAtoms; i++) {
+            double q, r, sc;
+            force.getAtomParameters(i, q, r, sc);
+            ligRadii[i] = r;
+            ligScales[i] = sc;
+        }
+        vector<double> sliceR = SolvationFields::distinctScaledRadii(ligRadii, ligScales);
+        vector<int> slot(numAtoms);
+        for (int i = 0; i < numAtoms; i++) {
+            double sv = (ligRadii[i] - IsolatedGBSAForce::DIELECTRIC_OFFSET) * ligScales[i];
+            slot[i] = SolvationFields::sliceForScaledRadius(sliceR, sv);
+        }
+        auto field = force.getMirrorField();
+        if (!field) {
+            field = generateMirrorFieldOnDevice(force, sliceR, weights);
+            const_cast<IsolatedGBSAForce&>(force).setMirrorField(field);
+        }
+        if (field->getNumSlices() != (int) sliceR.size())
+            throw OpenMMException("IsolatedGBSAForce: the mirror field slice count does "
+                                  "not match the ligand template's descreener radii");
+        numMirrorSlices = field->getNumSlices();
+        if (numMirrorSlices > 16)
+            throw OpenMMException("IsolatedGBSAForce: at most 16 mirror field slices "
+                                  "are supported on CUDA");
+        mirrorFieldData.initialize<float>(cu, (int) field->getData().size(),
+                                          "isolatedGbsaMirrorField");
+        mirrorFieldData.upload(field->getData());
+        vector<float> sr(field->getSliceParameters().begin(),
+                         field->getSliceParameters().end());
+        mirrorSliceRadii.initialize<float>(cu, numMirrorSlices, "isolatedGbsaMirrorSliceR");
+        mirrorSliceRadii.upload(sr);
+        atomMirrorSlice.initialize<int>(cu, numAtoms, "isolatedGbsaAtomMirrorSlice");
+        atomMirrorSlice.upload(slot);
+        fieldInterpolationMethod = field->getInterpolationMethod();
+    }
+}
+
 vector<double> CudaCalcIsolatedGBSAForceKernel::computeHessian(ContextImpl& context) {
+    // The GRID-mode receptor add-ons contribute second derivatives that the
+    // Hessian kernels do not carry. A loud rejection beats a matrix that is
+    // silently inconsistent with the forces.
+    if (crossMode != IsolatedGBSAForce::CROSS_NONE ||
+        mirrorMode != IsolatedGBSAForce::MIRROR_NONE) {
+        throw OpenMMException(
+            "IsolatedGBSAForce: the Hessian does not include the GRID-mode "
+            "cross or mirror terms; disable them to compute it.");
+    }
     cu.setAsCurrent();
 
     int totalParticles = numParticleGroups * numAtoms;
