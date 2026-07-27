@@ -350,10 +350,11 @@ void ReferenceCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
 
     pocketAtoms = SolvationFields::selectPocketAtoms(receptorPositions, origin,
                                                      spacing, counts, padding);
-    double cellSize = (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID)
-                      ? nearShellCutoff : fieldSwitchOff;
-    SolvationFields::buildPocketCellList(receptorPositions, pocketAtoms, cellSize,
-                                         pocketCells);
+    double cellCutoff = (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID)
+                        ? nearShellCutoff : fieldSwitchOff;
+    SolvationFields::buildPocketCellList(
+        receptorPositions, pocketAtoms,
+        cellCutoff / SolvationFields::CELLS_PER_CUTOFF, pocketCells);
 
     if (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID) {
         crossField = force.getCrossField();
@@ -443,7 +444,7 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
             double s_i = (radii[i] - DIELECTRIC_OFFSET) * scaleFactors[i];
             SolvationFields::forEachNearPocketAtom(
                 pocketCells, posData[pi][0], posData[pi][1], posData[pi][2],
-                [&](int j) {
+                nearShellCutoff, [&](int j) {
                     double dx = posData[pi][0] - receptorPositions[j * 3];
                     double dy = posData[pi][1] - receptorPositions[j * 3 + 1];
                     double dz = posData[pi][2] - receptorPositions[j * 3 + 2];
@@ -634,6 +635,7 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
                 handleReceptorAtom(j);
         } else {
             SolvationFields::forEachNearPocketAtom(pocketCells, xi, yi, zi,
+                                                   nearShellCutoff,
                                                    handleReceptorAtom);
         }
     }
@@ -646,7 +648,7 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
             double s_i = (radii[i] - DIELECTRIC_OFFSET) * scaleFactors[i];
             double xi = posData[pi][0], yi = posData[pi][1], zi = posData[pi][2];
             SolvationFields::forEachNearPocketAtom(pocketCells, xi, yi, zi,
-                                                   [&](int j) {
+                                                   nearShellCutoff, [&](int j) {
                 if (!touched[j])
                     return;
                 double factor = dCross_dRrec[j] * recDRdHCT[j];
@@ -697,7 +699,8 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridMirrorTerm(
         }
 
         // Near shell: the part of the descreening the switch removed.
-        SolvationFields::forEachNearPocketAtom(pocketCells, xi, yi, zi, [&](int j) {
+        SolvationFields::forEachNearPocketAtom(pocketCells, xi, yi, zi,
+                                               fieldSwitchOff, [&](int j) {
             double w = receptorMirrorWeights[j];
             if (w == 0.0)
                 return;

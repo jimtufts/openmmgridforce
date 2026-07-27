@@ -112,7 +112,7 @@ CudaCalcIsolatedGBSAForceKernel::CudaCalcIsolatedGBSAForceKernel(string name, co
       originX(0), originY(0), originZ(0), gridSpacing(0), probeRadius(0),
       numBins(0), interpolationMethod(0), hasHctDerivatives(false),
       useKDECorrections(false), hasBinnedKDEDerivatives(false),
-      computeCrossTermGrid(false), crossTermNumBins(0),
+      computeCrossTermGrid(false), crossTermNumBins(0), maxNeighbors(0),
       crossMode(IsolatedGBSAForce::CROSS_NONE),
       mirrorMode(IsolatedGBSAForce::MIRROR_NONE),
       numReceptorAtoms(0), receptorReferenceEnergyValue(0.0f),
@@ -973,13 +973,17 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.clearBuffer(recDeltaHCT);
             cu.clearBuffer(dCrossDRrec);
             cu.clearBuffer(groupCrossTermEnergies);
+            CUdeviceptr nbrListPtr = neighborList.getDevicePointer();
+            CUdeviceptr nbrCountPtr = neighborCount.getDevicePointer();
+            CUdeviceptr nbrOverflowPtr = neighborOverflow.getDevicePointer();
             void* accArgs[] = {
                 &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
                 &groupStartPtr, &numParticleGroups, &numAtoms, &totalParticles,
                 &pocketPosPtr, &pocketRPtr, &numPocket,
                 &cellStartPtr, &cellAtomsPtr,
                 &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
-                &nearCut, &deltaPtr
+                &nearCut, &deltaPtr,
+                &nbrListPtr, &nbrCountPtr, &maxNeighbors, &nbrOverflowPtr
             };
             cu.executeKernel(accumulateReceptorNearHCTKernel, accArgs,
                              numBlocks * blockSize, blockSize);
@@ -995,8 +999,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &fox, &foy, &foz, &nx, &ny, &nz, &sp, &interp,
                 &pocketPosPtr, &pocketQPtr, &pocketRPtr, &pocketHCTPtr,
                 &pocketBornPtr, &numPocket,
-                &cellStartPtr, &cellAtomsPtr,
-                &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
+                &nbrListPtr, &nbrCountPtr, &maxNeighbors,
                 &nearCut, &son, &soff, &useOBC,
                 &deltaPtr, &dRrecPtr, &dEdRTarget,
                 &forcePtr, &paddedNumAtoms, &groupCrossPtr,
@@ -1010,8 +1013,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                     &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
                     &groupStartPtr, &numParticleGroups, &numAtoms, &totalParticles,
                     &pocketPosPtr, &pocketRPtr, &pocketHCTPtr, &numPocket,
-                    &cellStartPtr, &cellAtomsPtr,
-                    &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
+                    &nbrListPtr, &nbrCountPtr, &maxNeighbors,
                     &nearCut, &useOBC, &deltaPtr, &dRrecPtr,
                     &forcePtr, &paddedNumAtoms,
                     &globalScalingFactor, &groupScalingFactorsPtr
@@ -1490,6 +1492,15 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                         groupLigandSelfEnergiesHost[g] - groupLigOnlyEnergiesHost[g];
             }
         } else if (receptorMode == IsolatedGBSAForce::GRID) {
+            if (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID) {
+                vector<int> flag(1, 0);
+                neighborOverflow.download(flag);
+                if (flag[0] > maxNeighbors)
+                    throw OpenMMException(
+                        "IsolatedGBSAForce: near-shell neighbour list overflowed ("
+                        + to_string(flag[0]) + " > " + to_string(maxNeighbors) +
+                        "); reduce nearShellCutoff or report this receptor");
+            }
             if (crossMode != IsolatedGBSAForce::CROSS_NONE)
                 downloadMixedEnergy(cu, groupCrossTermEnergies, groupCrossTermEnergiesHost);
             if (mirrorMode != IsolatedGBSAForce::MIRROR_NONE) {
@@ -1850,10 +1861,11 @@ void CudaCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
     if (numPocket == 0)
         throw OpenMMException("IsolatedGBSAForce: no receptor atoms near the grid box");
 
-    double cell = (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID)
-                  ? nearShellCutoff : fieldSwitchOff;
+    double cellCutoff = (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID)
+                        ? nearShellCutoff : fieldSwitchOff;
     SolvationFields::PocketCellList cl;
-    SolvationFields::buildPocketCellList(recPos, pocket, cell, cl);
+    SolvationFields::buildPocketCellList(
+        recPos, pocket, cellCutoff / SolvationFields::CELLS_PER_CUTOFF, cl);
     for (int d = 0; d < 3; d++) {
         cellOrigin[d] = cl.origin[d];
         cellCounts[d] = cl.counts[d];
@@ -1894,7 +1906,8 @@ void CudaCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
 
     if (mirrorMode != IsolatedGBSAForce::MIRROR_NONE) {
         SolvationFields::PocketCellList mcl;
-        SolvationFields::buildPocketCellList(recPos, pocket, fieldSwitchOff, mcl);
+        SolvationFields::buildPocketCellList(
+            recPos, pocket, fieldSwitchOff / SolvationFields::CELLS_PER_CUTOFF, mcl);
         for (int d = 0; d < 3; d++) {
             mirrorCellOrigin[d] = mcl.origin[d];
             mirrorCellCounts[d] = mcl.counts[d];
@@ -1910,6 +1923,34 @@ void CudaCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
                                            "isolatedGbsaMirrorCellAtoms");
         if (!mLocal.empty())
             mirrorCellAtomsArr.upload(mLocal);
+    }
+
+    if (crossMode == IsolatedGBSAForce::CROSS_RADIUS_GRID) {
+        // Capacity from the densest pocket atom's own neighbourhood, which
+        // bounds what any ligand atom in the box can see, plus headroom.
+        double cut2 = nearShellCutoff * nearShellCutoff;
+        int densest = 0;
+        for (int a = 0; a < numPocket; a++) {
+            int ja = pocket[a];
+            int cnt = 0;
+            for (int b = 0; b < numPocket; b++) {
+                int jb = pocket[b];
+                double dx = recPos[ja * 3] - recPos[jb * 3];
+                double dy = recPos[ja * 3 + 1] - recPos[jb * 3 + 1];
+                double dz = recPos[ja * 3 + 2] - recPos[jb * 3 + 2];
+                if (dx * dx + dy * dy + dz * dz <= cut2)
+                    cnt++;
+            }
+            densest = max(densest, cnt);
+        }
+        maxNeighbors = min(max((int) (densest * 1.3) + 16, 32), numPocket);
+        int totalLig = numParticleGroups * numAtoms;
+        neighborList.initialize<int>(cu, (size_t) totalLig * maxNeighbors,
+                                    "isolatedGbsaNeighborList");
+        neighborCount.initialize<int>(cu, totalLig, "isolatedGbsaNeighborCount");
+        neighborOverflow.initialize<int>(cu, 1, "isolatedGbsaNeighborOverflow");
+        vector<int> zero(1, 0);
+        neighborOverflow.upload(zero);
     }
 
     initRealBuffer(cu, recDeltaHCT, numParticleGroups * numPocket, "isolatedGbsaRecDeltaHCT");

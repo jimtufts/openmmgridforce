@@ -112,38 +112,49 @@ struct PocketCellList {
 };
 
 /**
- * @param cellSize  Edge length (nm); use the largest near-shell cutoff so a
- *                  3x3x3 cell neighbourhood covers it
+ * Cells per near-shell cutoff. At one cell per cutoff a 3x3x3 block spans
+ * 6.4x the volume of the sphere it stands in for, so most of what the near
+ * loops touch is rejected by distance. Subdividing tightens that to about 3x
+ * for a modest number of extra (contiguous, well-cached) cell reads.
+ */
+static constexpr int CELLS_PER_CUTOFF = 2;
+
+/**
+ * @param cellSize  Edge length (nm); pass cutoff / CELLS_PER_CUTOFF
  */
 void buildPocketCellList(const std::vector<double>& positions,
                          const std::vector<int>& atomIndices,
                          double cellSize, PocketCellList& out);
 
 /**
- * Invoke body(receptorAtomIndex) for every pocket atom in the 3x3x3 cell
- * neighbourhood of (x,y,z). Callers still apply their own distance test.
+ * Invoke body(receptorAtomIndex) for every pocket atom in the cells that can
+ * hold a point within `cutoff` of (x,y,z). Callers still apply their own
+ * distance test; this only bounds which cells are worth visiting.
  */
 template <typename Body>
 inline void forEachNearPocketAtom(const PocketCellList& cl,
-                                  double x, double y, double z, Body body) {
+                                  double x, double y, double z, double cutoff,
+                                  Body body) {
     if (cl.atoms.empty())
         return;
     double inv = 1.0 / cl.cellSize;
-    int cx = static_cast<int>(std::floor((x - cl.origin[0]) * inv));
-    int cy = static_cast<int>(std::floor((y - cl.origin[1]) * inv));
-    int cz = static_cast<int>(std::floor((z - cl.origin[2]) * inv));
-    for (int ix = cx - 1; ix <= cx + 1; ix++) {
-        if (ix < 0 || ix >= cl.counts[0]) continue;
-        for (int iy = cy - 1; iy <= cy + 1; iy++) {
-            if (iy < 0 || iy >= cl.counts[1]) continue;
-            for (int iz = cz - 1; iz <= cz + 1; iz++) {
-                if (iz < 0 || iz >= cl.counts[2]) continue;
-                int cell = (ix * cl.counts[1] + iy) * cl.counts[2] + iz;
+    const double p0[3] = {x, y, z};
+    int lo[3], hi[3];
+    for (int d = 0; d < 3; d++) {
+        lo[d] = static_cast<int>(std::floor((p0[d] - cutoff - cl.origin[d]) * inv));
+        hi[d] = static_cast<int>(std::floor((p0[d] + cutoff - cl.origin[d]) * inv));
+        if (lo[d] < 0) lo[d] = 0;
+        if (hi[d] > cl.counts[d] - 1) hi[d] = cl.counts[d] - 1;
+    }
+    for (int ix = lo[0]; ix <= hi[0]; ix++)
+        for (int iy = lo[1]; iy <= hi[1]; iy++) {
+            int base = (ix * cl.counts[1] + iy) * cl.counts[2];
+            for (int iz = lo[2]; iz <= hi[2]; iz++) {
+                int cell = base + iz;
                 for (int p = cl.cellStart[cell]; p < cl.cellStart[cell + 1]; p++)
                     body(cl.atoms[p]);
             }
         }
-    }
 }
 
 /**

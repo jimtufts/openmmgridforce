@@ -122,6 +122,11 @@ private:
     double mirrorCellOrigin[3];
     double mirrorCellSize;
     int mirrorCellCounts[3];
+    // Compacted near-shell neighbour list, filled once per step by pass A.
+    OpenMM::CudaArray neighborList;        // [totalLigandAtoms * maxNeighbors] int
+    OpenMM::CudaArray neighborCount;       // [totalLigandAtoms] int
+    OpenMM::CudaArray neighborOverflow;    // [1] int
+    int maxNeighbors;
     OpenMM::CudaArray recDeltaHCT;         // [numGroups * numPocket] real
     OpenMM::CudaArray dCrossDRrec;         // [numGroups * numPocket] real
     OpenMM::CudaArray groupMirrorEnergies; // [numGroups] mixed

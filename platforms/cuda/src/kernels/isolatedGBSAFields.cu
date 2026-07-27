@@ -289,20 +289,23 @@ __device__ static inline void sampleFieldPair(
                       gBx, gBy, gBz);
 }
 
-// Iterate the 3x3x3 cell neighbourhood around (px,py,pz).
-#define FOR_EACH_NEAR_POCKET(px, py, pz, ...)                                  \
+// Visit only the cells that can hold a point within `cut` of (px,py,pz).
+// Cells are finer than the cutoff, so the visited volume tracks the sphere
+// far more closely than a fixed 3x3x3 block would.
+#define FOR_EACH_NEAR_POCKET(px, py, pz, cut, ...)                              \
     {                                                                           \
         real _inv = (real) 1 / cellSize;                                        \
-        int _cx = (int) floor((px - cellOriginX) * _inv);                       \
-        int _cy = (int) floor((py - cellOriginY) * _inv);                       \
-        int _cz = (int) floor((pz - cellOriginZ) * _inv);                       \
-        for (int _ix = _cx - 1; _ix <= _cx + 1; _ix++) {                        \
-            if (_ix < 0 || _ix >= cellCountX) continue;                         \
-            for (int _iy = _cy - 1; _iy <= _cy + 1; _iy++) {                    \
-                if (_iy < 0 || _iy >= cellCountY) continue;                     \
-                for (int _iz = _cz - 1; _iz <= _cz + 1; _iz++) {                \
-                    if (_iz < 0 || _iz >= cellCountZ) continue;                 \
-                    int _cell = (_ix * cellCountY + _iy) * cellCountZ + _iz;    \
+        int _x0 = max((int) floor((px - cut - cellOriginX) * _inv), 0);         \
+        int _x1 = min((int) floor((px + cut - cellOriginX) * _inv), cellCountX - 1); \
+        int _y0 = max((int) floor((py - cut - cellOriginY) * _inv), 0);         \
+        int _y1 = min((int) floor((py + cut - cellOriginY) * _inv), cellCountY - 1); \
+        int _z0 = max((int) floor((pz - cut - cellOriginZ) * _inv), 0);         \
+        int _z1 = min((int) floor((pz + cut - cellOriginZ) * _inv), cellCountZ - 1); \
+        for (int _ix = _x0; _ix <= _x1; _ix++) {                                \
+            for (int _iy = _y0; _iy <= _y1; _iy++) {                            \
+                int _base = (_ix * cellCountY + _iy) * cellCountZ;              \
+                for (int _iz = _z0; _iz <= _z1; _iz++) {                        \
+                    int _cell = _base + _iz;                                    \
                     int _b = cellStart[_cell], _e = cellStart[_cell + 1];       \
                     for (int _p = _b; _p < _e; _p++) {                          \
                         int j = cellAtoms[_p];                                  \
@@ -310,6 +313,20 @@ __device__ static inline void sampleFieldPair(
                     }                                                           \
                 }                                                               \
             }                                                                   \
+        }                                                                       \
+    }
+
+// Walk a compacted neighbour list instead of the cells. Pass A writes the
+// list once; the two later passes read exactly the atoms that survived, so
+// the cell walk and its distance rejections happen once rather than
+// three times.
+#define FOR_EACH_LISTED_POCKET(...)                                             \
+    {                                                                           \
+        int _n = neighborCount[idx];                                            \
+        const int* _lst = neighborList + (size_t) idx * maxNeighbors;           \
+        for (int _p = 0; _p < _n; _p++) {                                       \
+            int j = _lst[_p];                                                   \
+            __VA_ARGS__                                                         \
         }                                                                       \
     }
 
@@ -451,7 +468,11 @@ extern "C" __global__ void accumulateReceptorNearHCT(
     float cellOriginX, float cellOriginY, float cellOriginZ,
     float cellSize, int cellCountX, int cellCountY, int cellCountZ,
     float nearCutoff,
-    real* __restrict__ recDeltaHCT
+    real* __restrict__ recDeltaHCT,
+    int* __restrict__ neighborList,
+    int* __restrict__ neighborCount,
+    int maxNeighbors,
+    int* __restrict__ overflowFlag
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalLigandAtoms) return;
@@ -464,8 +485,10 @@ extern "C" __global__ void accumulateReceptorNearHCT(
     real s_i = (ligandRadii[tmpl] - DIELECTRIC_OFFSET) * ligandScaleFactors[tmpl];
     real cutoff2 = nearCutoff * nearCutoff;
     real* out = recDeltaHCT + (size_t) groupIdx * numPocket;
+    int* lst = neighborList + (size_t) idx * maxNeighbors;
+    int n = 0;
 
-    FOR_EACH_NEAR_POCKET(p.x, p.y, p.z, {
+    FOR_EACH_NEAR_POCKET(p.x, p.y, p.z, nearCutoff, {
         real4 rj = pocketPositions[j];
         real dx = p.x - rj.x, dy = p.y - rj.y, dz = p.z - rj.z;
         real r2 = dx * dx + dy * dy + dz * dz;
@@ -473,7 +496,17 @@ extern "C" __global__ void accumulateReceptorNearHCT(
         real r = sqrt(r2);
         real Rj_off = pocketRadii[j] - DIELECTRIC_OFFSET;
         atomicAdd(&out[j], hctTerm(r, Rj_off, s_i));
+        if (n < maxNeighbors) lst[n] = j;
+        n++;
     })
+
+    // Truncating would silently drop interactions, so record it and let the
+    // host raise the capacity instead.
+    if (n > maxNeighbors) {
+        atomicMax(overflowFlag, n);
+        n = maxNeighbors;
+    }
+    neighborCount[idx] = n;
 }
 
 /**
@@ -499,10 +532,9 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
     const real* __restrict__ pocketApoHCT,
     const real* __restrict__ pocketBornApo,
     int numPocket,
-    const int* __restrict__ cellStart,
-    const int* __restrict__ cellAtoms,
-    float cellOriginX, float cellOriginY, float cellOriginZ,
-    float cellSize, int cellCountX, int cellCountY, int cellCountZ,
+    const int* __restrict__ neighborList,
+    const int* __restrict__ neighborCount,
+    int maxNeighbors,
     float nearCutoff, float switchOn, float switchOff, int useOBC,
     const real* __restrict__ recDeltaHCT,
     real* __restrict__ dCrossDRrec,
@@ -554,12 +586,11 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
     bool inBracket = (Ri > Rlo && Ri < Rhi);
     real dEdRi = inBracket ? (prefactor * qi * (phiHi - phiLo) * invDR) : (real) 0;
 
-    real cutoff2 = nearCutoff * nearCutoff;
-    FOR_EACH_NEAR_POCKET(p.x, p.y, p.z, {
+    FOR_EACH_LISTED_POCKET({
         real4 rj = pocketPositions[j];
         real dx = p.x - rj.x, dy = p.y - rj.y, dz = p.z - rj.z;
         real r2 = dx * dx + dy * dy + dz * dz;
-        if (r2 > cutoff2 || r2 < MIN_CROSS_R2) continue;
+        if (r2 < MIN_CROSS_R2) continue;
         real r = sqrt(r2);
 
         real Ra = pocketBornApo[j];
@@ -638,10 +669,9 @@ extern "C" __global__ void applyCrossReceptorChainRule(
     const real* __restrict__ pocketRadii,
     const real* __restrict__ pocketApoHCT,
     int numPocket,
-    const int* __restrict__ cellStart,
-    const int* __restrict__ cellAtoms,
-    float cellOriginX, float cellOriginY, float cellOriginZ,
-    float cellSize, int cellCountX, int cellCountY, int cellCountZ,
+    const int* __restrict__ neighborList,
+    const int* __restrict__ neighborCount,
+    int maxNeighbors,
     float nearCutoff, int useOBC,
     const real* __restrict__ recDeltaHCT,
     const real* __restrict__ dCrossDRrec,
@@ -663,15 +693,13 @@ extern "C" __global__ void applyCrossReceptorChainRule(
     real scale = globalScalingFactor * groupScalingFactors[groupIdx];
     const real* dI = recDeltaHCT + (size_t) groupIdx * numPocket;
     const real* dRrec = dCrossDRrec + (size_t) groupIdx * numPocket;
-    real cutoff2 = nearCutoff * nearCutoff;
-
     real fx = 0, fy = 0, fz = 0;
-    FOR_EACH_NEAR_POCKET(p.x, p.y, p.z, {
+    FOR_EACH_LISTED_POCKET({
         if (dI[j] == (real) 0 || dRrec[j] == (real) 0) continue;
         real4 rj = pocketPositions[j];
         real dx = p.x - rj.x, dy = p.y - rj.y, dz = p.z - rj.z;
         real r2 = dx * dx + dy * dy + dz * dz;
-        if (r2 > cutoff2 || r2 < (real) 1e-20) continue;
+        if (r2 < (real) 1e-20) continue;
         real r = sqrt(r2);
         real rho = pocketRadii[j];
         real total = pocketApoHCT[j] + dI[j];
@@ -748,7 +776,7 @@ extern "C" __global__ void computeMirrorFromField(
     real fx = -gx, fy = -gy, fz = -gz;
 
     real cutoff2 = switchOff * switchOff;
-    FOR_EACH_NEAR_POCKET(p.x, p.y, p.z, {
+    FOR_EACH_NEAR_POCKET(p.x, p.y, p.z, switchOff, {
         real w = pocketWeights[j];
         if (w == (real) 0) continue;
         real4 rj = pocketPositions[j];
