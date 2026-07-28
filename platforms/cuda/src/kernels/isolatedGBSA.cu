@@ -14,6 +14,19 @@
 
 #include "include/GridInterpolation.cuh"
 
+/**
+ * Alchemical gate: below this a group is off and its work is skipped. The
+ * schedule's sigmoid bottoms out near 1e-22 rather than exact zero, so an
+ * equality test would never fire. This replaced a 0.05 threshold that
+ * discarded up to 22 kJ/mol of receptor desolvation: below it the receptor
+ * Born radii fell back to apo values, so the desolvation subtraction
+ * collapsed to zero while the rest of the force was still scaled normally,
+ * leaving sub-threshold states on a different Hamiltonian than u_kln assumed.
+ */
+#ifndef ALCHEMICAL_GATE
+#define ALCHEMICAL_GATE 1e-8f
+#endif
+
 // Physical constants
 #define DIELECTRIC_OFFSET 0.009f
 #define OBC_ALPHA 1.0f
@@ -1079,7 +1092,7 @@ extern "C" __global__ void computeReceptorLigandHCTTiled(
 
         // Skip zero-scaled groups
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) continue;
+        if (scale < ALCHEMICAL_GATE) continue;
 
         int gs = groupStart[groupIdx];
         int ge = groupStart[groupIdx + 1];
@@ -2445,7 +2458,7 @@ extern "C" __global__ void accumulateReceptorSADerivatives(
         int groupIdx = globalIdx / numReceptorAtoms;
         int i = globalIdx % numReceptorAtoms;
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) continue;
+        if (scale < ALCHEMICAL_GATE) continue;
 
         real R_i = receptorRadii[i];
         real R_born = receptorBornRadii[groupIdx * numReceptorAtoms + i];
@@ -2483,7 +2496,7 @@ extern "C" __global__ void computeReceptorDeltaSA(
         int i = globalIdx % numReceptorAtoms;
 
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) continue;
+        if (scale < ALCHEMICAL_GATE) continue;
 
         real R_i = receptorRadii[i];
         real R_born_withL = receptorBornRadii[groupIdx * numReceptorAtoms + i];
@@ -3303,7 +3316,7 @@ extern "C" __global__ void computeReceptorBornRadiiWithLigand(
 
         // Zero-scaled groups: all receptor atoms keep reference Born radii
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) {
+        if (scale < ALCHEMICAL_GATE) {
             receptorBornRadii[groupIdx * numReceptorAtoms + i] = receptorBornRadiiRef[i];
             continue;
         }
@@ -3897,7 +3910,7 @@ extern "C" __global__ void precomputeReceptorBornForces(
 
         // Skip zero-scaled groups (low alpha)
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) {
+        if (scale < ALCHEMICAL_GATE) {
             bornForcesRec[gOffset] = 0.0f;
             continue;
         }
@@ -4945,7 +4958,7 @@ extern "C" __global__ void computeReceptorEnergyDelta(
 
         // Skip zero-scaled groups entirely (no desolvation contribution)
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) continue;
+        if (scale < ALCHEMICAL_GATE) continue;
 
         const int* activeMask = isActiveRecAtom + groupIdx * numReceptorAtoms;
         const real* bornRadiiG = receptorBornRadii + groupIdx * numReceptorAtoms;
@@ -5188,7 +5201,7 @@ extern "C" __global__ void computePairwiseGBForceTiled(
         int recBlock = tileIdx % numRecBlocks;
 
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) continue;  // skip zero-scaled groups
+        if (scale < ALCHEMICAL_GATE) continue;  // skip zero-scaled groups
 
         int gs = groupStart[groupIdx];
         int ge = groupStart[groupIdx + 1];
@@ -5381,7 +5394,7 @@ extern "C" __global__ void addDistantCrossTermFromCache(
     int b = tileIdx % numRecBlocks;
 
     float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-    if (scale < 0.05f) return;
+    if (scale < ALCHEMICAL_GATE) return;
 
     float4 bounds = recBlockBounds[b];
     float threshold = localityCutoff + bounds.w;
@@ -5527,7 +5540,7 @@ extern "C" __global__ void computePairwiseChainRuleTiled(
 
         // Skip zero-scaled groups
         float scale = globalScalingFactor * groupScalingFactors[groupIdx];
-        if (scale < 0.05f) continue;
+        if (scale < ALCHEMICAL_GATE) continue;
 
         int gs = groupStart[groupIdx];
         int ge = groupStart[groupIdx + 1];
