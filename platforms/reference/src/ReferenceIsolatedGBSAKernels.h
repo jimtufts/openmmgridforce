@@ -34,9 +34,11 @@ public:
           crossMode(IsolatedGBSAForce::CROSS_NONE),
           mirrorMode(IsolatedGBSAForce::MIRROR_NONE),
           nearShellCutoff(SolvationFields::DEFAULT_NEAR_CUTOFF),
+          nearTaperOn(SolvationFields::DEFAULT_NEAR_CUTOFF
+                      - SolvationFields::DEFAULT_NEAR_TAPER_WIDTH),
           fieldSwitchOn(SolvationFields::DEFAULT_SWITCH_ON),
           fieldSwitchOff(SolvationFields::DEFAULT_SWITCH_OFF),
-          mirrorScale(1.0),
+          mirrorScale(1.0), crossPerturbReceptorRadii(true),
           mirrorFieldCutoff(SolvationFields::DEFAULT_MIRROR_BUILD_CUTOFF),
           fieldInterpolationMethod(1),
           numReceptorAtoms(0),
@@ -105,9 +107,11 @@ protected:
     IsolatedGBSAForce::CrossMode crossMode;
     IsolatedGBSAForce::MirrorMode mirrorMode;
     double nearShellCutoff;
+    double nearTaperOn;
     double fieldSwitchOn;
     double fieldSwitchOff;
     double mirrorScale;
+    bool crossPerturbReceptorRadii;
     double mirrorFieldCutoff;
     int fieldInterpolationMethod;
     std::shared_ptr<SolvationFieldGrid> crossField;

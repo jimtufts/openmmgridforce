@@ -273,6 +273,7 @@ shared_ptr<SolvationFieldGrid> buildCrossField(
         const vector<double>& sliceValues,
         const double origin[3], double spacing, const int counts[3],
         double switchOn, double switchOff, int interpMethod,
+        double cutoffDistance,
         const function<void(int, const function<void(int)>&)>& parallelFor) {
 
     if (interpMethod != InterpolationMethod::TRILINEAR &&
@@ -304,12 +305,17 @@ shared_ptr<SolvationFieldGrid> buildCrossField(
                 double pz = origin[2] + iz * spacing;
                 fill(accum.begin(), accum.end(), 0.0);
 
+                bool useCutoff = (cutoffDistance > 0.0);
+                double cutoff2 = cutoffDistance * cutoffDistance;
+                double invCut = useCutoff ? (1.0 / cutoffDistance) : 0.0;
                 for (int idx : atomIndices) {
                     double dx = px - positions[idx * 3];
                     double dy = py - positions[idx * 3 + 1];
                     double dz = pz - positions[idx * 3 + 2];
                     double r2 = dx * dx + dy * dy + dz * dz;
                     if (r2 < 1e-20)
+                        continue;
+                    if (useCutoff && r2 > cutoff2)
                         continue;
                     double r = sqrt(r2);
                     double sw = switchValue(r, switchOn, switchOff);
@@ -319,7 +325,8 @@ shared_ptr<SolvationFieldGrid> buildCrossField(
                     double Rj = bornRadiiApo[idx];
                     for (int k = 0; k < numSlices; k++) {
                         double D = sliceValues[k] * Rj;
-                        accum[k] += qs / sqrt(r2 + D * exp(-r2 / (4.0 * D)));
+                        accum[k] += qs * (1.0 / sqrt(r2 + D * exp(-r2 / (4.0 * D)))
+                                          - invCut);
                     }
                 }
 

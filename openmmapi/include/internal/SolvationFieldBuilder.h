@@ -32,6 +32,15 @@ static constexpr double DEFAULT_SWITCH_ON = 0.15;
 static constexpr double DEFAULT_SWITCH_OFF = 0.35;
 static constexpr double DEFAULT_NEAR_CUTOFF = 0.80;
 
+/**
+ * Width (nm) over which the cross near-shell correction is tapered to zero at
+ * the near cutoff. Without it the correction is discontinuous there: the
+ * near/far switch has already reached 1 by switchOff, so an atom crossing the
+ * near cutoff jumps between the exact GB term and the slice-interpolated far
+ * field. The jump is small in energy but it is a force discontinuity.
+ */
+static constexpr double DEFAULT_NEAR_TAPER_WIDTH = 0.15;
+
 /** Default padding beyond the grid box for the pocket set, nm. */
 static constexpr double DEFAULT_POCKET_PADDING = 1.2;
 
@@ -189,6 +198,13 @@ std::vector<double> defaultCrossFieldRadii(const std::vector<double>& radii,
  * @param bornRadiiApo  Apo receptor Born radii, [N], nm
  * @param interpMethod  TRILINEAR or TRICUBIC_BSPLINE; the latter prefilters
  *                      the node values into B-spline coefficients in place
+ * @param cutoffDistance  When positive, matches OpenMM's CutoffNonPeriodic
+ *                      convention: drop pairs beyond the cutoff and subtract
+ *                      q_j/cutoff from those within it, so the pair term goes
+ *                      continuously to zero at the boundary. That continuity
+ *                      is also what makes a hard cutoff representable on a
+ *                      precomputed lattice -- the cutoff sphere moves with the
+ *                      ligand atom, but the terms it gains or loses are ~zero.
  */
 std::shared_ptr<SolvationFieldGrid> buildCrossField(
         const std::vector<double>& positions, const std::vector<double>& charges,
@@ -197,6 +213,7 @@ std::shared_ptr<SolvationFieldGrid> buildCrossField(
         const std::vector<double>& sliceValues,
         const double origin[3], double spacing, const int counts[3],
         double switchOn, double switchOff, int interpMethod,
+        double cutoffDistance = -1.0,
         const std::function<void(int, const std::function<void(int)>&)>&
             parallelFor = nullptr);
 

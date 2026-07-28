@@ -79,7 +79,13 @@ double ReferenceCalcIsolatedGBSAForceKernel::computeGBEnergy(
         dE_dR[i] += -0.5 * prefactor * charges[i] * charges[i] / (bornRadii[i] * bornRadii[i]);
     }
 
-    // Pairwise terms
+    // Pairwise terms. With a cutoff this follows OpenMM's CutoffNonPeriodic
+    // convention: drop pairs beyond it and subtract the value at the cutoff so
+    // the pair energy goes continuously to zero there. The shift is constant
+    // in r and in the Born radii, so it contributes to the energy only.
+    bool useCutoff = (cutoffDistance > 0.0);
+    double cutoff2 = cutoffDistance * cutoffDistance;
+    double invCut = useCutoff ? (1.0 / cutoffDistance) : 0.0;
     for (int i = 0; i < numAtoms; i++) {
         int pi = particles[i];
         for (int j = i + 1; j < numAtoms; j++) {
@@ -89,6 +95,8 @@ double ReferenceCalcIsolatedGBSAForceKernel::computeGBEnergy(
             double dy = positions[pi][1] - positions[pj][1];
             double dz = positions[pi][2] - positions[pj][2];
             double r2 = dx * dx + dy * dy + dz * dz;
+            if (useCutoff && r2 > cutoff2)
+                continue;
 
             double D = bornRadii[i] * bornRadii[j];
             double alpha = r2 / (4.0 * D);
@@ -97,7 +105,7 @@ double ReferenceCalcIsolatedGBSAForceKernel::computeGBEnergy(
             double f_gb = sqrt(f_gb2);
 
             double qq = charges[i] * charges[j];
-            double E_pair = prefactor * qq / f_gb;
+            double E_pair = prefactor * qq * (1.0 / f_gb - invCut);
             energy += E_pair;
 
             // dE/dR_born_i from this pair
@@ -205,9 +213,12 @@ void ReferenceCalcIsolatedGBSAForceKernel::initialize(
     crossMode = force.getCrossMode();
     mirrorMode = force.getMirrorMode();
     nearShellCutoff = force.getNearShellCutoff();
+    nearTaperOn = std::max(force.getFieldSwitchOff(),
+                           nearShellCutoff - SolvationFields::DEFAULT_NEAR_TAPER_WIDTH);
     fieldSwitchOn = force.getFieldSwitchOn();
     fieldSwitchOff = force.getFieldSwitchOff();
     mirrorScale = force.getMirrorScale();
+    crossPerturbReceptorRadii = force.getCrossPerturbReceptorRadii();
     fieldInterpolationMethod = force.getFieldInterpolationMethod();
     mirrorFieldCutoff = force.getMirrorFieldCutoff();
 
@@ -371,7 +382,8 @@ void ReferenceCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
             crossField = SolvationFields::buildCrossField(
                 receptorPositions, receptorCharges, receptorBornRadiiApo,
                 allAtoms, sliceR, origin, spacing, counts,
-                fieldSwitchOn, fieldSwitchOff, fieldInterpolationMethod);
+                fieldSwitchOn, fieldSwitchOff, fieldInterpolationMethod,
+                cutoffDistance);
             const_cast<IsolatedGBSAForce&>(force).setCrossField(crossField);
         }
         if (crossField->getInterpolationMethod() != fieldInterpolationMethod)
@@ -396,12 +408,15 @@ void ReferenceCalcIsolatedGBSAForceKernel::initializeGridReceptorTerms(
         if (!mirrorField) {
             // The mirror field reaches further than the runtime near lists,
             // so it gets its own, wider atom selection.
+            double mirrorRange = (cutoffDistance > 0.0)
+                                 ? std::min(mirrorFieldCutoff, cutoffDistance)
+                                 : mirrorFieldCutoff;
             vector<int> mirrorAtoms = SolvationFields::selectPocketAtoms(
-                receptorPositions, origin, spacing, counts, mirrorFieldCutoff);
+                receptorPositions, origin, spacing, counts, mirrorRange);
             mirrorField = SolvationFields::buildMirrorField(
                 receptorPositions, receptorRadii, receptorMirrorWeights,
                 mirrorAtoms, sliceValues, origin, spacing, counts,
-                fieldSwitchOn, fieldSwitchOff, mirrorFieldCutoff,
+                fieldSwitchOn, fieldSwitchOff, mirrorRange,
                 fieldInterpolationMethod);
             const_cast<IsolatedGBSAForce&>(force).setMirrorField(mirrorField);
         }
@@ -434,7 +449,7 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
     // the ligand still moves them.
     vector<double> recHCT, recBorn, recDRdHCT, dCross_dRrec;
     vector<char> touched;
-    if (!exact) {
+    if (!exact && crossPerturbReceptorRadii) {
         touched.assign(numReceptorAtoms, 0);
         recBorn = receptorBornRadiiApo;
         recHCT.assign(numReceptorAtoms, 0.0);
@@ -455,7 +470,13 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
                     if (r < 1e-10)
                         return;
                     double Rj_off = receptorRadii[j] - DIELECTRIC_OFFSET;
-                    recHCT[j] += computeHCTTerm(r, Rj_off, s_i, 1.0);
+                    // Taper so the perturbed receptor radii stay continuous
+                    // as ligand atoms cross the near cutoff.
+                    double tp = 1.0 - SolvationFields::switchValue(
+                        r, nearTaperOn, nearShellCutoff);
+                    if (tp == 0.0)
+                        return;
+                    recHCT[j] += tp * computeHCTTerm(r, Rj_off, s_i, 1.0);
                     touched[j] = 1;
                 });
         }
@@ -566,8 +587,12 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
             if (!exact && r2 > nearCutoff2)
                 return;
 
+            if (cutoffDistance > 0.0 && r2 > cutoffDistance * cutoffDistance)
+                return;
             double r = sqrt(r2);
-            double Rj = exact ? receptorBornRadiiApo[j] : recBorn[j];
+            double invCut = (cutoffDistance > 0.0) ? (1.0 / cutoffDistance) : 0.0;
+            double Rj = (exact || recBorn.empty()) ? receptorBornRadiiApo[j]
+                                                    : recBorn[j];
             double D = Ri * Rj;
             double alpha = r2 / (4.0 * D);
             double expAlpha = exp(-alpha);
@@ -583,12 +608,18 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
                 if (sw != 0.0) {
                     double Ra = receptorBornRadiiApo[j];
                     double Dlo = Rlo * Ra, Dhi = Rhi * Ra;
-                    farLo = 1.0 / sqrt(r2 + Dlo * exp(-r2 / (4.0 * Dlo)));
-                    farHi = 1.0 / sqrt(r2 + Dhi * exp(-r2 / (4.0 * Dhi)));
+                    farLo = 1.0 / sqrt(r2 + Dlo * exp(-r2 / (4.0 * Dlo))) - invCut;
+                    farHi = 1.0 / sqrt(r2 + Dhi * exp(-r2 / (4.0 * Dhi))) - invCut;
                     farTerm = sw * ((1.0 - wHi) * farLo + wHi * farHi);
                 }
             }
-            crossEnergy += qq * (1.0 / fgb - farTerm);
+            double taper = exact ? 1.0
+                                 : (1.0 - SolvationFields::switchValue(
+                                       r, nearTaperOn, nearShellCutoff));
+            if (taper == 0.0)
+                return;
+            double corr = qq * ((1.0 / fgb - invCut) - farTerm);
+            crossEnergy += taper * corr;
 
             if (!includeForces)
                 return;
@@ -610,7 +641,11 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
                 dTerm_dr -= dsw * farVal
                             + sw * ((1.0 - wHi) * dLo + wHi * dHi);
             }
-            double dE_dr = qq * dTerm_dr;
+            // d/dr [taper * corr] = taper' * corr + taper * corr'
+            double dTaper = exact ? 0.0
+                                  : -SolvationFields::switchDerivative(
+                                        r, nearTaperOn, nearShellCutoff);
+            double dE_dr = taper * qq * dTerm_dr + dTaper * corr;
             double invR = 1.0 / r;
             forceData[pi][0] -= scale * dE_dr * dx * invR;
             forceData[pi][1] -= scale * dE_dr * dy * invR;
@@ -618,15 +653,15 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
 
             // Ligand Born radius: the caller applies dR_i/dx.
             double dfgb_dRi = Rj * expAlpha * (1.0 + alpha) / (2.0 * fgb);
-            dE_dR[i] += -qq / fgb2 * dfgb_dRi;
+            dE_dR[i] += taper * (-qq / fgb2 * dfgb_dRi);
             if (!exact && sw != 0.0 && Ri > sliceR.front() && Ri < sliceR.back())
-                dE_dR[i] -= qq * sw * (farHi - farLo) * invDeltaR;
+                dE_dR[i] -= taper * qq * sw * (farHi - farLo) * invDeltaR;
 
             // Receptor Born radius: only the near shell re-solves it, and it
             // moves with the ligand, so it needs its own chain rule below.
-            if (!exact) {
+            if (!exact && !dCross_dRrec.empty()) {
                 double dfgb_dRj = Ri * expAlpha * (1.0 + alpha) / (2.0 * fgb);
-                dCross_dRrec[j] += -qq / fgb2 * dfgb_dRj;
+                dCross_dRrec[j] += taper * (-qq / fgb2 * dfgb_dRj);
             }
         };
 
@@ -642,7 +677,7 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
 
     // ---- Chain rule through the ligand-induced receptor descreening ----
     // dE/dR_j * dR_j/dhct_j * dhct_j/dx_i, receptor held fixed in space.
-    if (!exact && includeForces) {
+    if (!exact && crossPerturbReceptorRadii && includeForces) {
         for (int i = 0; i < numAtoms; i++) {
             int pi = particles[i];
             double s_i = (radii[i] - DIELECTRIC_OFFSET) * scaleFactors[i];
@@ -664,7 +699,12 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridCrossTerm(
                 if (r < 1e-10)
                     return;
                 double Rj_off = receptorRadii[j] - DIELECTRIC_OFFSET;
-                double dHCT = computeHCTTermDerivative(r, Rj_off, s_i, 1.0);
+                double tp = 1.0 - SolvationFields::switchValue(
+                    r, nearTaperOn, nearShellCutoff);
+                double dtp = -SolvationFields::switchDerivative(
+                    r, nearTaperOn, nearShellCutoff);
+                double dHCT = tp * computeHCTTermDerivative(r, Rj_off, s_i, 1.0)
+                            + dtp * computeHCTTerm(r, Rj_off, s_i, 1.0);
                 double mag = scale * factor * dHCT / r;
                 forceData[pi][0] -= mag * dx;
                 forceData[pi][1] -= mag * dy;
@@ -709,6 +749,8 @@ void ReferenceCalcIsolatedGBSAForceKernel::addGridMirrorTerm(
             double dz = zi - receptorPositions[j * 3 + 2];
             double r2 = dx * dx + dy * dy + dz * dz;
             if (r2 > nearCutoff2)
+                return;
+            if (cutoffDistance > 0.0 && r2 > cutoffDistance * cutoffDistance)
                 return;
             double r = sqrt(r2);
             if (r < 1e-10)
