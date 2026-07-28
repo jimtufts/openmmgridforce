@@ -28,6 +28,19 @@
 
 // Guarded: this source is concatenated with isolatedGBSA.cu, which defines
 // the same physical constants.
+#ifndef ALCHEMICAL_GATE
+/**
+ * Alchemical gate: a group whose scaling factor is this small contributes
+ * nothing measurable, so skip its work entirely. The schedule's sigmoid
+ * returns denormals (~1e-22) rather than exact zero at low alpha, so an
+ * equality test would never fire; 1e-8 discards at most ~1e-5 kJ/mol, well
+ * under single-precision noise. Energy and force are gated together, so a
+ * gated group stays self-consistent for HMC.
+ */
+#define ALCHEMICAL_GATE 1e-8f
+
+#endif
+
 #ifndef DIELECTRIC_OFFSET
 #define DIELECTRIC_OFFSET 0.009f
 #endif
@@ -476,13 +489,21 @@ extern "C" __global__ void accumulateReceptorNearHCT(
     int* __restrict__ neighborList,
     int* __restrict__ neighborCount,
     int maxNeighbors,
-    int* __restrict__ overflowFlag
+    int* __restrict__ overflowFlag,
+    float globalScalingFactor,
+    const float* __restrict__ groupScalingFactors
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= totalLigandAtoms) return;
     int atomInGroup;
     int groupIdx = findGroup(numGroups, templateNumAtoms, idx, &atomInGroup);
     if (groupIdx < 0) return;
+    // The consumers of this pass gate on the same factor, so they never read
+    // the list; zero the count anyway so a stale one can never be picked up.
+    if (globalScalingFactor * groupScalingFactors[groupIdx] < ALCHEMICAL_GATE) {
+        neighborCount[idx] = 0;
+        return;
+    }
 
     int tmpl = atomInGroup % templateNumAtoms;
     real4 p = posq[particleIndices[idx]];
@@ -570,6 +591,7 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
     real qi = charges[tmpl];
     real Ri = bornRadii[idx];
     real scale = globalScalingFactor * groupScalingFactors[groupIdx];
+    if (scale < ALCHEMICAL_GATE) return;
     const real* dI = recDeltaHCT + (size_t) groupIdx * numPocket;
     real* dRrec = dCrossDRrec + (size_t) groupIdx * numPocket;
 
@@ -722,6 +744,7 @@ extern "C" __global__ void applyCrossReceptorChainRule(
     real4 p = posq[particleIdx];
     real s_i = (ligandRadii[tmpl] - DIELECTRIC_OFFSET) * ligandScaleFactors[tmpl];
     real scale = globalScalingFactor * groupScalingFactors[groupIdx];
+    if (scale < ALCHEMICAL_GATE) return;
     const real* dI = recDeltaHCT + (size_t) groupIdx * numPocket;
     const real* dRrec = dCrossDRrec + (size_t) groupIdx * numPocket;
     real fx = 0, fy = 0, fz = 0;
@@ -803,6 +826,7 @@ extern "C" __global__ void computeMirrorFromField(
     int slice = atomMirrorSlice[tmpl];
     real s_i = (real) sliceRadii[slice];
     real scale = globalScalingFactor * groupScalingFactors[groupIdx];
+    if (scale < ALCHEMICAL_GATE) return;
 
     real gx, gy, gz;
     real energy = sampleField(mirrorField + (size_t) slice * totalGridPoints,

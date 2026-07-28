@@ -18,6 +18,12 @@
 #include <vector>
 
 using namespace GridForcePlugin;
+
+// Mirrors ALCHEMICAL_GATE in the kernel sources: below this a group's
+// contribution is numerically nil, so its work is skipped. The schedule's
+// sigmoid yields denormals rather than exact zero at low alpha, so an
+// equality test would never fire.
+static const float ALCHEMICAL_GATE_HOST = 1e-8f;
 using namespace OpenMM;
 using namespace std;
 
@@ -988,7 +994,8 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &cellStartPtr, &cellAtomsPtr,
                 &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
                 &nearCut, &nearTaper, &perturbRec, &deltaPtr,
-                &nbrListPtr, &nbrCountPtr, &maxNeighbors, &nbrOverflowPtr
+                &nbrListPtr, &nbrCountPtr, &maxNeighbors, &nbrOverflowPtr,
+                &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(accumulateReceptorNearHCTKernel, accArgs,
                              numBlocks * blockSize, blockSize);
@@ -1136,6 +1143,16 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                          recNumBlocksTiled * recBlockSize, recBlockSize);
 
         for (int g = 0; g < numParticleGroups; g++) {
+            // The per-group receptor kernels are the dominant per-step cost
+            // (one O(N_rec^2) launch each), and a group scaled to zero
+            // contributes nothing, so skip the launch rather than relying on
+            // the in-kernel gate -- the launch itself is the expense. The
+            // per-group energy buffers are cleared above, so a skipped group
+            // reads zero. Alchemical reweighting reads these only after
+            // forcing every scale to 1, which reopens the gate.
+            if (globalScalingFactor * groupScalingFactorsHostCopy[g]
+                    < ALCHEMICAL_GATE_HOST)
+                continue;
             CUdeviceptr groupBornRadiiPtr = receptorBornRadiiPtr + (size_t)g * numReceptorAtoms * realElementSize(cu);
             CUdeviceptr groupDeDRPtr = receptorDeDRPtr + (size_t)g * numReceptorAtoms * realElementSize(cu);
             cu.clearBuffer(receptorEnergy);
