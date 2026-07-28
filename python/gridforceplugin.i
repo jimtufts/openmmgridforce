@@ -629,6 +629,8 @@ public:
     double getFieldSwitchOff() const;
     int getFieldInterpolationMethod() const;
     void setFieldInterpolationMethod(int method);
+    bool getCrossPerturbReceptorRadii() const;
+    void setCrossPerturbReceptorRadii(bool enable);
     double getMirrorScale() const;
     void setMirrorScale(double scale);
     double getPocketPadding() const;

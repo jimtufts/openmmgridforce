@@ -41,6 +41,7 @@ IsolatedGBSAForce::IsolatedGBSAForce()
       fieldSwitchOn(SolvationFields::DEFAULT_SWITCH_ON),
       fieldSwitchOff(SolvationFields::DEFAULT_SWITCH_OFF),
       mirrorScale(1.0),
+      crossPerturbReceptorRadii(true),
       pocketPadding(SolvationFields::DEFAULT_POCKET_PADDING),
       mirrorFieldCutoff(SolvationFields::DEFAULT_MIRROR_BUILD_CUTOFF),
       fieldInterpolationMethod(InterpolationMethod::TRICUBIC_BSPLINE),

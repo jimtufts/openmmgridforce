@@ -387,6 +387,19 @@ public:
     void setFieldInterpolationMethod(int method);
 
     /**
+     * Whether the CROSS_RADIUS_GRID near shell re-solves the receptor Born
+     * radii from the ligand-induced descreening, instead of holding them at
+     * their apo values like the far field does.
+     *
+     * On (default) this is what removes the frozen-apo error the far field
+     * cannot avoid. It is also the only feedback in the term that strengthens
+     * as the ligand couples in, so it is the first thing to disable when
+     * diagnosing behaviour that appears only at strong coupling.
+     */
+    bool getCrossPerturbReceptorRadii() const { return crossPerturbReceptorRadii; }
+    void setCrossPerturbReceptorRadii(bool enable) { crossPerturbReceptorRadii = enable; }
+
+    /**
      * Global scale applied to the mirror term, absorbing the systematic
      * under-count of the linear response on deeply buried receptor atoms.
      * Fit once per receptor against PAIRWISE over a pose set. Default 1.0.
@@ -739,6 +752,7 @@ private:
     double fieldSwitchOn;
     double fieldSwitchOff;
     double mirrorScale;
+    bool crossPerturbReceptorRadii;
     double pocketPadding;
     double mirrorFieldCutoff;
     int fieldInterpolationMethod;
