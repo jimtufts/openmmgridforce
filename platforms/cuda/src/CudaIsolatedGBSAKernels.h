@@ -98,6 +98,7 @@ private:
     // GRID-mode receptor add-ons: radius-sliced cross field, mirror field,
     // and the pocket cell list their near shells run off.
     double nearShellCutoff, fieldSwitchOn, fieldSwitchOff, mirrorScale;
+    bool crossPerturbReceptorRadii;
     double mirrorFieldCutoff, pocketPadding;
     int fieldInterpolationMethod;
     int numCrossSlices, numMirrorSlices, numPocket;

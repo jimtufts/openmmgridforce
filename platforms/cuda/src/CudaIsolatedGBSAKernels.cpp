@@ -281,6 +281,7 @@ void CudaCalcIsolatedGBSAForceKernel::initialize(const System& system, const Iso
         fieldSwitchOn = force.getFieldSwitchOn();
         fieldSwitchOff = force.getFieldSwitchOff();
         mirrorScale = force.getMirrorScale();
+        crossPerturbReceptorRadii = force.getCrossPerturbReceptorRadii();
         mirrorFieldCutoff = force.getMirrorFieldCutoff();
         pocketPadding = force.getPocketPadding();
         fieldInterpolationMethod = force.getFieldInterpolationMethod();
@@ -919,7 +920,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             &groupStartPtr, &numParticleGroups,
             &numReceptorAtoms, &numAtoms,
             prefactorArg,
-            &groupCrossPtr,
+            &groupCrossPtr, &groupUnscaledEnergiesPtr,
             &forcePtr, &paddedNumAtoms,
             &globalScalingFactor, &groupScalingFactorsPtr,
             &isActivePtr,
@@ -955,6 +956,9 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
         float cellSz = (float) cellSize;
         int ccx = cellCounts[0], ccy = cellCounts[1], ccz = cellCounts[2];
         float nearCut = (float) nearShellCutoff;
+        float nearTaper = (float) max(fieldSwitchOff,
+            nearShellCutoff - SolvationFields::DEFAULT_NEAR_TAPER_WIDTH);
+        float fcutRt = cutoffDistance;
         int useOBC = (gbMethod == IsolatedGBSAForce::OBC_II) ? 1 : 0;
         int interp = fieldInterpolationMethod;
 
@@ -973,6 +977,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             cu.clearBuffer(recDeltaHCT);
             cu.clearBuffer(dCrossDRrec);
             cu.clearBuffer(groupCrossTermEnergies);
+            int perturbRec = crossPerturbReceptorRadii ? 1 : 0;
             CUdeviceptr nbrListPtr = neighborList.getDevicePointer();
             CUdeviceptr nbrCountPtr = neighborCount.getDevicePointer();
             CUdeviceptr nbrOverflowPtr = neighborOverflow.getDevicePointer();
@@ -982,7 +987,7 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &pocketPosPtr, &pocketRPtr, &numPocket,
                 &cellStartPtr, &cellAtomsPtr,
                 &cellOx, &cellOy, &cellOz, &cellSz, &ccx, &ccy, &ccz,
-                &nearCut, &deltaPtr,
+                &nearCut, &nearTaper, &perturbRec, &deltaPtr,
                 &nbrListPtr, &nbrCountPtr, &maxNeighbors, &nbrOverflowPtr
             };
             cu.executeKernel(accumulateReceptorNearHCTKernel, accArgs,
@@ -1000,21 +1005,22 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &pocketPosPtr, &pocketQPtr, &pocketRPtr, &pocketHCTPtr,
                 &pocketBornPtr, &numPocket,
                 &nbrListPtr, &nbrCountPtr, &maxNeighbors,
-                &nearCut, &son, &soff, &useOBC,
+                &nearCut, &nearTaper, &son, &soff, &fcutRt, &useOBC,
                 &deltaPtr, &dRrecPtr, &dEdRTarget,
                 &forcePtr, &paddedNumAtoms, &groupCrossPtr,
+                &groupUnscaledEnergiesPtr,
                 &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(computeCrossRadiusGridEnergyKernel, crossArgs,
                              numBlocks * blockSize, blockSize);
 
-            if (includeForces) {
+            if (includeForces && crossPerturbReceptorRadii) {
                 void* chainArgs[] = {
                     &posqPtr, &particleIndicesPtr, &radiiPtr, &scaleFactorsPtr,
                     &groupStartPtr, &numParticleGroups, &numAtoms, &totalParticles,
                     &pocketPosPtr, &pocketRPtr, &pocketHCTPtr, &numPocket,
                     &nbrListPtr, &nbrCountPtr, &maxNeighbors,
-                    &nearCut, &useOBC, &deltaPtr, &dRrecPtr,
+                    &nearCut, &nearTaper, &useOBC, &deltaPtr, &dRrecPtr,
                     &forcePtr, &paddedNumAtoms,
                     &globalScalingFactor, &groupScalingFactorsPtr
                 };
@@ -1045,8 +1051,9 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
                 &pocketPosPtr, &pocketRPtr, &pocketWPtr, &numPocket,
                 &mCellStartPtr, &mCellAtomsPtr,
                 &mOx, &mOy, &mOz, &mSz, &mcx, &mcy, &mcz,
-                &son, &soff, &mscale,
+                &son, &soff, &mscale, &fcutRt,
                 &forcePtr, &paddedNumAtoms, &groupMirrorPtr,
+                &groupUnscaledEnergiesPtr,
                 &globalScalingFactor, &groupScalingFactorsPtr
             };
             cu.executeKernel(computeMirrorFromFieldKernel, mirrorArgs,
@@ -1510,19 +1517,23 @@ double CudaCalcIsolatedGBSAForceKernel::execute(ContextImpl& context,
             }
         }
 
-        // Sum total energy. In GRID+crossTerm mode the cross-term
-        // kernel writes to its own buffer (not groupEnergies), so add
-        // it here.
-        double totalEnergy = 0.0;
-        for (int g = 0; g < numParticleGroups; g++) {
-            totalEnergy += groupEnergiesHost[g];
-            if (receptorMode == IsolatedGBSAForce::GRID) {
+        // The cross and mirror kernels write their own buffers, so fold them
+        // into the per-group energy here: getParticleGroupEnergies() must
+        // report the group's full contribution, as the Reference platform
+        // does, or a sampler that builds its Hamiltonian from it integrates
+        // forces it never accounts for.
+        if (receptorMode == IsolatedGBSAForce::GRID) {
+            for (int g = 0; g < numParticleGroups; g++) {
                 if (crossMode != IsolatedGBSAForce::CROSS_NONE)
-                    totalEnergy += groupCrossTermEnergiesHost[g];
+                    groupEnergiesHost[g] += groupCrossTermEnergiesHost[g];
                 if (mirrorMode != IsolatedGBSAForce::MIRROR_NONE)
-                    totalEnergy += groupMirrorEnergiesHost[g];
+                    groupEnergiesHost[g] += groupMirrorEnergiesHost[g];
             }
         }
+
+        double totalEnergy = 0.0;
+        for (int g = 0; g < numParticleGroups; g++)
+            totalEnergy += groupEnergiesHost[g];
 
         return totalEnergy;
     }
@@ -1726,9 +1737,10 @@ shared_ptr<SolvationFieldGrid> CudaCalcIsolatedGBSAForceKernel::generateCrossFie
     float fox = (float) ox, foy = (float) oy, foz = (float) oz;
     float sp = (float) grid->getSpacing();
     float son = (float) fieldSwitchOn, soff = (float) fieldSwitchOff;
+    float fcut = cutoffDistance;
     void* args[] = {&outPtr, &posPtr, &qPtr, &bornPtr, &numReceptorAtoms,
                     &radiiPtr, &nSlices, &fox, &foy, &foz,
-                    &nx, &ny, &nz, &sp, &son, &soff, &totalPoints};
+                    &nx, &ny, &nz, &sp, &son, &soff, &fcut, &totalPoints};
     int blockSize = 128;
     int blocks = min((totalPoints + blockSize - 1) / blockSize, 4096);
     cu.executeKernel(generateCrossFieldSlicesKernel, args, blocks * blockSize, blockSize);
@@ -1765,8 +1777,11 @@ shared_ptr<SolvationFieldGrid> CudaCalcIsolatedGBSAForceKernel::generateMirrorFi
     // The mirror field reaches further than the runtime near lists, so it
     // gets its own, wider atom selection.
     const vector<double>& recPos = force.getReceptorPositions();
+    double mirrorRange = (cutoffDistance > 0.0f)
+                         ? min(mirrorFieldCutoff, (double) cutoffDistance)
+                         : mirrorFieldCutoff;
     vector<int> sel = SolvationFields::selectPocketAtoms(
-        recPos, origin, grid->getSpacing(), counts, mirrorFieldCutoff);
+        recPos, origin, grid->getSpacing(), counts, mirrorRange);
     int nSel = (int) sel.size();
 
     auto field = make_shared<SolvationFieldGrid>(
@@ -1803,7 +1818,7 @@ shared_ptr<SolvationFieldGrid> CudaCalcIsolatedGBSAForceKernel::generateMirrorFi
     float fox = (float) ox, foy = (float) oy, foz = (float) oz;
     float sp = (float) grid->getSpacing();
     float son = (float) fieldSwitchOn, soff = (float) fieldSwitchOff;
-    float bcut = (float) mirrorFieldCutoff;
+    float bcut = (float) mirrorRange;
     void* args[] = {&outPtr, &posPtr, &radPtr, &wPtr, &nSel,
                     &radiiPtr, &nSlices, &fox, &foy, &foz,
                     &nx, &ny, &nz, &sp, &son, &soff, &bcut, &totalPoints};

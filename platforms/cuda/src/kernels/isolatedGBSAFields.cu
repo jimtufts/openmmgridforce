@@ -352,9 +352,12 @@ extern "C" __global__ void generateCrossFieldSlices(
     float originX, float originY, float originZ,
     int nx, int ny, int nz,
     float spacing,
-    float switchOn, float switchOff,
+    float switchOn, float switchOff, float cutoffDistance,
     int totalGridPoints
 ) {
+    bool useCutoff = (cutoffDistance > 0.0f);
+    real cutoff2 = cutoffDistance * cutoffDistance;
+    real invCut = useCutoff ? ((real) 1 / cutoffDistance) : (real) 0;
     for (int gridIdx = blockIdx.x * blockDim.x + threadIdx.x;
          gridIdx < totalGridPoints; gridIdx += gridDim.x * blockDim.x) {
 
@@ -375,13 +378,14 @@ extern "C" __global__ void generateCrossFieldSlices(
             real dx = px - rj.x, dy = py - rj.y, dz = pz - rj.z;
             real r2 = dx * dx + dy * dy + dz * dz;
             if (r2 < (real) 1e-20) continue;
+            if (useCutoff && r2 > cutoff2) continue;
             real r = sqrt(r2);
             real sw = fieldSwitch(r, switchOn, switchOff);
             if (sw == (real) 0) continue;
             real qs = receptorCharges[j] * sw;
             real Rj = receptorBornApo[j];
             for (int k = 0; k < numSlices; k++)
-                accum[k] += qs * invFgb(r2, (real) sliceRadii[k], Rj);
+                accum[k] += qs * (invFgb(r2, (real) sliceRadii[k], Rj) - invCut);
         }
 
         for (int k = 0; k < numSlices; k++)
@@ -467,7 +471,7 @@ extern "C" __global__ void accumulateReceptorNearHCT(
     const int* __restrict__ cellAtoms,
     float cellOriginX, float cellOriginY, float cellOriginZ,
     float cellSize, int cellCountX, int cellCountY, int cellCountZ,
-    float nearCutoff,
+    float nearCutoff, float nearTaperOn, int perturbReceptor,
     real* __restrict__ recDeltaHCT,
     int* __restrict__ neighborList,
     int* __restrict__ neighborCount,
@@ -495,7 +499,14 @@ extern "C" __global__ void accumulateReceptorNearHCT(
         if (r2 > cutoff2 || r2 < (real) 1e-20) continue;
         real r = sqrt(r2);
         real Rj_off = pocketRadii[j] - DIELECTRIC_OFFSET;
-        atomicAdd(&out[j], hctTerm(r, Rj_off, s_i));
+        // Taper keeps the perturbed receptor radii continuous as ligand atoms
+        // cross the near cutoff.
+        real tp = (real) 1 - fieldSwitch(r, nearTaperOn, nearCutoff);
+        if (tp == (real) 0) continue;
+        // This pass owns the neighbour list, so it must always run; only the
+        // receptor-radius feedback is optional.
+        if (perturbReceptor)
+            atomicAdd(&out[j], tp * hctTerm(r, Rj_off, s_i));
         if (n < maxNeighbors) lst[n] = j;
         n++;
     })
@@ -535,13 +546,15 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
     const int* __restrict__ neighborList,
     const int* __restrict__ neighborCount,
     int maxNeighbors,
-    float nearCutoff, float switchOn, float switchOff, int useOBC,
+    float nearCutoff, float nearTaperOn, float switchOn, float switchOff,
+    float cutoffDistance, int useOBC,
     const real* __restrict__ recDeltaHCT,
     real* __restrict__ dCrossDRrec,
     real* __restrict__ dE_dR,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     mixed* __restrict__ groupCrossEnergies,
+    mixed* __restrict__ groupUnscaledEnergies,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -586,11 +599,15 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
     bool inBracket = (Ri > Rlo && Ri < Rhi);
     real dEdRi = inBracket ? (prefactor * qi * (phiHi - phiLo) * invDR) : (real) 0;
 
+    bool useFcut = (cutoffDistance > 0.0f);
+    real fcut2 = cutoffDistance * cutoffDistance;
+    real invCut = useFcut ? ((real) 1 / cutoffDistance) : (real) 0;
     FOR_EACH_LISTED_POCKET({
         real4 rj = pocketPositions[j];
         real dx = p.x - rj.x, dy = p.y - rj.y, dz = p.z - rj.z;
         real r2 = dx * dx + dy * dy + dz * dz;
         if (r2 < MIN_CROSS_R2) continue;
+        if (useFcut && r2 > fcut2) continue;
         real r = sqrt(r2);
 
         real Ra = pocketBornApo[j];
@@ -608,11 +625,14 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
         real sw = fieldSwitch(r, switchOn, switchOff);
         real farLo = (real) 0, farHi = (real) 0, farTerm = (real) 0;
         if (sw != (real) 0) {
-            farLo = invFgb(r2, Rk, Ra);
-            farHi = invFgb(r2, Rk1, Ra);
+            farLo = invFgb(r2, Rk, Ra) - invCut;
+            farHi = invFgb(r2, Rk1, Ra) - invCut;
             farTerm = sw * (((real) 1 - wHi) * farLo + wHi * farHi);
         }
-        energy += qq * ((real) 1 / fgb - farTerm);
+        real taper = (real) 1 - fieldSwitch(r, nearTaperOn, nearCutoff);
+        if (taper == (real) 0) continue;
+        real corr = qq * (((real) 1 / fgb - invCut) - farTerm);
+        energy += taper * corr;
 
         real dfgb_dr = r * ((real) 4 - expA) / ((real) 4 * fgb);
         real dTerm_dr = -dfgb_dr / fgb2;
@@ -625,20 +645,22 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
             real farVal = ((real) 1 - wHi) * farLo + wHi * farHi;
             dTerm_dr -= dsw * farVal + sw * (((real) 1 - wHi) * dLo + wHi * dHi);
         }
-        real dE_dr = qq * dTerm_dr;
+        // d/dr [taper * corr] = taper' * corr + taper * corr'
+        real dTaper = -fieldSwitchDeriv(r, nearTaperOn, nearCutoff);
+        real dE_dr = taper * qq * dTerm_dr + dTaper * corr;
         real invR = (real) 1 / r;
         fx -= dE_dr * dx * invR;
         fy -= dE_dr * dy * invR;
         fz -= dE_dr * dz * invR;
 
         real dfgb_dRi = Rj * expA * ((real) 1 + alpha) / ((real) 2 * fgb);
-        dEdRi += -qq / fgb2 * dfgb_dRi;
+        dEdRi += taper * (-qq / fgb2 * dfgb_dRi);
         if (sw != (real) 0 && inBracket)
-            dEdRi -= qq * sw * (farHi - farLo) * invDR;
+            dEdRi -= taper * qq * sw * (farHi - farLo) * invDR;
 
         if (dI[j] != (real) 0) {
             real dfgb_dRj = Ri * expA * ((real) 1 + alpha) / ((real) 2 * fgb);
-            atomicAdd(&dRrec[j], -qq / fgb2 * dfgb_dRj);
+            atomicAdd(&dRrec[j], taper * (-qq / fgb2 * dfgb_dRj));
         }
     })
 
@@ -648,9 +670,18 @@ extern "C" __global__ void computeCrossRadiusGridEnergy(
               (unsigned long long) ((long long) (fy * scale * 0x100000000)));
     atomicAdd(&forceBuffer[particleIdx + 2 * paddedNumAtoms],
               (unsigned long long) ((long long) (fz * scale * 0x100000000)));
-    dE_dR[idx] += dEdRi;
+    // Alchemically scaled, matching every other writer of this buffer. Left
+    // unscaled it feeds the ligand Born-radius chain rule at full strength
+    // even where the term is decoupled, producing force with no matching
+    // energy -- which collapses an HMC timestep at every alpha.
+    dE_dR[idx] += dEdRi * scale;
     if (groupCrossEnergies != 0)
         atomicAdd(&groupCrossEnergies[groupIdx], (mixed) (energy * scale));
+    // The unscaled buffer feeds the alchemical reweighting, which needs this
+    // term at scale-0 states too, so it cannot be recovered by dividing out.
+    if (groupUnscaledEnergies != 0)
+        atomicAdd(&groupUnscaledEnergies[groupIdx],
+                  (mixed) (energy * globalScalingFactor));
 }
 
 /**
@@ -672,7 +703,7 @@ extern "C" __global__ void applyCrossReceptorChainRule(
     const int* __restrict__ neighborList,
     const int* __restrict__ neighborCount,
     int maxNeighbors,
-    float nearCutoff, int useOBC,
+    float nearCutoff, float nearTaperOn, int useOBC,
     const real* __restrict__ recDeltaHCT,
     const real* __restrict__ dCrossDRrec,
     unsigned long long* __restrict__ forceBuffer,
@@ -706,7 +737,10 @@ extern "C" __global__ void applyCrossReceptorChainRule(
         real born = bornFromHCT(rho, total, useOBC);
         real factor = dRrec[j] * dBornDHCT(rho, total, born, useOBC);
         if (factor == (real) 0) continue;
-        real dHCT = hctTermDeriv(r, rho - DIELECTRIC_OFFSET, s_i);
+        real tp = (real) 1 - fieldSwitch(r, nearTaperOn, nearCutoff);
+        real dtp = -fieldSwitchDeriv(r, nearTaperOn, nearCutoff);
+        real dHCT = tp * hctTermDeriv(r, rho - DIELECTRIC_OFFSET, s_i)
+                  + dtp * hctTerm(r, rho - DIELECTRIC_OFFSET, s_i);
         real mag = factor * dHCT / r;
         fx -= mag * dx;
         fy -= mag * dy;
@@ -749,10 +783,11 @@ extern "C" __global__ void computeMirrorFromField(
     const int* __restrict__ cellAtoms,
     float cellOriginX, float cellOriginY, float cellOriginZ,
     float cellSize, int cellCountX, int cellCountY, int cellCountZ,
-    float switchOn, float switchOff, float mirrorScale,
+    float switchOn, float switchOff, float mirrorScale, float cutoffDistance,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     mixed* __restrict__ groupMirrorEnergies,
+    mixed* __restrict__ groupUnscaledEnergies,
     float globalScalingFactor,
     const float* __restrict__ groupScalingFactors
 ) {
@@ -783,6 +818,7 @@ extern "C" __global__ void computeMirrorFromField(
         real dx = p.x - rj.x, dy = p.y - rj.y, dz = p.z - rj.z;
         real r2 = dx * dx + dy * dy + dz * dz;
         if (r2 > cutoff2 || r2 < (real) 1e-20) continue;
+        if (cutoffDistance > 0.0f && r2 > cutoffDistance * cutoffDistance) continue;
         real r = sqrt(r2);
         real Rj_off = pocketRadii[j] - DIELECTRIC_OFFSET;
         real sw = fieldSwitch(r, switchOn, switchOff);
@@ -807,4 +843,7 @@ extern "C" __global__ void computeMirrorFromField(
               (unsigned long long) ((long long) (fz * s * 0x100000000)));
     if (groupMirrorEnergies != 0)
         atomicAdd(&groupMirrorEnergies[groupIdx], (mixed) (energy * s));
+    if (groupUnscaledEnergies != 0)
+        atomicAdd(&groupUnscaledEnergies[groupIdx],
+                  (mixed) (energy * mirrorScale * globalScalingFactor));
 }

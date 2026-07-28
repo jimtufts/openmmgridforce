@@ -3418,6 +3418,7 @@ extern "C" __global__ void computeCrossTermGBEnergy(
     int templateNumAtoms,
     real prefactor,
     mixed* __restrict__ crossTermEnergies,
+    mixed* __restrict__ groupUnscaledEnergies,
     unsigned long long* __restrict__ forceBuffer,
     int paddedNumAtoms,
     float globalScalingFactor,
@@ -3500,6 +3501,11 @@ extern "C" __global__ void computeCrossTermGBEnergy(
 
     // Accumulate scaled cross-term energy
     atomicAdd(&crossTermEnergies[groupIdx], energy * scale);
+    // Alchemical reweighting needs this term at scale-0 states, where it
+    // cannot be recovered by dividing the scaled value out.
+    if (groupUnscaledEnergies != 0)
+        atomicAdd(&groupUnscaledEnergies[groupIdx],
+                  (mixed) (energy * globalScalingFactor));
 
     // Accumulate forces
     atomicAdd(&forceBuffer[particleIdx_lig], static_cast<unsigned long long>((long long)(force_lig.x * 0x100000000)));
