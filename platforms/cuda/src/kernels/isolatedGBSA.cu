@@ -15,16 +15,25 @@
 #include "include/GridInterpolation.cuh"
 
 /**
- * Alchemical gate: below this a group is off and its work is skipped. The
- * schedule's sigmoid bottoms out near 1e-22 rather than exact zero, so an
- * equality test would never fire. This replaced a 0.05 threshold that
- * discarded up to 22 kJ/mol of receptor desolvation: below it the receptor
- * Born radii fell back to apo values, so the desolvation subtraction
- * collapsed to zero while the rest of the force was still scaled normally,
- * leaving sub-threshold states on a different Hamiltonian than u_kln assumed.
+ * Alchemical gate REMOVED (set to 0 so `scale < ALCHEMICAL_GATE` never fires).
+ * History: 0.05 -> 1e-8 -> 0.
+ *
+ * The gate skipped a group's receptor-GB work when its scale fell below the
+ * threshold, to save the (negligible) scaled contribution. But skipping the
+ * group also skipped populating its UNSCALED cross/mirror accumulation, so
+ * getParticleGroupUnscaledEnergies() -- the scale=1 value MBAR reweights --
+ * returned a cross/mirror-free (ligand-self-only) result for every state whose
+ * group scale sat below the threshold. In the grid CD schedule the OBC_RL_grid
+ * scale is a sigmoid pinned near 1e-22 until alpha~0.35, so ~38% of states were
+ * corrupted -> a ~250 kJ cliff in the stored OBC_RL -> MBAR overlap failure.
+ *
+ * Removing the gate computes every group unconditionally, so the unscaled
+ * accumulation is always populated. Group scale is always >= 0 and the schedule
+ * floors near 1e-22 (never exactly 0), so the /groupScale unscaled recovery
+ * stays finite. The compute saved was negligible.
  */
 #ifndef ALCHEMICAL_GATE
-#define ALCHEMICAL_GATE 1e-8f
+#define ALCHEMICAL_GATE 0.0f
 #endif
 
 // Physical constants
